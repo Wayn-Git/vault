@@ -88,6 +88,20 @@ class MemoryStore:
         ).fetchall()
         return [_row(r) for r in rows]
 
+    def holds(self, fact: str) -> bool:
+        """Whether this exact fact is already live, ignoring case and padding.
+
+        The extraction prompt asks the model not to restate what it already
+        holds, and duplicates are its documented main failure mode. A prompt is
+        the wrong place to enforce that on its own.
+        """
+        row = self.conn.execute(
+            "SELECT 1 FROM memories WHERE superseded_at IS NULL"
+            " AND lower(trim(fact)) = lower(trim(?)) LIMIT 1",
+            (fact,),
+        ).fetchone()
+        return row is not None
+
     def get_many(self, memory_ids: list[int]) -> list[Memory]:
         if not memory_ids:
             return []

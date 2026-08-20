@@ -132,6 +132,12 @@ class MemoryService:
         """
         if not self.store.is_enabled(conversation_id):
             return []
+        if not self.store.live(1):
+            # Nothing to recall, so nothing to embed a query against. Without
+            # this an empty store still cost a round trip to the embedding
+            # server on every single turn -- and the full retry budget when that
+            # server is not running, which is the common case before first use.
+            return []
 
         by_id: dict[int, Memory] = {m.id: m for m in self.store.recent(RECENCY_DAYS, RECENCY_LIMIT)}
 
@@ -198,14 +204,25 @@ class MemoryService:
         )
 
         diff = parse_diff(response.text or "", known_ids={m.id for m in existing})
-        await self.apply(diff, conversation_id)
-        return diff
+        return await self.apply(diff, conversation_id)
 
-    async def apply(self, diff: MemoryDiff, conversation_id: str | None = None) -> None:
-        """Supersede first, so a correction never briefly reads as both facts."""
+    async def apply(self, diff: MemoryDiff, conversation_id: str | None = None) -> MemoryDiff:
+        """Apply a diff, returning what was actually applied.
+
+        Supersede runs first, so a correction never briefly reads as both facts,
+        and so a fact retired in this same diff does not block its own
+        replacement as a duplicate.
+        """
         self.store.supersede(diff.supersede)
+
+        created: list[str] = []
+        for fact in diff.create:
+            if not self.store.holds(fact) and fact not in created:
+                created.append(fact)
+        diff = MemoryDiff(create=created, supersede=diff.supersede)
+
         if not diff.create:
-            return
+            return diff
 
         embedder = self._resolve_embedder()
         vectors: list[list[float]] = []
@@ -222,3 +239,4 @@ class MemoryService:
             if position < len(vectors):
                 self.store.index(memory_id, vectors[position])
                 self.store.record_embedding_model(embedder.provider, embedder.model)
+        return diff

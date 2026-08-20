@@ -40,6 +40,9 @@ export default function ConfirmModal({ pending, onDecide }) {
   }
 
   const item = pending[pending.length - 1]
+  // The gate refuses to honour a standing preference for a sensitive path, so
+  // offering to store one here would be offering something that does nothing.
+  const sensitive = /sensitive path/i.test(item.reason || '')
 
   return (
     <div className="modal-overlay confirm-overlay">
@@ -53,7 +56,7 @@ export default function ConfirmModal({ pending, onDecide }) {
           </div>
         </div>
 
-        <div className="msg-note msg-note--guard" style={{ marginBottom: 14 }}>
+        <div className={`msg-note ${sensitive ? 'msg-note--error' : 'msg-note--guard'}`} style={{ marginBottom: 14 }}>
           <Icon name="key" size={15} />
           <span>
             <strong className="mono">{item.tool_name}</strong> is a <strong>{item.risk}</strong>-risk operation.
@@ -68,16 +71,29 @@ export default function ConfirmModal({ pending, onDecide }) {
           </div>
         </div>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)', cursor: 'pointer' }}>
+        <label
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16,
+            fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)',
+            cursor: sensitive ? 'not-allowed' : 'pointer',
+          }}
+        >
           <input
             type="checkbox"
-            checked={remember}
+            checked={remember && !sensitive}
             onChange={(e) => setRemember(e.target.checked)}
-            disabled={item.risk === 'high'}
-            style={{ accentColor: 'var(--amber)' }}
+            disabled={sensitive}
+            style={{ accentColor: 'var(--clay)', marginTop: 2 }}
           />
-          Remember this decision
-          {item.risk === 'high' && <span className="mono" style={{ color: 'var(--text-faint)' }}>— standing preferences never silence high-risk or sensitive-path checks</span>}
+          <span>
+            Remember this decision for{' '}
+            <strong className="mono" style={{ color: 'var(--text)' }}>{item.operation_key || item.tool_name}</strong>
+            <span style={{ display: 'block', color: 'var(--text-faint)', marginTop: 3 }}>
+              {sensitive
+                ? 'Not available here: a path like this always asks, and no stored preference can silence it.'
+                : 'The operation key, not the tool name — approving a read-only command does not approve a destructive one.'}
+            </span>
+          </span>
         </label>
 
         <div style={{ display: 'flex', gap: 10 }}>

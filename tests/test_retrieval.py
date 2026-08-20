@@ -197,6 +197,30 @@ async def test_write_file_tool_invalidates_the_index(db, vault):
     assert row["stale"] == 1
 
 
+async def test_edit_file_tool_invalidates_the_index(db, vault):
+    """write_file and delete_file marked the document stale; edit_file did not,
+    so the most common way the agent changes a file left the index claiming
+    content that is no longer on disk -- until an unrelated full re-scan."""
+    from psok.tools.builtin.filesystem import edit_file
+
+    await Indexer(FakeEmbedder(), conn=db).index_vault(vault)
+
+    result = await edit_file(
+        {
+            "path": str(vault / "notes" / "ml.md"),
+            "old_string": "gradient descent",
+            "new_string": "stochastic gradient descent",
+        },
+        ToolContext(workspace_root=str(vault)),
+    )
+    assert not result.is_error
+
+    row = db.execute(
+        "SELECT stale FROM documents WHERE path = ?", (str(vault / "notes" / "ml.md"),)
+    ).fetchone()
+    assert row["stale"] == 1
+
+
 # -------------------------------------------------------------------- search
 
 
@@ -379,3 +403,76 @@ async def test_search_uses_the_model_that_built_the_index(db, vault):
 def test_search_falls_back_to_the_default_when_nothing_is_indexed(db):
     service = SearchService(conn=db)
     assert service.embedder.provider == "ollama"
+
+
+# ------------------------------------------------- retrieval inside the loop
+
+
+class _CapturingClient:
+    """A provider that answers once and keeps the prompt it was given."""
+
+    def __init__(self):
+        self.system_prompts: list[str] = []
+
+    async def complete(self, messages, tools=None, params=None):
+        from psok.runtime.types import ModelResponse
+
+        self.system_prompts.append(messages[0]["content"])
+        return ModelResponse(text="answered")
+
+
+def _scripted_director(monkeypatch, client):
+    import psok.agent.director as director_module
+    from psok.agent.director import Director
+    from psok.runtime.types import Capabilities, ResolvedModel
+    from psok.security.confirmation import ConfirmationService
+    from psok.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(
+        director_module,
+        "resolve",
+        lambda *a, **k: ResolvedModel("f", "f", client, Capabilities(streaming=False)),
+    )
+    return Director(ToolRegistry(ConfirmationService()))
+
+
+async def test_a_turn_injects_indexed_context_into_the_system_prompt(db, vault, monkeypatch):
+    """context_for() existed, was tested, and was documented as pre-fetched into
+    the prompt -- but the loop never called it, so the only way documents ever
+    reached the model was the model deciding to search for them itself."""
+    from psok.db.repositories import ConversationRepository
+
+    embedder = FakeEmbedder()
+    await Indexer(embedder, conn=db).index_vault(vault)
+    monkeypatch.setattr("psok.retrieval.search.Embedder", lambda *a, **k: embedder)
+
+    client = _CapturingClient()
+    director = _scripted_director(monkeypatch, client)
+    cid = ConversationRepository().create("f", "f")
+
+    async for _ in director.run(cid, "what did I write about gradient descent?"):
+        pass
+
+    prompt = client.system_prompts[0]
+    assert "<retrieved_context>" in prompt
+    assert "gradient descent" in prompt
+
+
+async def test_an_empty_index_costs_the_turn_no_retrieval_work(db, monkeypatch):
+    """Skipped before the embedder is ever constructed: a user who has never run
+    `psok index` must not pay a round trip to an embedding server on every turn."""
+    from psok.db.repositories import ConversationRepository
+
+    def explode(*a, **k):
+        raise AssertionError("no embedder should be built for an empty index")
+
+    monkeypatch.setattr("psok.retrieval.search.Embedder", explode)
+
+    client = _CapturingClient()
+    director = _scripted_director(monkeypatch, client)
+    cid = ConversationRepository().create("f", "f")
+
+    async for _ in director.run(cid, "anything at all"):
+        pass
+
+    assert "<retrieved_context>" not in client.system_prompts[0]

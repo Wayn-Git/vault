@@ -24,7 +24,7 @@ This closes Pipali's own documented gap while keeping the part of its design tha
 
 One component, reachable from every tool through the dispatcher, transport-agnostic exactly as in Pipali: it takes a callback, knows nothing about WebSockets or HTTP, and can therefore serve a CLI, a web UI, or a scheduled unattended run identically.
 
-- **"Don't ask again"** persists a skip preference keyed by `operation[:subtype]` — for instance `run_shell_command:read-only` — in `confirmation_preferences`, so approving read-only shell use does not silently approve destructive use.
+- **"Don't ask again"** persists a skip preference keyed by `operation[:subtype]` — for instance `run_shell_command:read-only` — in `confirmation_preferences`, so approving read-only shell use does not silently approve destructive use. The subtype describes what will *actually* happen, not what was asked for: on a machine with no sandbox backend, a sandbox-mode shell command keys as `run_shell_command:direct`, because it runs uncontained and must not inherit a preference the user granted to contained commands.
 - **Timeout is long** (hours, not seconds), because a scheduled background task waiting on confirmation should still be answerable when the user next opens PSOK, not abandoned.
 - **Every decision is logged** to `execution_logs` — auto-approved by risk floor, approved by the user, denied, or skipped by a standing preference — so the audit trail shows not just what ran but why it was allowed to.
 

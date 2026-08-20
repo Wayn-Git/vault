@@ -4,7 +4,7 @@ import { api } from './api.js'
 const AppCtx = createContext(null)
 
 export function AppProvider({ children }) {
-  const [view, setView] = useState('dash')
+  const [view, setView] = useState('chat')
   const [health, setHealth] = useState(null)
   const [healthError, setHealthError] = useState(null)
   const [toasts, setToasts] = useState([])

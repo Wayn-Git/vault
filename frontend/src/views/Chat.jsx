@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import gsap from 'gsap'
 import Icon from '../components/Icon.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
 import ConfirmModal from '../components/ConfirmModal.jsx'
-import CapabilitiesPanel from '../components/CapabilitiesPanel.jsx'
+import PlusMenu from '../components/PlusMenu.jsx'
 import { useApp } from '../store.jsx'
 import { api, fmtDate } from '../api.js'
+
+/* The composer is the interface. Everything else — which skills are live, which
+   connectors it may reach, what it remembers, where it may work — hangs off the
+   + menu beside it, so the surface stays one field and a sentence. */
+
+const FALLBACK_PROVIDER = 'nvidia'
+const FALLBACK_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b'
+
+const OPENERS = [
+  'What am I meant to be doing tomorrow?',
+  'Find where I wrote about the deploy error',
+  'Summarise what changed in this folder today',
+]
 
 let idSeq = 0
 const nextId = () => `item-${++idSeq}`
@@ -42,8 +54,12 @@ function historyToItems(rows) {
   return rows.map((m) => {
     if (m.role === 'user') return { id: nextId(), kind: 'user', text: m.content }
     if (m.role === 'assistant') {
-      const calls = Array.isArray(m.tool_calls) ? m.tool_calls : []
-      return { id: nextId(), kind: 'assistant', text: m.content ?? '', callsRaw: calls }
+      return {
+        id: nextId(),
+        kind: 'assistant',
+        text: m.content ?? '',
+        callsRaw: Array.isArray(m.tool_calls) ? m.tool_calls : [],
+      }
     }
     if (m.role === 'tool') {
       return {
@@ -61,10 +77,11 @@ function historyToItems(rows) {
 
 function Msg({ item }) {
   const role = item.kind
-  const led = role === 'user' ? 'info' : role === 'assistant' ? 'amber' : 'faint'
 
   if (role === 'note') {
-    const cls = item.tone === 'guard' ? 'msg-note--guard' : item.tone === 'error' ? 'msg-note--error' : 'msg-note--warning'
+    const cls = item.tone === 'guard'
+      ? 'msg-note--guard'
+      : item.tone === 'error' ? 'msg-note--error' : 'msg-note--warning'
     return (
       <div className={`msg-note ${cls}`}>
         <span className={`led led--${item.tone === 'guard' ? 'amber' : item.tone === 'error' ? 'bad' : 'info'}`} />
@@ -72,51 +89,70 @@ function Msg({ item }) {
       </div>
     )
   }
+  if (role === 'memory') {
+    return (
+      <div className="msg-note msg-note--warning">
+        <Icon name="spark" size={14} />
+        <span><strong style={{ fontWeight: 500 }}>remembered</strong> — {item.text}</span>
+      </div>
+    )
+  }
   if (role === 'reasoning') {
     return (
       <div className="msg-reasoning">
-        <span className="mono" style={{ fontSize: 10, letterSpacing: '0.18em', color: 'var(--text-faint)' }}>reasoning</span>
+        <span className="mono" style={{ fontSize: 10, letterSpacing: '0.2em', textTransform: 'uppercase' }}>
+          thinking
+        </span>
         <div>{item.text}</div>
       </div>
     )
   }
   if (role === 'tool') {
-    return <ToolCallCard call={{ name: item.name, arguments: item.arguments ?? {}, content: item.content, status: item.isError ? 'error' : 'done' }} running={false} />
+    return (
+      <ToolCallCard
+        call={{
+          name: item.name,
+          arguments: item.arguments ?? {},
+          content: item.content,
+          status: item.isError ? 'error' : 'done',
+        }}
+        running={false}
+      />
+    )
   }
   if (role === 'assistant') {
     return (
       <div className="msg msg-assistant">
-        <div className="msg-role"><span className={`led led--${led}`} /> psok</div>
+        <div className="msg-role"><span className="led led--amber" /> psok</div>
         {item.text && <div className="msg-body">{item.text}</div>}
-        {item.toolCalls?.map((c, i) => (
-          <ToolCallCard key={i} call={c} running={false} />
-        ))}
+        {item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
       </div>
     )
   }
   return (
     <div className="msg msg-user">
-      <div className="msg-role"><span className={`led led--${led}`} /> you</div>
+      <div className="msg-role">you</div>
       <div className="msg-body">{item.text}</div>
     </div>
   )
 }
 
 export default function Chat() {
-  const { health, toast } = useApp()
+  const { health, refreshHealth, setView, toast } = useApp()
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [items, setItems] = useState([])
   const [turnState, setTurnState] = useState('idle')
+  const [stopping, setStopping] = useState(false)
   const [liveTool, setLiveTool] = useState(null)
   const [liveBuffer, setLiveBuffer] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
   const [pending, setPending] = useState([])
-  const [showNew, setShowNew] = useState(false)
-  const [draft, setDraft] = useState({ provider: '', model: 'default' })
   const [workspace, setWorkspace] = useState('')
   const [input, setInput] = useState('')
-  const [capsOpen, setCapsOpen] = useState(false)
+  const [plusOpen, setPlusOpen] = useState(false)
+  const [modelOpen, setModelOpen] = useState(false)
+  const [draft, setDraft] = useState({ provider: '', model: '' })
   const [acItems, setAcItems] = useState([])
   const [acIndex, setAcIndex] = useState(0)
 
@@ -126,37 +162,36 @@ export default function Chat() {
   const acTimerRef = useRef(null)
   const liveRef = useRef({ buffer: '', reasoning: '', tool: null })
 
-  const setBuffer = useCallback((t) => {
-    liveRef.current.buffer = t
-    setLiveBuffer(t)
-  }, [])
-  const setTool = useCallback((t) => {
-    liveRef.current.tool = t
-    setLiveTool(t)
-  }, [])
-  const setReasoning = useCallback((t) => {
-    liveRef.current.reasoning = t
-    setLiveReasoning(t)
-  }, [])
+  const providers = health?.providers ?? []
+  const defaults = health?.provider_defaults ?? {}
+  const active = conversations.find((c) => c.id === activeId)
+
+  // What to use when nothing has been chosen: the house default if this machine
+  // has it configured, otherwise whatever it does have.
+  const fallbackProvider = providers.includes(FALLBACK_PROVIDER) ? FALLBACK_PROVIDER : providers[0]
+  const draftProvider = draft.provider || fallbackProvider || ''
+  const draftModel =
+    draft.model || defaults[draftProvider] || (draftProvider === FALLBACK_PROVIDER ? FALLBACK_MODEL : '')
+
+  const setBuffer = useCallback((t) => { liveRef.current.buffer = t; setLiveBuffer(t) }, [])
+  const setTool = useCallback((t) => { liveRef.current.tool = t; setLiveTool(t) }, [])
+  const setReasoning = useCallback((t) => { liveRef.current.reasoning = t; setLiveReasoning(t) }, [])
 
   const refreshConvs = useCallback(async () => {
-    try {
-      setConversations(await api.conversations())
-    } catch (err) {
-      toast(`Conversations: ${err.message}`, 'bad')
-    }
+    try { setConversations(await api.conversations()) } catch (err) { toast(err.message, 'bad') }
   }, [toast])
 
-  useEffect(() => {
-    refreshConvs()
-  }, [refreshConvs])
+  useEffect(() => { refreshConvs() }, [refreshConvs])
+
+  // Prompts arrive on the stream; this one fetch recovers anything a reload left
+  // suspended, since the turn survives the page and the stream does not.
+  useEffect(() => { api.confirmations().then(setPending).catch(() => {}) }, [])
 
   const loadMessages = useCallback(async (cid) => {
     try {
-      const rows = await api.messages(cid)
-      setItems(historyToItems(rows))
+      setItems(historyToItems(await api.messages(cid)))
     } catch (err) {
-      toast(`Messages: ${err.message}`, 'bad')
+      toast(err.message, 'bad')
       setItems([])
     }
   }, [toast])
@@ -167,13 +202,17 @@ export default function Chat() {
     loadMessages(cid)
   }, [turnState, loadMessages])
 
+  const startFresh = useCallback(() => {
+    if (turnState !== 'idle') return
+    setActiveId(null)
+    setItems([])
+    setInput('')
+  }, [turnState])
+
   const pushAssistant = useCallback(() => {
     const { buffer, reasoning } = liveRef.current
     if (buffer || reasoning) {
-      setItems((prev) => [
-        ...prev,
-        { id: nextId(), kind: 'assistant', text: buffer, callsRaw: [] },
-      ])
+      setItems((prev) => [...prev, { id: nextId(), kind: 'assistant', text: buffer, callsRaw: [] }])
       setBuffer('')
     }
     if (reasoning) {
@@ -189,59 +228,75 @@ export default function Chat() {
 
   const finish = useCallback(async (cid) => {
     setTurnState('idle')
+    setStopping(false)
     setBuffer('')
     setReasoning('')
     setTool(null)
     setPending([])
     await loadMessages(cid)
     refreshConvs()
-  }, [loadMessages, refreshConvs, setBuffer, setReasoning, setTool])
+    // A turn is when connectors reconcile, so the tool count and any connector
+    // failure only become knowable once one has run.
+    refreshHealth()
+  }, [loadMessages, refreshConvs, refreshHealth, setBuffer, setReasoning, setTool])
 
   const onEvent = useCallback((evt) => {
     switch (evt.type) {
-      case 'assistant_delta': {
+      case 'assistant_delta':
         liveRef.current.buffer += evt.text ?? ''
         setBuffer(liveRef.current.buffer)
         break
-      }
-      case 'reasoning_delta': {
+      case 'reasoning_delta':
         liveRef.current.reasoning += evt.text ?? ''
         setReasoning(liveRef.current.reasoning)
         break
-      }
-      case 'assistant_text': {
+      case 'assistant_text':
         setBuffer(evt.text ?? '')
         break
-      }
-      case 'tool_call': {
+      case 'tool_call':
         pushAssistant()
         setTool({ name: evt.name, arguments: evt.arguments ?? {}, status: 'running' })
         break
-      }
       case 'tool_result': {
         const t = liveRef.current.tool
-        if (t) {
-          setItems((prev) => [...prev, { id: nextId(), kind: 'tool', name: t.name, arguments: t.arguments, content: evt.content ?? '', isError: Boolean(evt.is_error) }])
-          setTool(null)
-        } else {
-          setItems((prev) => [...prev, { id: nextId(), kind: 'tool', name: evt.name, arguments: {}, content: evt.content ?? '', isError: Boolean(evt.is_error) }])
-        }
+        setItems((prev) => [...prev, {
+          id: nextId(),
+          kind: 'tool',
+          name: t?.name ?? evt.name,
+          arguments: t?.arguments ?? {},
+          content: evt.content ?? '',
+          isError: Boolean(evt.is_error),
+        }])
+        setTool(null)
         break
       }
-      case 'done':
-        pushAssistant()
+      case 'confirmation_required':
+        // The turn is suspended until this is answered. The frame carries the
+        // request id, which polling cannot supply unambiguously when two calls
+        // to the same tool are pending.
+        setPending((p) => (p.some((x) => x.id === evt.request_id) ? p : [...p, {
+          id: evt.request_id,
+          tool_name: evt.tool_name,
+          operation_key: evt.operation_key,
+          risk: evt.risk,
+          reason: evt.reason,
+          arguments: evt.arguments ?? {},
+        }]))
         break
-      case 'guard':
-        pushNote('guard', evt.reason)
+      case 'memory': {
+        const created = evt.created ?? []
+        const superseded = evt.superseded ?? []
+        const parts = []
+        if (created.length) parts.push(created.join(' · '))
+        if (superseded.length) parts.push(`${superseded.length} retired`)
+        setItems((prev) => [...prev, { id: nextId(), kind: 'memory', text: parts.join(' — ') }])
         break
-      case 'error':
-        pushNote('error', evt.message)
-        break
-      case 'warning':
-        pushNote('warning', evt.message)
-        break
-      default:
-        break
+      }
+      case 'done': pushAssistant(); break
+      case 'guard': pushNote('guard', evt.reason); break
+      case 'error': pushNote('error', evt.message); break
+      case 'warning': pushNote('warning', evt.message); break
+      default: break
     }
   }, [pushAssistant, pushNote, setBuffer, setReasoning, setTool])
 
@@ -259,11 +314,8 @@ export default function Chat() {
         signal: controller.signal,
       })
     } catch (err) {
-      if (err.name === 'AbortError') {
-        pushNote('warning', 'Turn stopped by the user.')
-      } else {
-        pushNote('error', err.message)
-      }
+      if (err.name === 'AbortError') pushNote('warning', 'Stopped.')
+      else pushNote('error', err.message)
     } finally {
       finish(cid)
     }
@@ -278,22 +330,45 @@ export default function Chat() {
     let cid = activeId
     try {
       if (!cid) {
-        const provider = draft.provider || health?.providers?.[0] || 'ollama'
-        const { id } = await api.createConversation(provider, draft.model || 'default', message.slice(0, 56))
+        if (!draftProvider) { toast('No provider is configured in providers.yaml', 'bad'); return }
+        const { id } = await api.createConversation(
+          draftProvider,
+          draftModel || 'default',
+          message.slice(0, 56),
+        )
         cid = id
         setActiveId(id)
         refreshConvs()
-        setShowNew(false)
       }
       await openTurn(cid, message)
     } catch (err) {
-      toast(`Could not start turn: ${err.message}`, 'bad')
+      toast(err.message, 'bad')
     }
-  }, [input, turnState, activeId, draft, health, refreshConvs, openTurn, toast])
+  }, [input, turnState, activeId, draftProvider, draftModel, refreshConvs, openTurn, toast])
 
-  const stop = useCallback(() => {
-    abortRef.current?.abort()
-  }, [])
+  const stop = useCallback(async () => {
+    if (!activeId) { abortRef.current?.abort(); return }
+    setStopping(true)
+    try {
+      // The server stops the loop; the stream then ends with a guard frame of
+      // its own accord. Aborting the read here would leave it running.
+      await api.stopTurn(activeId)
+    } catch (err) {
+      toast(err.message, 'bad')
+      abortRef.current?.abort()
+    }
+  }, [activeId, toast])
+
+  const applyModel = useCallback(async (patch) => {
+    if (!activeId) { setDraft((d) => ({ ...d, ...patch })); return }
+    try {
+      await api.updateConversation(activeId, patch)
+      await refreshConvs()
+    } catch (err) {
+      toast(err.message, 'bad')
+      refreshConvs()
+    }
+  }, [activeId, refreshConvs, toast])
 
   const runAc = useCallback((value, cid) => {
     const m = value.match(/\/[\w-]{1,}$/)
@@ -301,8 +376,7 @@ export default function Chat() {
     clearTimeout(acTimerRef.current)
     acTimerRef.current = setTimeout(async () => {
       try {
-        const items = await api.skillSearch(m[0].slice(1), cid)
-        setAcItems(items.slice(0, 8))
+        setAcItems((await api.skillSearch(m[0].slice(1), cid)).slice(0, 6))
         setAcIndex(0)
       } catch { setAcItems([]) }
     }, 160)
@@ -311,104 +385,202 @@ export default function Chat() {
   const acceptAc = useCallback((item) => {
     const m = input.match(/\/[\w-]*$/)
     const start = m ? m.index : input.length
-    const prefix = input.slice(0, start)
-    const newVal = prefix + '/' + item.name + ' '
-    setInput(newVal)
+    setInput(input.slice(0, start) + '/' + item.name + ' ')
     setAcItems([])
-    if (textareaRef.current) textareaRef.current.focus()
+    textareaRef.current?.focus()
   }, [input])
 
-  useEffect(() => {
-    if (turnState !== 'running') return undefined
-    const poll = setInterval(async () => {
-      try {
-        const list = await api.confirmations()
-        setPending(list)
-      } catch { /* transient */ }
-    }, 1200)
-    return () => clearInterval(poll)
-  }, [turnState])
-
-  const onDecide = useCallback((id) => {
-    setPending((p) => p.filter((x) => x.id !== id))
-  }, [])
+  const onDecide = useCallback((id) => setPending((p) => p.filter((x) => x.id !== id)), [])
 
   const rendered = buildRendered(items)
   const streamingAssistant = turnState === 'running' && !liveTool && (liveBuffer || liveReasoning)
+  const isEmpty = rendered.length === 0 && !streamingAssistant && turnState === 'idle'
+  const connectorErrors = Object.entries(health?.connector_errors ?? {})
+  const shownModel = (active?.model ?? draftModel ?? '').split('/').pop() || 'no model'
 
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    if (turnState === 'running') {
-      el.scrollTop = el.scrollHeight
-    } else {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    }
-  }, [rendered.length, turnState, liveTool, items])
+    el.scrollTo({ top: el.scrollHeight, behavior: turnState === 'running' ? 'auto' : 'smooth' })
+  }, [rendered.length, turnState, liveTool, liveBuffer])
 
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const last = el.querySelector('.chat-stream > :last-child')
-    if (!last) return
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    const tween = gsap.from(last, { autoAlpha: 0, y: 10, duration: 0.3, ease: 'power2.out' })
-    return () => { tween.kill() }
-  }, [rendered.length])
+  const composer = (
+    <div className={`composer-wrap${isEmpty ? ' composer-wrap--hero' : ''}`}>
+      {plusOpen && (
+        <PlusMenu
+          conversationId={activeId}
+          workspace={workspace}
+          onWorkspace={setWorkspace}
+          onNavigate={setView}
+          onClose={() => setPlusOpen(false)}
+        />
+      )}
 
-  const active = conversations.find((c) => c.id === activeId)
-  const providers = health?.providers ?? []
+      {acItems.length > 0 && (
+        <div className="ac-menu">
+          {acItems.map((item, i) => (
+            <button
+              key={item.name}
+              type="button"
+              className={`ac-item${i === acIndex ? ' active' : ''}`}
+              onMouseEnter={() => setAcIndex(i)}
+              onClick={() => acceptAc(item)}
+            >
+              <span className="ac-name">/{item.name}</span>
+              <span className="ac-desc">{item.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {modelOpen && (
+        <div className="plus-menu" style={{ left: 'auto', right: 26, width: 320 }}>
+          <div className="plus-head">model · {activeId ? 'this conversation' : 'for the next one'}</div>
+          <div style={{ padding: '4px 11px 12px', display: 'grid', gap: 10 }}>
+            <div className="field">
+              <label htmlFor="mdl-provider">provider</label>
+              <select
+                id="mdl-provider"
+                value={active?.provider ?? draftProvider}
+                onChange={(e) => {
+                  const provider = e.target.value
+                  applyModel({ provider, ...(defaults[provider] ? { model: defaults[provider] } : {}) })
+                }}
+              >
+                {providers.length === 0 && <option value="">none configured</option>}
+                {providers.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="mdl-model">model</label>
+              <input
+                id="mdl-model"
+                key={`${activeId ?? 'draft'}-${active?.model ?? draftModel}`}
+                defaultValue={active?.model ?? draftModel}
+                onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }}
+                onBlur={(e) => {
+                  const model = e.target.value.trim()
+                  if (model && model !== (active?.model ?? draftModel)) applyModel({ model })
+                }}
+              />
+              <span className="hint">Resolved fresh every turn — switching mid-conversation is this write.</span>
+            </div>
+            <button type="button" className="btn btn--small" onClick={() => setModelOpen(false)}>Done</button>
+          </div>
+        </div>
+      )}
+
+      <div className="composer">
+        <div className="composer-core">
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={input}
+            placeholder={turnState === 'running' ? 'Working…' : 'Ask for anything on this machine'}
+            disabled={turnState === 'running'}
+            onChange={(e) => {
+              setInput(e.target.value)
+              runAc(e.target.value, activeId)
+              e.target.style.height = 'auto'
+              e.target.style.height = `${Math.min(e.target.scrollHeight, 220)}px`
+            }}
+            onKeyDown={(e) => {
+              if (acItems.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault()
+                setAcIndex((i) => (i + (e.key === 'ArrowDown' ? 1 : acItems.length - 1)) % acItems.length)
+                return
+              }
+              if (acItems.length && (e.key === 'Enter' || e.key === 'Tab')) {
+                e.preventDefault()
+                acceptAc(acItems[acIndex])
+                return
+              }
+              if (acItems.length && e.key === 'Escape') { setAcItems([]); return }
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+            }}
+          />
+          <div className="composer-bar">
+            <button
+              type="button"
+              className={`composer-chip${plusOpen ? ' active' : ''}`}
+              onClick={() => { setPlusOpen((o) => !o); setModelOpen(false) }}
+              title="Skills, connectors, memory, workspace"
+              aria-label="Skills, connectors, memory, workspace"
+            >
+              <Icon name="plus" size={15} />
+            </button>
+            <button
+              type="button"
+              className={`composer-chip${modelOpen ? ' active' : ''}`}
+              onClick={() => { setModelOpen((o) => !o); setPlusOpen(false) }}
+              title="Provider and model"
+            >
+              {shownModel}
+              <Icon name="chevron" size={11} style={{ transform: 'rotate(-90deg)', opacity: 0.6 }} />
+            </button>
+            <div className="composer-bar-right">
+              {turnState === 'running' ? (
+                <button
+                  type="button"
+                  className="composer-send composer-send--stop"
+                  onClick={stop}
+                  disabled={stopping}
+                  title="Stop this turn on the server"
+                  aria-label="Stop"
+                >
+                  <Icon name="stop" size={13} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="composer-send"
+                  onClick={send}
+                  disabled={!input.trim()}
+                  title="Send — Enter"
+                  aria-label="Send"
+                >
+                  <Icon name="send" size={14} />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="composer-hint">
+        <span>enter sends</span>
+        <span>shift + enter for a new line</span>
+        <span>/name engages a skill</span>
+        <span>writes and shell commands ask first</span>
+      </div>
+    </div>
+  )
 
   return (
     <div className="view view--flush">
       <div className="chat-layout">
         <aside className="chat-side">
           <div className="chat-side-head">
-            <button type="button" className="chat-new" onClick={() => setShowNew((s) => !s)}>
-              <Icon name="plus" size={15} /> New conversation
+            <button
+              type="button"
+              className="chat-new"
+              onClick={startFresh}
+              disabled={turnState !== 'idle'}
+            >
+              <Icon name="plus" size={14} /> New conversation
             </button>
-            {showNew && (
-              <div className="card card-pad" style={{ padding: 14, display: 'grid', gap: 10 }}>
-                <div className="field">
-                  <label htmlFor="nc-provider">provider</label>
-                  <select
-                    id="nc-provider"
-                    value={draft.provider || providers[0] || ''}
-                    onChange={(e) => setDraft((d) => ({ ...d, provider: e.target.value }))}
-                  >
-                    {providers.length === 0 && <option value="">no providers found</option>}
-                    {providers.map((p) => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="nc-model">model</label>
-                  <input
-                    id="nc-model"
-                    value={draft.model}
-                    onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-                    placeholder="default"
-                  />
-                </div>
-                <button type="button" className="btn btn--primary" onClick={send} disabled={turnState !== 'idle' || !input.trim()}>
-                  Create & send
-                </button>
-              </div>
-            )}
           </div>
           <div className="chat-convs">
-            {conversations.length === 0 && (
-              <div className="empty-state" style={{ padding: 30 }}>
-                <Icon name="chat" size={20} />
-                No conversations yet.
-              </div>
-            )}
             {conversations.map((c) => (
-              <button key={c.id} type="button" className={`chat-conv${c.id === activeId ? ' active' : ''}`} onClick={() => selectConversation(c.id)}>
-                <span className="chat-conv-title">{c.title || 'new conversation'}</span>
+              <button
+                key={c.id}
+                type="button"
+                className={`chat-conv${c.id === activeId ? ' active' : ''}`}
+                onClick={() => selectConversation(c.id)}
+              >
+                <span className="chat-conv-title">{c.title || 'untitled'}</span>
                 <span className="chat-conv-meta">
-                  <span>{c.provider}</span>·<span>{c.model}</span>
+                  <span>{c.model?.split('/').pop() ?? c.provider}</span>
                   <span style={{ marginLeft: 'auto' }}>{fmtDate(c.updated_at)}</span>
                 </span>
               </button>
@@ -417,153 +589,70 @@ export default function Chat() {
         </aside>
 
         <div className="chat-main">
-          <div className="chat-scroll" ref={scrollRef}>
-            <div className="chat-stream">
-              {rendered.length === 0 && !streamingAssistant && (
-                <div className="empty-state" style={{ paddingTop: 70 }}>
-                  <span className={`led led--amber led--pulse`} />
-                  <div>
-                    <div style={{ fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--text)' }}>Agent ready</div>
-                    <div style={{ maxWidth: 340 }}>
-                      Ask for anything — create tasks, check your calendar, read and edit files,
-                      search notes, run shell commands. Sensitive operations will ask you first.
-                    </div>
-                  </div>
-                </div>
-              )}
-              {rendered.map((item) => (
-                <Msg key={item.id} item={item} />
-              ))}
-              {streamingAssistant && (
-                <div className="msg msg-assistant">
-                  <div className="msg-role"><span className="led led--amber led--pulse" /> psok</div>
-                  {liveReasoning && (
-                    <div className="msg-reasoning">{liveReasoning}</div>
-                  )}
-                  <div className="msg-body" style={{ color: 'var(--text-dim)' }}>
-                    {liveBuffer}
-                    <span className="tele-cursor" />
-                  </div>
-                </div>
-              )}
-              {turnState === 'running' && liveTool && (
-                <ToolCallCard call={liveTool} running />
-              )}
-              {turnState === 'running' && !liveTool && !streamingAssistant && (
-                <div className="msg-note msg-note--guard">
-                  <span className="led led--amber led--pulse" /> thinking…
-                </div>
-              )}
+          {connectorErrors.length > 0 && (
+            <div className="msg-note msg-note--error" style={{ margin: '14px 26px 0' }}>
+              <Icon name="plug" size={14} />
+              <span>
+                {connectorErrors.map(([name, err]) => `${name}: ${String(err).slice(0, 90)}`).join(' · ')}
+                {' '}— its tools are not reaching the agent.
+              </span>
             </div>
-          </div>
+          )}
 
-          <div className="model-strip">
-            {active ? (
-              <>
-                <span className="badge badge--amber">{active.provider} · {active.model}</span>
-                <span className="mono">{conversations.findIndex((c) => c.id === activeId) + 1} of {conversations.length}</span>
-              </>
-            ) : (
-              <span className="badge">no conversation — sending will create one</span>
-            )}
-            <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="mono">workspace</span>
-              <input
-                value={workspace}
-                onChange={(e) => setWorkspace(e.target.value)}
-                placeholder="~ (backend cwd)"
-                style={{
-                  background: 'var(--bg-sunken)', border: '1px solid var(--line)', borderRadius: 4,
-                  padding: '3px 8px', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', width: 200,
-                }}
-              />
-            </span>
-          </div>
-
-          <div className="composer-wrap">
-            {acItems.length > 0 && (
-              <div className="ac-menu">
-                {acItems.map((item, i) => (
-                  <button
-                    key={item.name}
-                    type="button"
-                    className={`ac-item${i === acIndex ? ' active' : ''}`}
-                    onMouseEnter={() => setAcIndex(i)}
-                    onClick={() => acceptAc(item)}
-                  >
-                    <span className="ac-name">/{item.name}</span>
-                    <span className="ac-desc">{item.description}</span>
-                  </button>
-                ))}
+          {isEmpty ? (
+            <>
+              <div className="hero">
+                <span className="hero-mark"><Icon name="spark" size={30} /></span>
+                <h1>What shall we get done?</h1>
+                <p className="hero-sub">
+                  Files, shell, tasks, calendar, your notes and anything you have connected —
+                  one agent, on this machine. Nothing irreversible happens without your say-so.
+                </p>
+                <div className="hero-hints">
+                  {OPENERS.map((o) => (
+                    <button
+                      key={o}
+                      type="button"
+                      className="hero-hint"
+                      onClick={() => { setInput(o); textareaRef.current?.focus() }}
+                    >
+                      {o}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-            <div className="composer">
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => setCapsOpen(true)}
-                title="Skills & connectors"
-                aria-label="Skills and connectors"
-              >
-                <Icon name="plus" size={17} />
-              </button>
-              <textarea
-                ref={textareaRef}
-                rows={1}
-                value={input}
-                placeholder={turnState === 'running' ? 'Turn in progress…' : 'Message PSOK — type / to invoke a skill'}
-                onChange={(e) => {
-                  setInput(e.target.value)
-                  runAc(e.target.value, activeId)
-                  const el = e.target
-                  el.style.height = 'auto'
-                  el.style.height = `${Math.min(el.scrollHeight, 180)}px`
-                }}
-                onKeyDown={(e) => {
-                  if (acItems.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-                    e.preventDefault()
-                    setAcIndex((i) => (i + (e.key === 'ArrowDown' ? 1 : acItems.length - 1)) % acItems.length)
-                    return
-                  }
-                  if (acItems.length && (e.key === 'Enter' || e.key === 'Tab')) {
-                    e.preventDefault()
-                    acceptAc(acItems[acIndex])
-                    return
-                  }
-                  if (acItems.length && e.key === 'Escape') {
-                    setAcItems([])
-                    return
-                  }
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    send()
-                  }
-                }}
-                disabled={turnState === 'running'}
-              />
-              {turnState === 'running' ? (
-                <button type="button" className="btn btn--danger" onClick={stop} title="Stop the turn">
-                  <Icon name="stop" size={16} />
-                </button>
-              ) : (
-                <button type="button" className="btn btn--primary" onClick={send} disabled={!input.trim()} title="Send (Enter)">
-                  <Icon name="send" size={16} />
-                </button>
-              )}
-            </div>
-            <div className="composer-hint">
-              <span>enter = send</span>
-              <span>shift+enter = newline</span>
-              <span>/name = invoke a skill</span>
-              <span>+ = skills &amp; connectors</span>
-              <span>medium/high-risk tools pause for your approval</span>
-            </div>
-          </div>
+              {composer}
+            </>
+          ) : (
+            <>
+              <div className="chat-scroll" ref={scrollRef}>
+                <div className="chat-stream">
+                  {rendered.map((item) => <Msg key={item.id} item={item} />)}
+                  {streamingAssistant && (
+                    <div className="msg msg-assistant">
+                      <div className="msg-role"><span className="led led--amber led--pulse" /> psok</div>
+                      {liveReasoning && <div className="msg-reasoning">{liveReasoning}</div>}
+                      <div className="msg-body">
+                        {liveBuffer}
+                        <span className="tele-cursor" />
+                      </div>
+                    </div>
+                  )}
+                  {turnState === 'running' && liveTool && <ToolCallCard call={liveTool} running />}
+                  {turnState === 'running' && !liveTool && !streamingAssistant && (
+                    <div className="msg-note msg-note--guard">
+                      <span className="led led--amber led--pulse" /> thinking
+                    </div>
+                  )}
+                </div>
+              </div>
+              {composer}
+            </>
+          )}
         </div>
       </div>
 
       <ConfirmModal pending={pending} onDecide={onDecide} />
-      {capsOpen && <CapabilitiesPanel conversationId={activeId} onClose={() => setCapsOpen(false)} />}
     </div>
   )
 }

@@ -41,7 +41,7 @@ export default function Logs() {
         <header className="vheader" data-enter>
           <div>
             <div className="vheader-eyebrow">
-              <span className="led led--amber" /> sys / audit
+              <span className="led led--amber" /> activity
             </div>
             <h1>Execution log</h1>
             <div className="vheader-sub">
@@ -62,14 +62,14 @@ export default function Logs() {
             onChange={(e) => setFilter(e.target.value)}
             placeholder="filter logs…"
             style={{
-              background: 'var(--bg-sunken)', border: '1px solid var(--line)', borderRadius: 6,
+              background: 'var(--canvas-deep)', border: '1px solid var(--hairline)', borderRadius: 6,
               padding: '7px 12px', fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text)', width: 220,
             }}
           />
           <select
             value={limit}
             onChange={(e) => { setLimit(Number(e.target.value)); load(Number(e.target.value)) }}
-            style={{ background: 'var(--bg-sunken)', border: '1px solid var(--line)', borderRadius: 6, padding: '7px 10px', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+            style={{ background: 'var(--canvas-deep)', border: '1px solid var(--hairline)', borderRadius: 6, padding: '7px 10px', fontFamily: 'var(--font-mono)', fontSize: 12 }}
           >
             <option value={50}>last 50</option>
             <option value={100}>last 100</option>
@@ -107,7 +107,7 @@ export default function Logs() {
                   <tr key={l.id}>
                     <td style={{ whiteSpace: 'nowrap', color: 'var(--text-faint)' }}>{fmtTime(l.created_at)}</td>
                     <td>
-                      <span style={{ color: 'var(--amber)' }}>{l.tool_name}</span>
+                      <span style={{ color: 'var(--clay)' }}>{l.tool_name}</span>
                       {l.tool_source === 'mcp' && <span className="badge" style={{ marginLeft: 6 }}>mcp</span>}
                     </td>
                     <td style={{ color: 'var(--text-faint)' }}>{l.tool_source}</td>
@@ -118,7 +118,7 @@ export default function Logs() {
                     </td>
                     <td style={{ color: 'var(--text-dim)' }}>
                       {l.confirmation_decision === 'denied' || l.confirmation_decision === 'denied_by_pref'
-                        ? <span style={{ color: 'var(--bad)' }}>{l.confirmation_decision}</span>
+                        ? <span style={{ color: 'var(--rust)' }}>{l.confirmation_decision}</span>
                         : l.confirmation_decision}
                     </td>
                     <td style={{ color: 'var(--text-faint)' }}>{l.duration_ms ?? '—'}</td>

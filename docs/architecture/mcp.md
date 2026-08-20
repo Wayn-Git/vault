@@ -57,6 +57,8 @@ mcpServers:
 
 `${VAR}` interpolation resolves from environment variables or, for anything secret-shaped, a keychain reference resolved at connection time — never a literal secret in this file.
 
+**Credentials a server takes through its environment** follow the same rule as every other secret: an `env` value written as `keychain:<ref>` is resolved from the OS keychain when the server is spawned, so `mcp.yaml` holds the reference and never the value ([ADR-0012](decisions/0012-credential-storage.md)). `psok mcp env <server> KEY=VALUE --secret` writes both halves.
+
 ## Discovery, namespacing, and execution
 
 1. On startup (for servers marked to start eagerly) or on first use (lazily, for the rest), PSOK connects using the transport-appropriate client, applying SSRF checks for URL transports.

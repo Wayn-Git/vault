@@ -29,7 +29,7 @@ function OauthClientForm({ server, onDone }) {
   }
 
   return (
-    <div style={{ display: 'grid', gap: 8, padding: '8px 14px 14px', borderTop: '1px dashed var(--line)' }}>
+    <div style={{ display: 'grid', gap: 8, padding: '8px 14px 14px', borderTop: '1px dashed var(--hairline)' }}>
       <div className="field-row">
         <div className="field">
           <label>client id</label>
@@ -47,7 +47,7 @@ function OauthClientForm({ server, onDone }) {
   )
 }
 
-function ServerRow({ server, onChanged }) {
+function ServerRow({ server, live, onChanged }) {
   const { toast } = useApp()
   const [busy, setBusy] = useState('')
   const [showOauth, setShowOauth] = useState(false)
@@ -64,6 +64,11 @@ function ServerRow({ server, onChanged }) {
         const r = await api.mcpConnect(server.name)
         if (r.error) toast(`${server.name}: ${r.error}`, 'bad')
         else toast(`Connected ${server.name} — ${r.tools} tool${r.tools === 1 ? '' : 's'}`, 'ok')
+      } else if (action === 'switch') {
+        // The agent reaches a connector only while it is switched on, and the
+        // API starts it at the beginning of the next turn.
+        await api.toggleCapability('connector', server.name, !live, null)
+        toast(`${server.name} switched ${live ? 'off' : 'on'}`, 'ok')
       } else if (action === 'login') {
         const r = await api.mcpLogin(server.name)
         if (r.authorized) toast(`Authorized ${server.name}`, 'ok')
@@ -87,7 +92,7 @@ function ServerRow({ server, onChanged }) {
 
   return (
     <div className="server-row">
-      <span className={`led led--${server.enabled ? 'ok' : 'faint'}`} />
+      <span className={`led led--${live ? 'ok' : 'faint'}`} />
       <div style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="server-name">{server.name}</span>
@@ -98,8 +103,23 @@ function ServerRow({ server, onChanged }) {
         <div className="server-target">{server.target || '—'}</div>
       </div>
       <div className="server-actions">
-        <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => act('connect')}>
-          {busy === 'connect' ? 'Connecting…' : 'Connect'}
+        <button
+          type="button"
+          className={`btn btn--small${live ? ' btn--primary' : ' btn--ghost'}`}
+          disabled={busy !== ''}
+          onClick={() => act('switch')}
+          title={live ? 'Switched on — the agent can use its tools' : 'Switched off — its tools are not offered to the agent'}
+        >
+          {busy === 'switch' ? '…' : live ? 'On' : 'Off'}
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost btn--small"
+          disabled={busy !== '' || !live}
+          onClick={() => act('connect')}
+          title={live ? 'Connect now instead of at the next turn' : 'Switch it on first'}
+        >
+          {busy === 'connect' ? 'Connecting…' : 'Connect now'}
         </button>
         {server.oauth && (
           <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => act('login')}>
@@ -136,6 +156,7 @@ export default function Mcp() {
   const { toast } = useApp()
   const [catalogue, setCatalogue] = useState([])
   const [servers, setServers] = useState([])
+  const [live, setLive] = useState({})
   const [auths, setAuths] = useState([])
   const [busyAdd, setBusyAdd] = useState('')
   const [showCustom, setShowCustom] = useState(false)
@@ -145,12 +166,13 @@ export default function Mcp() {
 
   const refresh = useCallback(async () => {
     try {
-      const [cat, srv, auth] = await Promise.all([
-        api.mcpCatalogue(), api.mcpServers(), api.mcpAuthorizations(),
+      const [cat, srv, auth, caps] = await Promise.all([
+        api.mcpCatalogue(), api.mcpServers(), api.mcpAuthorizations(), api.capabilities(),
       ])
       setCatalogue(cat)
       setServers(srv)
       setAuths(auth)
+      setLive(Object.fromEntries((caps.connectors ?? []).map((c) => [c.name, c.enabled])))
     } catch (err) {
       toast(err.message, 'bad')
     }
@@ -206,7 +228,7 @@ export default function Mcp() {
         <header className="vheader" data-enter>
           <div>
             <div className="vheader-eyebrow">
-              <span className="led led--amber" /> sys / connections
+              <span className="led led--amber" /> connections
             </div>
             <h1>MCP servers</h1>
             <div className="vheader-sub">
@@ -253,8 +275,14 @@ export default function Mcp() {
               Nothing installed yet. Add a server from the catalogue below, or a custom one.
             </div>
           )}
+          {servers.length > 0 && (
+            <p className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', margin: '0 0 10px' }}>
+              A connector starts when it is switched on, at the beginning of the next turn. Adding
+              one never starts a process on its own.
+            </p>
+          )}
           {servers.map((s) => (
-            <ServerRow key={s.name} server={s} onChanged={refresh} />
+            <ServerRow key={s.name} server={s} live={Boolean(live[s.name])} onChanged={refresh} />
           ))}
         </div>
 
@@ -299,11 +327,11 @@ export default function Mcp() {
             )}
             <div className="field-row">
               <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)' }}>
-                <input type="checkbox" checked={form.oauth} onChange={(e) => setForm((f) => ({ ...f, oauth: e.target.checked }))} style={{ accentColor: 'var(--amber)' }} />
+                <input type="checkbox" checked={form.oauth} onChange={(e) => setForm((f) => ({ ...f, oauth: e.target.checked }))} style={{ accentColor: 'var(--clay)' }} />
                 OAuth login
               </label>
               <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)' }}>
-                <input type="checkbox" checked={form.allow_local} onChange={(e) => setForm((f) => ({ ...f, allow_local: e.target.checked }))} style={{ accentColor: 'var(--amber)' }} />
+                <input type="checkbox" checked={form.allow_local} onChange={(e) => setForm((f) => ({ ...f, allow_local: e.target.checked }))} style={{ accentColor: 'var(--clay)' }} />
                 allow local connections
               </label>
             </div>

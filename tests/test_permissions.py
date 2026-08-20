@@ -142,3 +142,37 @@ async def test_dispatch_denial_returns_an_error_result_not_an_exception(db):
     registry.register(make_tool("delete_file", RiskLevel.HIGH))
     result = await registry.dispatch("delete_file", {}, ToolContext())
     assert result.is_error and "declined" in result.content
+
+
+async def test_a_sandbox_preference_does_not_cover_an_unsandboxed_machine(db, monkeypatch):
+    """Sandbox mode runs the command unwrapped where the OS offers no sandbox.
+    Keying it as ':sandbox' anyway meant "always allow sandboxed commands",
+    granted on a machine with bubblewrap, silenced the gate on one without --
+    full shell access with no prompt."""
+    from psok.tools.builtin import shell
+
+    tool = shell.tools()[0]
+    contained = {"command": "ls", "execution_mode": "sandbox"}
+
+    monkeypatch.setattr(shell, "platform_backend", lambda: "bubblewrap")
+    assert tool.operation_key(contained) == "run_shell_command:sandbox"
+
+    monkeypatch.setattr(shell, "platform_backend", lambda: None)
+    assert tool.operation_key(contained) == "run_shell_command:direct"
+
+    # And the gate honours the distinction: the sandbox preference does not match.
+    service = ConfirmationService(lambda _: _false())
+    service.preferences.remember("run_shell_command:sandbox", "allow", "high")
+    outcome = await service.check(tool, contained)
+    assert not outcome.allowed and outcome.decision == "denied"
+
+
+async def test_the_model_still_describes_its_own_operation_where_a_sandbox_exists(db, monkeypatch):
+    """The documented key stays what security.md says it is."""
+    from psok.tools.builtin import shell
+
+    monkeypatch.setattr(shell, "platform_backend", lambda: "seatbelt")
+    key = shell.tools()[0].operation_key(
+        {"command": "ls", "execution_mode": "sandbox", "operation_type": "read-only"}
+    )
+    assert key == "run_shell_command:read-only"

@@ -150,17 +150,23 @@ Stack: Python 3.11+ with FastAPI on the backend, React with Vite on the frontend
 
 ---
 
-## ◻ Phase 9 — Memory
+## ✅ Phase 9 — Memory
 
 **Goal.** PSOK remembers across conversations.
 
-**Components.** Post-turn fact extraction returning a create/supersede diff; recency plus semantic recall; `<memories>` injection; per-conversation toggle.
+**Components.** Post-turn fact extraction returning a create/supersede diff; recency plus semantic recall; `<memories>` injection; per-conversation toggle. `psok memory` and `/api/memory` for listing, forgetting, and switching it off.
 
 **Dependencies.** Phase 8 — deliberately reuses its embedding and vector infrastructure rather than duplicating it.
 
-**Tests.** Diff application creates and supersedes correctly; recall merges and deduplicates the two retrieval paths; the toggle genuinely disables extraction.
+**Tests.** Diff application creates and supersedes correctly; recall merges and deduplicates the two retrieval paths; the toggle genuinely disables extraction; a malformed or hallucinating extractor costs only that turn; an empty store never reaches the embedder; a failed extraction leaves the finished turn alone.
 
-**Acceptance.** A fact stated in one conversation is recalled unprompted in a later, separate one.
+**Acceptance.** A fact stated in one conversation is recalled unprompted in a later, separate one. Verified through the loop and over HTTP.
+
+**Where extraction sits in the turn.** After the `done` event, not before it. Extraction is a second model call, and blocking the terminal event on it would keep an interface's composer disabled for the length of one. When it changes something, a `memory` event follows with the facts created and retired.
+
+**The extraction model.** `memory:` in `providers.yaml` names a small, cheap, local model for the role ([ADR-0013](../architecture/decisions/0013-local-first-ai-default-posture.md)); with none configured it falls back to the conversation's own model, so memory works on a machine with one provider rather than silently doing nothing.
+
+**Built beyond the original plan.** Exact duplicates are refused at the store rather than only discouraged in the prompt — restating a held fact is the extractor's documented main failure mode, and a prompt is the wrong place to enforce it alone.
 
 ---
 
@@ -194,15 +200,17 @@ Stack: Python 3.11+ with FastAPI on the backend, React with Vite on the frontend
 
 ---
 
-## ◻ Phase 12 — React frontend
+## ✅ Phase 12 — React frontend
 
 **Goal.** The interface most use will go through.
 
-**Components.** Vite and React app against the Phase 7 API: conversation view with streamed events, an inline confirmation prompt, a tool-call and audit inspector, skills and settings.
+**Components.** Vite and React app against the Phase 7 API. Status, chat, MCP, skills, memory and audit views; streamed turns with tool-call cards; an inline confirmation prompt driven by the `confirmation_required` frame; the `+` menu for skills, connectors and memory, scoped globally or to one conversation; `/` skill autocomplete; provider and model switched from the conversation strip; Stop wired to the interrupt endpoint.
 
 **Dependencies.** Phase 7, and ideally 8–11 so there is something to display.
 
-**Acceptance.** A full turn including a confirmation can be driven entirely from the browser.
+**Acceptance.** A full turn including a confirmation can be driven entirely from the browser. Verified through Vite's proxy against a live API: a tool call suspends, the prompt is answered from the id its frame carried, the turn resumes and answers, the model is switched mid-conversation, and Stop interrupts a suspended call and records it as interrupted.
+
+**Not covered by tests.** The React app has no test suite: `npm run build` and `oxlint` pass, and the flows above were driven against a live server, but nothing locks the components' behaviour down. That is the largest remaining gap in this phase.
 
 ---
 

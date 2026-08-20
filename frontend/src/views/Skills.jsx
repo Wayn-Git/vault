@@ -29,7 +29,7 @@ export default function Skills() {
         <header className="vheader" data-enter>
           <div>
             <div className="vheader-eyebrow">
-              <span className="led led--amber" /> sys / knowledge
+              <span className="led led--amber" /> procedures
             </div>
             <h1>Skills</h1>
             <div className="vheader-sub">

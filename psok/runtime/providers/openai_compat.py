@@ -32,6 +32,57 @@ _REASONING_MODELS = ("o1", "o3", "o4", "gpt-5")
 __all__ = ["OpenAICompatClient", "ProviderHTTPError", "initialize"]
 
 
+def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PSOK's normalized messages into the chat-completions wire shape.
+
+    The two other adapters already translate; this one used to forward PSOK's
+    own rows untouched, which happens to work only while a turn takes one
+    iteration. As soon as a tool call is replayed the difference bites: the wire
+    format wants `type: "function"` on every tool call and `arguments` as a JSON
+    *string*, and rejects the `tool_name` and `is_error` columns PSOK carries on
+    tool rows for its own use. Lenient servers ignored all three; OpenAI itself
+    and schema-validating servers answer 400.
+    """
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+
+        if role == "tool":
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": m.get("tool_call_id"),
+                    "content": m.get("content") or "",
+                }
+            )
+            continue
+
+        if role == "assistant" and m.get("tool_calls"):
+            calls = []
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", tc)
+                arguments = fn.get("arguments")
+                calls.append(
+                    {
+                        "id": tc.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": fn.get("name"),
+                            # Already a string when it came straight off the wire;
+                            # a dict once it has been through PSOK's storage.
+                            "arguments": arguments
+                            if isinstance(arguments, str)
+                            else json.dumps(arguments or {}),
+                        },
+                    }
+                )
+            out.append({"role": "assistant", "content": m.get("content"), "tool_calls": calls})
+            continue
+
+        out.append({"role": role, "content": m.get("content") or ""})
+    return out
+
+
 class OpenAICompatClient:
     def __init__(
         self,
@@ -64,7 +115,7 @@ class OpenAICompatClient:
         *,
         stream: bool = False,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"model": self.model, "messages": messages}
+        payload: dict[str, Any] = {"model": self.model, "messages": _to_openai_messages(messages)}
         if stream:
             payload["stream"] = True
         if tools:
@@ -201,6 +252,15 @@ class OpenAICompatClient:
             for _, slot in sorted(partial.items())
             if slot["name"]
         ]
+
+        if not text_parts and not reasoning_parts and not calls:
+            # Plenty of OpenAI-compatible servers ignore `stream: true` and
+            # answer with an ordinary JSON body, which produces no SSE frames at
+            # all. Yielding an empty response for that ended the turn with a
+            # blank answer and no error anywhere -- so ask again without
+            # streaming rather than reporting silence as an answer.
+            yield StreamEvent(type="done", response=await self.complete(messages, tools, params))
+            return
 
         yield StreamEvent(
             type="done",

@@ -61,11 +61,19 @@ class ToolRegistry:
     def list(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def schemas(self) -> list[ToolSchema]:
-        """What the model sees. Source is deliberately invisible here."""
+    def schemas(self, *, hidden_servers: set[str] | None = None) -> list[ToolSchema]:
+        """What the model sees. Source is deliberately invisible here.
+
+        `hidden_servers` withholds the tools of connectors switched off for the
+        current conversation. The connection itself is process-wide -- one
+        manager serves every conversation -- so what a conversation can reach is
+        decided here rather than by connecting a different set of servers.
+        """
+        hidden = hidden_servers or set()
         return [
             ToolSchema(name=t.name, description=t.description, parameters=t.parameters)
             for t in self._tools.values()
+            if not (t.server_name and t.server_name in hidden)
         ]
 
     async def dispatch(
@@ -79,6 +87,16 @@ class ToolRegistry:
         if tool is None:
             known = ", ".join(sorted(self._tools)[:20]) or "none"
             return ToolResult.error(f"unknown tool '{name}'. Available tools: {known}")
+
+        # A capability switched off for this conversation is not advertised and
+        # not dispatchable. Withholding the schema is not enough on its own: the
+        # model can name a tool it saw in an earlier turn, and the connection is
+        # shared with every other conversation.
+        if tool.server_name and not _connector_enabled(tool.server_name, ctx.conversation_id):
+            return ToolResult.error(
+                f"the '{tool.server_name}' connector is switched off for this conversation."
+                " Ask the user to turn it back on if they want it used."
+            )
 
         outcome = await self.confirmation.check(tool, arguments, ctx)
         if not outcome.allowed:
@@ -115,6 +133,21 @@ class ToolRegistry:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         return result
+
+
+def _connector_enabled(server_name: str, conversation_id: str | None) -> bool:
+    """Capability state for one MCP server, failing open if it cannot be read.
+
+    Failing open matches how the prompt treats an unreadable capability table:
+    the state is a user preference, not a security boundary -- the permission
+    gate is, and it runs regardless.
+    """
+    try:
+        from psok.capabilities import CapabilityService, Kind
+
+        return not CapabilityService().switched_off(Kind.CONNECTOR, server_name, conversation_id)
+    except Exception:
+        return True
 
 
 def mcp_tool_key(tool_name: str, server_name: str) -> str:

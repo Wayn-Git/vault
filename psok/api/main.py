@@ -79,6 +79,11 @@ app.add_middleware(
 # Confirmations awaiting a decision from the interface, keyed by request id.
 _pending: dict[str, dict[str, Any]] = {}
 
+# Turns currently streaming, keyed by conversation. The event is how "stop" gets
+# from a second request into the loop: aborting the browser's read only closes
+# the response, and the turn behind it would keep calling models and tools.
+_active_turns: dict[str, asyncio.Event] = {}
+
 
 class PendingConfirmation(BaseModel):
     id: str
@@ -130,6 +135,14 @@ async def _registry_for(workspace: str | None):
 
     async with _registry_lock:
         if _mcp["registry"] is not None and _mcp["workspace"] == root:
+            # Pick up connectors switched on or off since the registry was
+            # built. Without this the toggle only took effect on restart, so a
+            # connector the user turned on in the interface stayed unusable.
+            for name, outcome in (await _mcp["manager"].reconcile()).items():
+                if isinstance(outcome, int):
+                    _mcp["errors"].pop(name, None)
+                else:
+                    _mcp["errors"][name] = str(outcome)
             return _mcp["registry"], root
 
         if _mcp["manager"] is not None:
@@ -173,9 +186,15 @@ def health() -> dict[str, Any]:
     registry = _mcp["registry"] or build_default_registry()
     skills, errors = scan()
     connector_errors = dict(_mcp["errors"])
+    providers = load_providers()
     return {
         "status": "degraded" if connector_errors else "ok",
-        "providers": sorted(load_providers()),
+        "providers": sorted(providers),
+        # So an interface can prefill the model a provider already declares
+        # rather than making the user retype what providers.yaml already says.
+        "provider_defaults": {
+            name: config.default_model for name, config in providers.items() if config.default_model
+        },
         "tools": len(registry.list()),
         "mcp_tools": len([t for t in registry.list() if t.server_name]),
         "connector_errors": connector_errors,
@@ -258,13 +277,19 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
         raise HTTPException(404, "no such conversation")
 
     director = await _director(body.workspace)
+    cancel = asyncio.Event()
+    _active_turns[conversation_id] = cancel
 
     async def stream():
-        async for event in director.run(conversation_id, body.message):
-            # default=str so one unexpected value in a tool argument degrades to
-            # a string instead of killing the response mid-stream.
-            payload = json.dumps({"type": event.type, **event.data}, default=str)
-            yield f"data: {payload}\n\n"
+        try:
+            async for event in director.run(conversation_id, body.message, cancel):
+                # default=str so one unexpected value in a tool argument degrades
+                # to a string instead of killing the response mid-stream.
+                payload = json.dumps({"type": event.type, **event.data}, default=str)
+                yield f"data: {payload}\n\n"
+        finally:
+            if _active_turns.get(conversation_id) is cancel:
+                del _active_turns[conversation_id]
 
     return StreamingResponse(
         stream(),
@@ -273,6 +298,22 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
         # then lands in one lump when the turn ends.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/conversations/{conversation_id}/turn/stop")
+def stop_turn(conversation_id: str) -> dict[str, str]:
+    """Interrupt the turn streaming for this conversation.
+
+    The loop stops before its next model call, cancels whatever tool call is in
+    flight -- including one suspended on a confirmation -- and records it as
+    interrupted rather than leaving the history claiming a call that never
+    finished.
+    """
+    cancel = _active_turns.get(conversation_id)
+    if cancel is None:
+        raise HTTPException(404, "no turn is running for this conversation")
+    cancel.set()
+    return {"status": "stopping"}
 
 
 @app.get("/api/confirmations")
@@ -427,15 +468,37 @@ def mcp_pending_authorizations() -> list[dict[str, str]]:
 
 @app.post("/api/mcp/servers/{name}/connect")
 async def mcp_connect(name: str) -> dict[str, Any]:
-    from psok.mcp import commands as mcp
+    """Connect a server into the registry turns actually run against.
 
-    results = await mcp.connect_and_report(name, open_browser=False)
-    outcome = results.get(name)
-    return {
-        "name": name,
-        "tools": outcome if isinstance(outcome, int) else 0,
-        "error": None if isinstance(outcome, int) else outcome,
-    }
+    This used to connect a throwaway manager and shut it down again, which
+    reported a tool count for a connection nothing could use: the next turn ran
+    against the live registry, which had never heard of the server.
+    """
+    from psok.capabilities import CapabilityService, Kind
+    from psok.mcp.config import load_servers
+
+    config = load_servers().get(name)
+    if config is None:
+        raise HTTPException(404, f"no server named '{name}' in mcp.yaml")
+    if CapabilityService().switched_off(Kind.CONNECTOR, name):
+        # Connecting anyway would last until the next turn reconciles it away,
+        # which reads as a connection that silently drops itself.
+        raise HTTPException(409, f"'{name}' is switched off; turn it on before connecting")
+
+    if _mcp["manager"] is None:
+        # Build it against the working directory only if no turn has built one:
+        # rebuilding for a different workspace would tear down live connections.
+        await _registry_for(None)
+    manager = _mcp["manager"]
+    async with _registry_lock:
+        manager.errors.pop(name, None)  # an explicit request retries a failed server
+        try:
+            count = await manager.connect_server(config)
+        except Exception as exc:
+            _mcp["errors"][name] = str(exc)
+            return {"name": name, "tools": 0, "error": str(exc)}
+        _mcp["errors"].pop(name, None)
+    return {"name": name, "tools": count, "error": None}
 
 
 # ---------------------------------------------------------- capabilities
@@ -533,3 +596,59 @@ def list_skills() -> dict[str, Any]:
         ],
         "errors": [{"path": str(e.path), "error": e.error} for e in errors],
     }
+
+
+# ---------------------------------------------------------------- memory
+#
+# The standing facts PSOK holds about the user, and the switch that governs
+# them. Memory has its own table rather than a capability_state row (the CHECK
+# constraint there predates it), so it needs its own routes rather than riding
+# /api/capabilities.
+
+
+class MemoryToggle(BaseModel):
+    enabled: bool
+    conversation_id: str | None = None  # omit to change the global default
+
+
+@app.get("/api/memory")
+def list_memories(conversation_id: str | None = None, limit: int = 200) -> dict[str, Any]:
+    from psok.memory import MemoryStore
+
+    store = MemoryStore()
+    return {
+        "enabled": store.is_enabled(conversation_id),
+        "scope": conversation_id or "global",
+        "facts": [
+            {
+                "id": m.id,
+                "fact": m.fact,
+                "conversation_id": m.conversation_id,
+                "created_at": m.created_at,
+            }
+            for m in store.live(limit)
+        ],
+    }
+
+
+@app.post("/api/memory/toggle")
+def toggle_memory(body: MemoryToggle) -> dict[str, Any]:
+    from psok.memory import MemoryStore
+
+    store = MemoryStore()
+    store.set_enabled(body.enabled, conversation_id=body.conversation_id)
+    return {
+        "enabled": store.is_enabled(body.conversation_id),
+        "scope": body.conversation_id or "global",
+    }
+
+
+@app.delete("/api/memory/{memory_id}")
+def forget_memory(memory_id: int) -> dict[str, Any]:
+    """Retire a fact. It stops being recalled but the row survives, so what PSOK
+    believed and when it stopped believing it stays answerable."""
+    from psok.memory import MemoryStore
+
+    if not MemoryStore().supersede([memory_id]):
+        raise HTTPException(404, f"no live memory with id {memory_id}")
+    return {"status": "superseded", "id": memory_id}

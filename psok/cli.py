@@ -137,7 +137,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
         Connecting per turn would respawn every stdio server on each message.
         """
-        results = await manager.connect_all()
+        # Scoped to this conversation: a connector switched off here must not
+        # even be started, let alone advertised.
+        results = await manager.connect_all(conversation_id=conversation_id)
         connected = {n: v for n, v in results.items() if isinstance(v, int)}
         failed = {n: v for n, v in results.items() if not isinstance(v, int)}
         if connected:
@@ -213,6 +215,36 @@ def _infer_kind(service, name: str):
     if any(c.name == name for c in service.connectors()):
         return Kind.CONNECTOR
     return None
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    from psok.memory import MemoryStore
+
+    get_connection()
+    store = MemoryStore()
+
+    if args.on or args.off:
+        store.set_enabled(bool(args.on), conversation_id=args.conversation)
+        scope = args.conversation or "globally"
+        print(f"memory switched {'on' if args.on else 'off'} ({scope})")
+        return 0
+
+    if args.forget:
+        if not store.supersede([args.forget]):
+            print(f"no live memory with id {args.forget}", file=sys.stderr)
+            return 1
+        print(f"forgot memory {args.forget}")
+        return 0
+
+    facts = store.live(args.limit)
+    state = "on" if store.is_enabled(args.conversation) else "off"
+    scope = args.conversation or "global"
+    print(f"memory is {state} ({scope}), {len(facts)} facts held")
+    for m in facts:
+        print(f"  [{m.id}] {m.created_at[:10]}  {_brief(m.fact, 90)}")
+    if not facts:
+        print("  (nothing remembered yet)")
+    return 0
 
 
 def cmd_index(args: argparse.Namespace) -> int:
@@ -362,6 +394,23 @@ def cmd_mcp_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp_env(args: argparse.Namespace) -> int:
+    from psok.mcp import commands as mcp
+
+    key, _, value = args.assignment.partition("=")
+    if not key or not value:
+        print("expected KEY=VALUE", file=sys.stderr)
+        return 1
+    try:
+        mcp.set_env(args.name, key.strip(), value, secret=args.secret)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    where = "the OS keychain" if args.secret else "mcp.yaml"
+    print(f"set {key.strip()} for '{args.name}' in {where}")
+    return 0
+
+
 def cmd_mcp_login(args: argparse.Namespace) -> int:
     from psok.mcp import commands as mcp
 
@@ -435,6 +484,16 @@ def _add_mcp_commands(sub) -> None:
     auth.add_argument("--client-secret")
     auth.set_defaults(func=cmd_mcp_auth)
 
+    env = mcp_sub.add_parser("env", help="set an environment variable for a stdio server")
+    env.add_argument("name")
+    env.add_argument("assignment", metavar="KEY=VALUE")
+    env.add_argument(
+        "--secret",
+        action="store_true",
+        help="store the value in the OS keychain; mcp.yaml keeps only a reference",
+    )
+    env.set_defaults(func=cmd_mcp_env)
+
     login = mcp_sub.add_parser("login", help="sign in to a server through your browser")
     login.add_argument("name")
     login.set_defaults(func=cmd_mcp_login)
@@ -445,6 +504,8 @@ def _add_mcp_commands(sub) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from psok.capabilities import Kind
+
     parser = argparse.ArgumentParser(prog="psok", description="Personal operating system")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -470,9 +531,17 @@ def main(argv: list[str] | None = None) -> int:
     caps = sub.add_parser("capabilities", help="list or toggle skills and connectors")
     caps.add_argument("--enable", metavar="NAME")
     caps.add_argument("--disable", metavar="NAME")
-    caps.add_argument("--kind", choices=["skill", "connector", "plugin"])
+    caps.add_argument("--kind", choices=[str(k) for k in Kind])
     caps.add_argument("--conversation", help="scope the change to one conversation")
     caps.set_defaults(func=cmd_capabilities)
+
+    memory = sub.add_parser("memory", help="list, forget, or switch off long-term memory")
+    memory.add_argument("--forget", type=int, metavar="ID", help="retire one remembered fact")
+    memory.add_argument("--on", action="store_true", help="switch memory on")
+    memory.add_argument("--off", action="store_true", help="switch memory off")
+    memory.add_argument("--conversation", help="scope the change to one conversation")
+    memory.add_argument("--limit", type=int, default=50)
+    memory.set_defaults(func=cmd_memory)
 
     index = sub.add_parser("index", help="index a folder of notes for retrieval")
     index.add_argument("path", nargs="?", help="folder to index")

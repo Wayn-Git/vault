@@ -74,8 +74,16 @@ class Tool:
     source: ToolSource = ToolSource.BUILTIN
     server_name: str | None = None  # MCP tools only
     touches_paths: bool = False  # triggers the sensitive-path check
+    # Overrides how a call is keyed for "don't ask again". A tool needs this
+    # when the arguments alone do not describe what will actually happen -- the
+    # shell's sandbox mode is not sandboxed on a machine with no sandbox, and a
+    # preference granted to contained commands must not cover uncontained ones.
+    subtype: Callable[[dict[str, Any]], str | None] | None = None
 
     def operation_key(self, arguments: dict[str, Any]) -> str:
         """Key for 'don't ask again' preferences: operation[:subtype]."""
-        subtype = arguments.get("operation_type") or arguments.get("execution_mode")
+        if self.subtype is not None:
+            subtype = self.subtype(arguments)
+        else:
+            subtype = arguments.get("operation_type") or arguments.get("execution_mode")
         return f"{self.name}:{subtype}" if subtype else self.name

@@ -1,13 +1,15 @@
-import { useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGSAP } from '@gsap/react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { animateCounter, useViewEntrance } from '../gsapFx.js'
+import { api } from '../api.js'
 
 const MODULES = [
   { id: 'chat', icon: 'chat', name: 'Agent chat', desc: 'Streaming turns, tool calls, permission prompts', meta: 'reason → act → observe' },
   { id: 'mcp', icon: 'plug', name: 'MCP servers', desc: 'Catalogue, custom servers, OAuth logins', meta: 'flat tool namespace' },
   { id: 'skills', icon: 'book', name: 'Skills', desc: 'Markdown skill discovery', meta: 'progressive disclosure' },
+  { id: 'memory', icon: 'spark', name: 'Memory', desc: 'Standing facts recalled across conversations', meta: 'extracted after a turn' },
   { id: 'logs', icon: 'logs', name: 'Audit log', desc: 'Every tool call, with the decision that allowed it', meta: 'redacted, immutable trail' },
 ]
 
@@ -24,18 +26,27 @@ export default function Dashboard() {
   const rootRef = useRef(null)
   const { health, healthError, refreshHealth, setView } = useApp()
   const numRefs = useRef({})
+  const [memory, setMemory] = useState(null)
   useViewEntrance(rootRef)
+
+  const loadMemory = useCallback(async () => {
+    try { setMemory(await api.memory()) } catch { setMemory(null) }
+  }, [])
+
+  useEffect(() => { loadMemory() }, [loadMemory])
 
   useGSAP(
     () => {
       const counters = Object.entries(numRefs.current)
       if (!counters.length || !health) return
+      // memory arrives on its own request, so the count has to re-animate when
+      // it lands rather than staying at the zero it rendered with.
       counters.forEach(([, el]) => {
         const target = Number(el.dataset.count || 0)
         animateCounter(el, target, 0.9)
       })
     },
-    { scope: rootRef, dependencies: [health] },
+    { scope: rootRef, dependencies: [health, memory] },
   )
 
   const lines = health
@@ -45,8 +56,26 @@ export default function Dashboard() {
         { tag: 'ok', tagClass: 't-tag-ok', text: `providers: ${health.providers.join(', ')}` },
         { tag: 'ok', tagClass: 't-tag-ok', text: `${health.tools} tools registered · ${health.skills} skills · ${health.skill_errors} skill errors` },
         { tag: 'agent', text: 'loop online · guards armed (12 iterations, 40 tool calls)' },
-        { tag: 'mcp', text: 'servers: per mcp.yaml · connect from MCP module' },
-        { tag: 'ok', tagClass: 't-tag-ok', text: 'status: nominal', typing: true },
+        {
+          tag: 'mcp',
+          tagClass: Object.keys(health.connector_errors ?? {}).length ? 't-tag-bad' : 't-tag',
+          text: Object.keys(health.connector_errors ?? {}).length
+            ? `connectors down: ${Object.entries(health.connector_errors).map(([n, e]) => `${n} (${String(e).slice(0, 60)})`).join(' · ')}`
+            : `${health.mcp_tools ?? 0} connector tools live · switch servers on in MCP`,
+        },
+        {
+          tag: 'mem',
+          tagClass: memory?.enabled ? 't-tag-ok' : 't-tag',
+          text: memory
+            ? `memory ${memory.enabled ? 'on' : 'off'} · ${memory.facts.length} fact${memory.facts.length === 1 ? '' : 's'} held`
+            : 'memory: unavailable',
+        },
+        {
+          tag: health.status === 'degraded' ? 'warn' : 'ok',
+          tagClass: health.status === 'degraded' ? 't-tag-bad' : 't-tag-ok',
+          text: `status: ${health.status === 'degraded' ? 'degraded — see connectors above' : 'nominal'}`,
+          typing: true,
+        },
       ]
     : [
         { tag: 'boot', text: 'PSOK v0.1.0 — personal operating system' },
@@ -57,9 +86,9 @@ export default function Dashboard() {
 
   const counters = [
     { key: 'providers', label: 'providers', count: health?.providers?.length ?? 0, sub: 'configured in providers.yaml' },
-    { key: 'tools', label: 'tools', count: health?.tools ?? 0, sub: 'flat namespace, gated' },
-    { key: 'skills', label: 'skills', count: health?.skills ?? 0, sub: 'markdown, discovered' },
-    { key: 'errors', label: 'skill errors', count: health?.skill_errors ?? 0, sub: health?.skill_errors ? 'fix frontmatter' : 'none' },
+    { key: 'tools', label: 'tools', count: health?.tools ?? 0, sub: `${health?.mcp_tools ?? 0} from connectors` },
+    { key: 'skills', label: 'skills', count: health?.skills ?? 0, sub: health?.skill_errors ? `${health.skill_errors} failed to load` : 'markdown, discovered' },
+    { key: 'memory', label: 'memories', count: memory?.facts?.length ?? 0, sub: memory?.enabled === false ? 'switched off' : 'recalled every turn', bad: memory?.enabled === false },
   ]
 
   return (
@@ -68,15 +97,20 @@ export default function Dashboard() {
         <header className="vheader" data-enter>
           <div>
             <div className="vheader-eyebrow">
-              <span className="led led--amber led--pulse" /> sys / status
+              <span className="led led--amber led--pulse" /> status
             </div>
-            <h1>Your personal operating system</h1>
+            <h1>Everything, on one machine</h1>
             <div className="vheader-sub">
-              One agent over your files, shell, tasks, calendar and connected services. Local-first, single-user.
+              One agent over your files, shell, tasks, calendar and connected services.
+              Your data stays in a SQLite file here; your secrets stay in the keychain.
             </div>
           </div>
           <div className="vheader-actions">
-            <button type="button" className="btn btn--ghost" onClick={refreshHealth}>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => { refreshHealth(); loadMemory() }}
+            >
               <Icon name="refresh" size={15} /> Refresh
             </button>
           </div>
@@ -87,8 +121,8 @@ export default function Dashboard() {
             <div className="tele">
               <div className="tele-bar">
                 <span className="led led--amber led--pulse" />
-                boot sequence
-                <span style={{ marginLeft: 'auto' }}>tty0</span>
+                system
+                <span style={{ marginLeft: 'auto' }}>live</span>
               </div>
               <div className="tele-body">
                 {lines.map((l, i) => (
@@ -106,7 +140,7 @@ export default function Dashboard() {
                 </div>
                 <div className="stat-label">{s.label}</div>
                 <div className="stat-sub">
-                  <span className={`led led--${s.key === 'errors' && s.count ? 'bad' : 'ok'}`} />
+                  <span className={`led led--${s.bad ? 'faint' : 'ok'}`} />
                   {s.sub}
                 </div>
               </div>

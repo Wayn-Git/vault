@@ -36,6 +36,7 @@ class CatalogueEntry:
     args: list[str] = field(default_factory=list)
     url: str | None = None
     oauth_scopes: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
     requires: str | None = None  # what the user must have installed
     setup_hint: str | None = None  # shown when auth is SETUP
     homepage: str | None = None
@@ -47,6 +48,7 @@ class CatalogueEntry:
             command=self.command,
             args=list(self.args),
             url=self.url,
+            env=dict(self.env),
             oauth=self.auth is AuthKind.OAUTH,
             oauth_scopes=list(self.oauth_scopes),
             source=Source.BUNDLED,
@@ -116,13 +118,25 @@ CATALOGUE: list[CatalogueEntry] = [
         transport=Transport.STDIO,
         command="uvx",
         args=["workspace-mcp"],
+        # This server runs its own OAuth callback listener. Its default port is
+        # 8000, which is also where PSOK's API usually sits, so the entry pins a
+        # free one rather than letting the two fight over the socket. The
+        # redirect URI registered with Google has to match this exactly.
+        env={
+            "WORKSPACE_MCP_PORT": "8765",
+            "OAUTHLIB_INSECURE_TRANSPORT": "1",  # the callback is plain http on loopback
+        },
         requires="uv (uvx) and a Google Cloud OAuth client",
         setup_hint=(
-            "Google requires your own OAuth client rather than a shared one. Create a"
-            " Desktop OAuth client at console.cloud.google.com, enable the Gmail,"
-            " Calendar and Drive APIs, then set GOOGLE_OAUTH_CLIENT_ID and"
-            " GOOGLE_OAUTH_CLIENT_SECRET in this server's env. The first tool call"
-            " opens Google's own consent page in your browser."
+            "Google requires your own OAuth client rather than a shared one.\n"
+            "  1. console.cloud.google.com -> APIs & Services -> enable the Gmail API"
+            " (and Calendar/Drive if you want them)\n"
+            "  2. OAuth consent screen -> External -> add yourself as a test user\n"
+            "  3. Credentials -> Create OAuth client ID -> *Web application*\n"
+            "     Authorised redirect URI: http://localhost:8765/oauth2callback\n"
+            "  4. psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_ID=<id>\n"
+            "  5. psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_SECRET=<secret> --secret\n"
+            "The first tool call opens Google's own consent page in your browser."
         ),
         homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
     ),

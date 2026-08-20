@@ -13,7 +13,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from psok.security.sandbox import SandboxPolicy, unavailable_reason, wrap_command
+from psok.security.sandbox import (
+    SandboxPolicy,
+    platform_backend,
+    unavailable_reason,
+    wrap_command,
+)
 from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 DEFAULT_TIMEOUT_S = 30
@@ -92,6 +97,22 @@ async def run_shell_command(args: dict[str, Any], ctx: ToolContext) -> ToolResul
     return ToolResult(content=output, is_error=proc.returncode != 0)
 
 
+def _preference_subtype(arguments: dict[str, Any]) -> str:
+    """What a "don't ask again" for this command should actually cover.
+
+    Sandbox mode runs unwrapped where the OS offers no sandbox -- Windows, or a
+    Linux box without bubblewrap. Keying that as ':sandbox' let a preference the
+    user granted to contained commands silence the gate for uncontained ones,
+    which is the one thing the sandbox/direct split exists to prevent.
+    """
+    mode = arguments.get("execution_mode") or "sandbox"
+    if mode != "direct" and platform_backend() is None:
+        return "direct"
+    # Otherwise the documented precedence: the model's own description of the
+    # operation, falling back to the mode it asked for.
+    return arguments.get("operation_type") or mode
+
+
 def _looks_like_sandbox_denial(stderr: str) -> bool:
     lowered = stderr.lower()
     return any(s in lowered for s in ("operation not permitted", "permission denied", "eperm"))
@@ -136,5 +157,6 @@ def tools() -> list[Tool]:
             handler=run_shell_command,
             risk=RiskLevel.HIGH,
             touches_paths=True,
+            subtype=_preference_subtype,
         )
     ]

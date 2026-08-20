@@ -6,6 +6,7 @@ findings stay visible rather than dissolving into the suite.
 
 from __future__ import annotations
 
+import json
 import socket
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -548,6 +549,9 @@ async def test_concurrent_turns_share_one_mcp_manager(api, db, tmp_path, monkeyp
             await asyncio.sleep(0.01)
             return {}
 
+        async def reconcile(self):
+            return {}
+
         async def shutdown(self):
             pass
 
@@ -623,7 +627,9 @@ def test_a_non_streaming_provider_prints_its_answer_in_the_cli(db, capsys, monke
 # --- 20: a suspended turn was invisible until the interface guessed ---------
 
 
-async def test_the_interface_learns_a_confirmation_is_pending_before_it_answers(api, db, monkeypatch):
+async def test_the_interface_learns_a_confirmation_is_pending_before_it_answers(
+    api, db, monkeypatch
+):
     """A gated tool call suspends the turn with no signal but the stream going
     quiet, which looks exactly like a slow tool. The interface had to poll
     GET /api/confirmations and guess, matching on tool name -- ambiguous with
@@ -752,3 +758,402 @@ async def test_a_low_risk_call_never_announces_a_confirmation(api, db, monkeypat
     kinds = [e.type for e in events]
     assert "confirmation_required" not in kinds
     assert "tool_result" in kinds and kinds[-1] == "done"
+
+
+# --- 21: the OpenAI-compatible adapter replayed PSOK's own message rows -----
+
+
+def test_replayed_tool_calls_use_the_chat_completions_wire_shape():
+    """The Anthropic and Google adapters translate history; this one forwarded
+    PSOK's normalized rows untouched. A single-iteration turn hid it, but the
+    moment a tool result was replayed the payload carried a tool call with no
+    `type` and an `arguments` object instead of a JSON string, plus PSOK's own
+    `tool_name` and `is_error` columns on the tool row. Lenient servers ignore
+    all of that; OpenAI and schema-validating servers answer 400, which breaks
+    every multi-step turn on the adapter that covers most providers."""
+    from psok.runtime.providers.openai_compat import OpenAICompatClient
+
+    client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="m")
+    history = [
+        {"role": "system", "content": "you are psok"},
+        {"role": "user", "content": "read it"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_1", "function": {"name": "view_file", "arguments": {"path": "a.md"}}}
+            ],
+        },
+        {
+            "role": "tool",
+            "content": "1\thello",
+            "tool_call_id": "call_1",
+            "tool_name": "view_file",
+            "is_error": False,
+        },
+    ]
+
+    messages = client._build_payload(history, None, None)["messages"]
+
+    assistant = messages[2]
+    call = assistant["tool_calls"][0]
+    assert call["type"] == "function", "the wire format requires a type on every tool call"
+    assert isinstance(call["function"]["arguments"], str), "arguments travel as a JSON string"
+    assert json.loads(call["function"]["arguments"]) == {"path": "a.md"}
+    assert call["id"] == "call_1"
+
+    tool_row = messages[3]
+    assert tool_row == {"role": "tool", "tool_call_id": "call_1", "content": "1\thello"}, (
+        "PSOK's own columns must not travel to the provider"
+    )
+
+
+def test_arguments_already_serialized_are_not_double_encoded():
+    """Tool calls that never round-tripped through storage arrive with the
+    provider's own JSON string. Re-encoding it would send a quoted string."""
+    from psok.runtime.providers.openai_compat import OpenAICompatClient
+
+    client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="m")
+    payload = client._build_payload(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c", "function": {"name": "t", "arguments": '{"a": 1}'}}
+                ],
+            }
+        ],
+        None,
+        None,
+    )
+    assert payload["messages"][0]["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'
+
+
+# --- 22: a provider that ignores `stream: true` answered into the void ------
+
+
+async def test_an_endpoint_that_does_not_stream_still_produces_an_answer(monkeypatch):
+    """Plenty of OpenAI-compatible servers answer a streaming request with an
+    ordinary JSON body, which yields no SSE frames at all. The adapter turned
+    that into a `done` event carrying an empty response, so the turn ended with
+    a blank answer, no tool calls, no warning and no error -- the model's actual
+    reply, tool call included, silently discarded."""
+    import httpx
+
+    from psok.runtime.providers.openai_compat import OpenAICompatClient
+
+    completion = {
+        "choices": [
+            {"message": {"role": "assistant", "content": "answered"}, "finish_reason": "stop"}
+        ]
+    }
+    real_init = httpx.AsyncClient.__init__
+
+    async def handler(request):
+        # Whatever it is asked, this endpoint replies with a plain completion.
+        return httpx.Response(200, json=completion)
+
+    def init(self, *args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", init)
+
+    client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="m")
+    events = [e async for e in client.stream([{"role": "user", "content": "hi"}])]
+
+    assert [e.type for e in events] == ["done"]
+    assert events[0].response.text == "answered"
+
+
+async def test_an_answer_that_never_streamed_is_still_emitted_once(db, monkeypatch):
+    """The loop treated "took the streaming path" as "already showed the
+    answer". An adapter falling back to a plain call inside stream() then
+    delivered nothing the interface may render -- docs are explicit that
+    done.text must not be rendered, so the reply vanished."""
+    import psok.agent.director as director_module
+    from psok.agent.director import Director
+    from psok.db.repositories import ConversationRepository
+    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
+    from psok.security.confirmation import ConfirmationService
+    from psok.tools.registry import ToolRegistry
+
+    class FallingBackClient:
+        async def complete(self, messages, tools=None, params=None):
+            return ModelResponse(text="the whole answer")
+
+        async def stream(self, messages, tools=None, params=None):
+            # No deltas: exactly what the adapter yields when the endpoint
+            # ignored `stream: true` and it re-asked without streaming.
+            yield StreamEvent(type="done", response=ModelResponse(text="the whole answer"))
+
+    monkeypatch.setattr(
+        director_module,
+        "resolve",
+        lambda *a, **k: ResolvedModel("f", "f", FallingBackClient(), Capabilities(streaming=True)),
+    )
+
+    cid = ConversationRepository().create("f", "f")
+    director = Director(ToolRegistry(ConfirmationService()), stream=True, retrieval=False)
+    events = [e async for e in director.run(cid, "hello")]
+
+    answers = [e for e in events if e.type in ("assistant_text", "assistant_delta")]
+    assert [e.data["text"] for e in answers] == ["the whole answer"], (
+        "the answer must arrive exactly once, and it must arrive"
+    )
+    assert events[-1].type == "done"
+
+
+# --- 23: switching a connector on never reached the running API -------------
+
+
+async def test_a_connector_switched_on_mid_session_becomes_usable(api, db, tmp_path, monkeypatch):
+    """One manager serves the process for its lifetime and only connected at
+    the moment it was built, so a connector the user switched on in the
+    interface stayed dark until PSOK was restarted. The toggle wrote a row
+    nothing ever acted on."""
+    from psok.capabilities import CapabilityService, Kind
+    from psok.mcp.config import ServerConfig, Transport, add_server
+    from psok.mcp.manager import MCPManager
+    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+
+    add_server(ServerConfig(name="notes", transport=Transport.STDIO, command="true"))
+
+    connected: list[str] = []
+
+    class FakeManager(MCPManager):
+        async def connect_server(self, config):
+            connected.append(config.name)
+
+            async def handler(args, ctx):
+                return ToolResult.ok("ok")
+
+            self.connections[config.name] = _AlwaysConnected()
+            self.registry.register(
+                Tool(
+                    name=f"note__mcp__{config.name}",
+                    description="",
+                    parameters={},
+                    handler=handler,
+                    risk=RiskLevel.MEDIUM,
+                    source=ToolSource.MCP,
+                    server_name=config.name,
+                )
+            )
+            return 1
+
+        async def disconnect_server(self, name):
+            self.connections.pop(name, None)
+            self.registry.unregister_server(name)
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(api, "MCPManager", FakeManager)
+
+    registry, _ = await api._registry_for(str(tmp_path))
+    assert connected == [], "a connector nobody switched on must not be started"
+
+    CapabilityService().set_enabled(Kind.CONNECTOR, "notes", True)
+    again, _ = await api._registry_for(str(tmp_path))
+
+    assert again is registry, "the same registry, not a rebuilt one"
+    assert connected == ["notes"]
+    assert "note__mcp__notes" in [t.name for t in registry.list()]
+
+    # ...and switching it off again takes the tools away.
+    CapabilityService().set_enabled(Kind.CONNECTOR, "notes", False)
+    await api._registry_for(str(tmp_path))
+    assert "note__mcp__notes" not in [t.name for t in registry.list()]
+
+
+class _AlwaysConnected:
+    connected = True
+
+    async def disconnect(self):
+        pass
+
+
+# --- 24: Stop only closed the browser's read, not the turn ------------------
+
+
+async def test_stopping_a_turn_ends_the_loop_and_the_tool_call(db, monkeypatch):
+    """The interface had a Stop button that aborted the fetch. The turn behind
+    it kept calling models and tools, and a call suspended on a confirmation
+    held the gate open for its full timeout with nobody left to answer it."""
+    import asyncio
+
+    import psok.agent.director as director_module
+    from psok.agent.director import Director
+    from psok.db.repositories import ConversationRepository, MessageRepository
+    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+    from psok.security.confirmation import ConfirmationService
+    from psok.tools.base import RiskLevel, Tool, ToolResult
+    from psok.tools.registry import ToolRegistry
+
+    never_answered = asyncio.Event()
+
+    async def hangs(args, ctx):
+        await never_answered.wait()  # a confirmation nobody will answer
+        return ToolResult.ok("finished")
+
+    registry = ToolRegistry(ConfirmationService())
+    registry.register(
+        Tool(
+            name="slow_tool",
+            description="hangs",
+            parameters={},
+            handler=hangs,
+            risk=RiskLevel.LOW,
+        )
+    )
+
+    calls = 0
+
+    class Scripted:
+        async def complete(self, messages, tools=None, params=None):
+            nonlocal calls
+            calls += 1
+            return ModelResponse(
+                tool_calls=[ToolCall(id=f"c{calls}", name="slow_tool", arguments={})]
+            )
+
+    monkeypatch.setattr(
+        director_module,
+        "resolve",
+        lambda *a, **k: ResolvedModel("f", "f", Scripted(), Capabilities(streaming=False)),
+    )
+
+    cid = ConversationRepository().create("f", "f")
+    cancel = asyncio.Event()
+    events = []
+
+    async def drive():
+        async for event in Director(registry, retrieval=False, memory=False).run(
+            cid, "do it", cancel
+        ):
+            events.append(event)
+            if event.type == "tool_call":
+                cancel.set()
+
+    await asyncio.wait_for(drive(), timeout=5)
+
+    kinds = [e.type for e in events]
+    assert kinds[-1] == "guard"
+    assert events[-1].data["reason"] == "stopped by the user"
+    assert calls == 1, "the loop must not call the model again after being stopped"
+
+    interrupted = [e for e in events if e.type == "tool_result"]
+    assert interrupted and interrupted[0].data["is_error"]
+    assert "interrupted" in interrupted[0].data["content"]
+
+    persisted = MessageRepository().history(cid)[-1]
+    assert persisted.role == "tool" and persisted.is_error, (
+        "the trajectory must not claim a call that never finished"
+    )
+
+
+def test_the_api_can_stop_a_turn_it_is_streaming(api, db):
+    """Nothing can interrupt a turn without a route to ask through."""
+    import asyncio
+
+    from psok.db.repositories import ConversationRepository
+
+    cid = ConversationRepository().create("f", "f")
+    with pytest.raises(Exception) as unknown:
+        api.stop_turn(cid)
+    assert "404" in str(unknown.value) or "no turn" in str(unknown.value)
+
+    cancel = asyncio.Event()
+    api._active_turns[cid] = cancel
+    try:
+        assert api.stop_turn(cid) == {"status": "stopping"}
+        assert cancel.is_set()
+    finally:
+        api._active_turns.pop(cid, None)
+
+
+# --- 25: an existing database from an older version broke startup ----------
+
+
+LEGACY_MEMORIES = """
+CREATE TABLE memories (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact                   TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active', 'superseded')),
+    superseded_by          INTEGER REFERENCES memories(id),
+    source_conversation_id TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    last_recalled_at       TEXT,
+    recall_count           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_memories_status ON memories(status, created_at);
+CREATE TABLE conversations (
+    id         TEXT PRIMARY KEY,
+    title      TEXT,
+    provider   TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    memory_enabled INTEGER NOT NULL DEFAULT 1,
+    system_prompt_override TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE credentials (id INTEGER PRIMARY KEY, ref TEXT);
+"""
+
+
+def test_a_database_from_an_older_version_still_opens(tmp_path):
+    """schema.sql is written with CREATE TABLE IF NOT EXISTS, which is a no-op
+    against a table that already exists in an older shape -- and the index over
+    its new column then failed with a bare "no such column: superseded_at",
+    taking startup with it. Upgrading in place is the normal case for a single
+    user, so a stale database has to be brought forward, not deleted."""
+    import sqlite3
+
+    from psok.db import connection
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(LEGACY_MEMORIES)
+    old.execute(
+        "INSERT INTO conversations (id, title, provider, model) VALUES ('c1', 't', 'p', 'm')"
+    )
+    old.execute("INSERT INTO memories (fact, source_conversation_id) VALUES ('an old fact', 'c1')")
+    old.commit()
+    old.close()
+
+    conn = connection.connect(path)
+    connection.migrate(conn)  # used to raise sqlite3.OperationalError
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    assert {"superseded_at", "conversation_id"} <= columns
+    assert "status" in columns, "columns this version does not use are left alone"
+
+    kept = conn.execute("SELECT fact FROM memories").fetchall()
+    assert [r[0] for r in kept] == ["an old fact"], "existing rows survive the upgrade"
+
+    # And the current code paths work against the upgraded table.
+    from psok.memory import MemoryStore
+
+    store = MemoryStore(conn)
+    new_id = store.add("a new fact", "c1")
+    assert {m.fact for m in store.live()} == {"an old fact", "a new fact"}
+    assert store.supersede([new_id]) == 1
+    assert [m.fact for m in store.live()] == ["an old fact"]
+
+
+def test_migrating_twice_changes_nothing(tmp_path):
+    import sqlite3
+
+    from psok.db import connection
+
+    path = tmp_path / "twice.db"
+    conn = connection.connect(path)
+    connection.migrate(conn)
+    before = sorted(r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE sql NOT NULL"))
+    connection.migrate(conn)
+    after = sorted(r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE sql NOT NULL"))
+    assert before == after
+    assert isinstance(conn, sqlite3.Connection)

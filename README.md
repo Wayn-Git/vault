@@ -58,6 +58,24 @@ work, and editing one file re-embeds only the chunks that changed. Search fuses
 semantic similarity with a real BM25 keyword index, so both paraphrases and exact
 terms like error codes work. Embeddings run locally through Ollama by default.
 
+## What PSOK remembers
+
+```bash
+psok memory                 # the standing facts, with the ids to forget them by
+psok memory --forget 3      # retire one; the row survives, recall stops
+psok memory --off           # globally, or --off --conversation <id> for one
+```
+
+Facts are extracted after a turn by a small model and recalled in later conversations.
+Name a cheap local model for the job in `providers.yaml`, or let it use the
+conversation's own:
+
+```yaml
+memory:
+  provider: ollama
+  model: qwen2.5:3b
+```
+
 ## Connecting apps over MCP
 
 ```bash
@@ -66,6 +84,14 @@ psok mcp add playwright     # browser control, works immediately
 psok mcp add github         # prints the one-time OAuth setup steps
 psok mcp login github       # opens GitHub's real login page in your browser
 psok mcp status
+```
+
+A server that takes its credentials through the environment keeps them in the
+keychain too — `mcp.yaml` stores only the reference:
+
+```bash
+psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_ID=1234.apps.googleusercontent.com
+psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_SECRET=... --secret
 ```
 
 Custom servers work the same way:
@@ -90,10 +116,14 @@ incremental indexing) · MCP connectivity with OAuth 2.1, PKCE, and a curated se
 catalogue · a permission gate with OS-level sandboxing on macOS and Linux ·
 deterministic natural-language scheduling · markdown skills · a CLI and an HTTP API.
 
-Skills and connectors can each be switched on or off, globally or per conversation, and
-`/skill-name` engages one directly.
+Long-term memory across conversations: PSOK extracts standing facts after a turn and
+recalls them in later ones, with a create/supersede diff rather than an ever-growing
+transcript.
 
-Not built: long-term memory, first-party service integrations, and the React frontend.
+Skills, connectors and memory can each be switched on or off, globally or per
+conversation, and `/skill-name` engages a skill directly.
+
+Not built: first-party service integrations.
 Those are described in the [roadmap](docs/roadmap/implementation-plan.md) as future work,
 not in the architecture docs as if they exist.
 
@@ -138,7 +168,7 @@ conflicts back rather than guessing.
 ## Development
 
 ```bash
-pytest              # 181 unit tests
+pytest              # 216 unit tests
 pytest -m live      # 5 more against real MCP servers (spawns processes, uses network)
 ruff check psok tests
 ```

@@ -234,6 +234,13 @@ class AnthropicClient:
                 )
             )
 
+        if not text_parts and not thinking_parts and not calls:
+            # A stream that carried nothing is not an empty answer; it is an
+            # endpoint that did not stream. Asking again without streaming is
+            # the difference between an answer and a blank turn.
+            yield StreamEvent(type="done", response=await self.complete(messages, tools, params))
+            return
+
         yield StreamEvent(
             type="done",
             response=ModelResponse(

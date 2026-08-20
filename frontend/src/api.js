@@ -24,6 +24,7 @@ export const api = {
   conversations: () => j('/conversations'),
   createConversation: (provider, model, title) =>
     j('/conversations', json('POST', { provider, model, title })),
+  updateConversation: (id, patch) => j(`/conversations/${id}`, json('PATCH', patch)),
   messages: (id) => j(`/conversations/${id}/messages`),
 
   turn: async ({ conversationId, message, workspace, onEvent, signal }) => {
@@ -59,11 +60,21 @@ export const api = {
     }
   },
 
+  // Stops the turn on the server. Aborting the browser's read only closes the
+  // response: the loop behind it keeps calling models and tools.
+  stopTurn: (id) => j(`/conversations/${id}/turn/stop`, json('POST', {})),
+
   confirmations: () => j('/confirmations'),
   decideConfirmation: (id, { allow, remember }) =>
     j(`/confirmations/${id}`, json('POST', { allow, remember })),
 
   logs: (limit = 100) => j(`/logs?limit=${limit}`),
+
+  memory: (conversationId) =>
+    j(`/memory${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ''}`),
+  toggleMemory: (enabled, conversationId) =>
+    j('/memory/toggle', json('POST', { enabled, conversation_id: conversationId || null })),
+  forgetMemory: (id) => j(`/memory/${id}`, json('DELETE')),
 
   skills: () => j('/skills'),
   skillSearch: (q, conversationId) =>

@@ -201,6 +201,113 @@ async def test_disabled_connectors_are_never_connected(db, psok_home):
     await manager.shutdown()
 
 
+def _registry_with_one_connector():
+    from psok.security.confirmation import ConfirmationService, auto_approve
+    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from psok.tools.registry import ToolRegistry
+
+    async def handler(args, ctx):
+        return ToolResult.ok("ran")
+
+    registry = ToolRegistry(ConfirmationService(auto_approve))
+    registry.register(
+        Tool(
+            name="read_graph__mcp__memory",
+            description="read the graph",
+            parameters={"type": "object", "properties": {}},
+            handler=handler,
+            risk=RiskLevel.LOW,
+            source=ToolSource.MCP,
+            server_name="memory",
+        )
+    )
+    return registry
+
+
+async def test_a_connector_off_for_one_conversation_is_hidden_and_undispatchable(db):
+    """One MCP manager serves the whole process, so connecting per conversation
+    cannot express this -- the connections are shared. Scoping was accepted and
+    stored but never applied, leaving a per-conversation toggle that did nothing
+    once the server was globally on."""
+    from psok.db.repositories import ConversationRepository
+    from psok.tools.base import ToolContext
+
+    service = CapabilityService()
+    service.set_enabled(Kind.CONNECTOR, "memory", True)  # on globally
+
+    quiet = ConversationRepository().create("f", "f")
+    loud = ConversationRepository().create("f", "f")
+    service.set_enabled(Kind.CONNECTOR, "memory", False, conversation_id=quiet)
+
+    registry = _registry_with_one_connector()
+
+    hidden = {
+        name
+        for name in {t.server_name for t in registry.list() if t.server_name}
+        if not service.is_enabled(Kind.CONNECTOR, name, quiet)
+    }
+    assert hidden == {"memory"}
+    assert registry.schemas(hidden_servers=hidden) == []
+    assert [s.name for s in registry.schemas()] == ["read_graph__mcp__memory"]
+
+    denied = await registry.dispatch(
+        "read_graph__mcp__memory", {}, ToolContext(conversation_id=quiet)
+    )
+    assert denied.is_error and "switched off" in denied.content
+
+    allowed = await registry.dispatch(
+        "read_graph__mcp__memory", {}, ToolContext(conversation_id=loud)
+    )
+    assert not allowed.is_error
+
+
+async def test_a_server_connected_by_hand_is_usable_without_a_toggle(db):
+    """Connectors default off so configuring one does not silently start it.
+    But `psok mcp connect x` registers tools without touching capability state,
+    and treating "no opinion" as "refuse" made every tool from that path
+    undispatchable -- the gate has to refuse what was switched off, not what was
+    never switched on."""
+    from psok.tools.base import ToolContext
+
+    assert not CapabilityService().is_enabled(Kind.CONNECTOR, "memory")  # default off
+    registry = _registry_with_one_connector()
+
+    result = await registry.dispatch("read_graph__mcp__memory", {}, ToolContext())
+    assert not result.is_error and result.content == "ran"
+
+
+async def test_the_loop_withholds_a_disabled_connectors_tools(db, monkeypatch):
+    """End to end: what the model is offered, not just what the registry can filter."""
+    import psok.agent.director as director_module
+    from psok.agent.director import Director
+    from psok.db.repositories import ConversationRepository
+    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
+
+    offered: list[list[str]] = []
+
+    class Client:
+        async def complete(self, messages, tools=None, params=None):
+            offered.append([t.name for t in tools or []])
+            return ModelResponse(text="done")
+
+    monkeypatch.setattr(
+        director_module,
+        "resolve",
+        lambda *a, **k: ResolvedModel("f", "f", Client(), Capabilities(streaming=False)),
+    )
+
+    service = CapabilityService()
+    service.set_enabled(Kind.CONNECTOR, "memory", True)
+    cid = ConversationRepository().create("f", "f")
+    service.set_enabled(Kind.CONNECTOR, "memory", False, conversation_id=cid)
+
+    director = Director(_registry_with_one_connector(), retrieval=False, memory=False)
+    async for _ in director.run(cid, "hello"):
+        pass
+
+    assert offered == [[]], "a connector off for this conversation must not be advertised"
+
+
 # --------------------------------------------------------------------- misc
 
 
@@ -258,7 +365,9 @@ async def test_director_pins_a_slash_invoked_skill(db, psok_home, monkeypatch):
     )
 
     cid = ConversationRepository().create("f", "f")
-    director = Director(ToolRegistry(ConfirmationService(auto_approve)))
+    # memory off: post-turn extraction is a second call to the same recorder,
+    # and this test is about what the turn itself was given.
+    director = Director(ToolRegistry(ConfirmationService(auto_approve)), memory=False)
     async for _ in director.run(cid, "/psok-intro what can you do"):
         pass
 

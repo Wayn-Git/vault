@@ -9,6 +9,7 @@ separate untrusted submitter to defend against.
 from __future__ import annotations
 
 import enum
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -19,7 +20,14 @@ import yaml
 
 from psok.config import paths
 
+log = logging.getLogger(__name__)
+
 _VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# An env value written as `keychain:<ref>` is resolved from the OS keychain when
+# the server is spawned, so a credential a server takes through its environment
+# never has to be written into mcp.yaml.
+KEYCHAIN_PREFIX = "keychain:"
 
 DEFAULT_MCP_YAML = """\
 # PSOK MCP servers.
@@ -106,7 +114,31 @@ class ServerConfig:
         return out
 
     def resolved_env(self) -> dict[str, str]:
-        return {**os.environ, **{k: expand_vars(v) for k, v in self.env.items()}}
+        """Environment for a stdio server, resolved at spawn time.
+
+        A value of `keychain:<ref>` is looked up in the OS keychain instead of
+        being read literally, so a server that takes its credentials through the
+        environment -- Google's, for one -- does not force a secret into
+        mcp.yaml. The file keeps the reference; the value never lands on disk.
+        """
+        from psok.secrets import get_secret
+
+        resolved: dict[str, str] = {}
+        for key, raw in self.env.items():
+            value = expand_vars(raw)
+            if value.startswith(KEYCHAIN_PREFIX):
+                secret = get_secret(value[len(KEYCHAIN_PREFIX) :])
+                if secret is None:
+                    log.warning(
+                        "%s: no keychain entry for %s, starting without %s",
+                        self.name,
+                        value,
+                        key,
+                    )
+                    continue
+                value = secret
+            resolved[key] = value
+        return {**os.environ, **resolved}
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"transport": str(self.transport)}

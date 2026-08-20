@@ -176,6 +176,47 @@ class MCPManager:
                 results[name] = str(exc)
         return results
 
+    async def reconcile(self) -> dict[str, int | str]:
+        """Bring live connections in line with what is currently switched on.
+
+        One manager serves the whole process for its lifetime, so without this a
+        connector switched on in the interface stayed dark until PSOK was
+        restarted -- the toggle wrote a row nothing acted on.
+
+        A server that already failed is left alone until something asks for it
+        again: retrying a dead one here would spend its connect timeout at the
+        start of every turn, before the model is even called.
+        """
+        from psok.capabilities import CapabilityService, Kind
+
+        service = CapabilityService()
+        configured = load_servers()
+        results: dict[str, int | str] = {}
+
+        for name in [n for n in list(self.connections) if n not in configured]:
+            await self.disconnect_server(name)  # removed from mcp.yaml
+
+        for name, config in configured.items():
+            connection = self.connections.get(name)
+            connected = bool(connection and connection.connected)
+
+            if not config.enabled or service.switched_off(Kind.CONNECTOR, name):
+                if connected:
+                    await self.disconnect_server(name)
+                    results[name] = 0
+                continue
+
+            # Only an explicit "on" starts a process. A server connected by hand
+            # is left connected: no opinion is not the same as "switch it off".
+            if not connected and service.is_enabled(Kind.CONNECTOR, name):
+                if name in self.errors:
+                    continue
+                try:
+                    results[name] = await self.connect_server(config)
+                except Exception as exc:
+                    results[name] = str(exc)
+        return results
+
     async def shutdown(self) -> None:
         for name in list(self.connections):
             await self.disconnect_server(name)

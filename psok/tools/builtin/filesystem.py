@@ -165,6 +165,7 @@ async def edit_file(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     path.write_text(
         text.replace(old, new) if args.get("replace_all") else text.replace(old, new, 1)
     )
+    _invalidate_index(path)
     return ToolResult.ok(
         f"edited {path} ({count if args.get('replace_all') else 1} replacement(s))"
     )

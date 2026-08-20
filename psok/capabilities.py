@@ -91,6 +91,22 @@ class CapabilityService:
         )
         self.conn.commit()
 
+    def switched_off(self, kind: Kind, name: str, conversation_id: str | None = None) -> bool:
+        """Whether someone actually switched this off, ignoring the kind's default.
+
+        Distinct from `not is_enabled(...)`, and the distinction matters at
+        dispatch. Connectors default off so that configuring a server does not
+        silently start it -- but a server whose tools are registered was
+        connected deliberately, whether through the toggle or through
+        `psok mcp connect`. Refusing those for want of an opt-in would break the
+        second path entirely; refusing the ones a user turned off is the actual
+        requirement.
+        """
+        state = self._get(conversation_id, kind, name) if conversation_id else None
+        if state is None:
+            state = self._get(GLOBAL_SCOPE, kind, name)
+        return state is False
+
     def clear(self, kind: Kind, name: str, *, conversation_id: str | None = None) -> None:
         """Forget an explicit setting so the capability falls back to its default."""
         self.conn.execute(

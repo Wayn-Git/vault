@@ -322,3 +322,58 @@ async def test_circuit_breaker_opens_then_recovers(psok_home):
 
     await asyncio.sleep(0.06)
     assert not breaker.is_open, "the breaker must close again after its cooldown"
+
+
+# ------------------------------------------------------ env-held credentials
+
+
+def test_an_env_secret_lives_in_the_keychain_not_the_config(psok_home):
+    """A stdio server that takes its credentials through the environment -- the
+    Google one, for instance -- had nowhere to put them but mcp.yaml. Every
+    other credential in PSOK is a keychain reference; these are too now."""
+    from psok.mcp.commands import add_custom, set_env
+    from psok.mcp.config import config_path, load_servers
+    from psok.secrets import delete_secret
+
+    ref = "psok-mcp/google.env.GOOGLE_OAUTH_CLIENT_SECRET"
+    try:
+        add_custom("google", "stdio", command="uvx", args=["workspace-mcp"])
+        set_env("google", "GOOGLE_OAUTH_CLIENT_SECRET", "s3cret-value", secret=True)
+        set_env("google", "GOOGLE_OAUTH_CLIENT_ID", "1234.apps.googleusercontent.com")
+
+        on_disk = config_path().read_text()
+        assert "s3cret-value" not in on_disk, "the secret must never be written to mcp.yaml"
+        assert f"keychain:{ref}" in on_disk
+        assert "1234.apps.googleusercontent.com" in on_disk, "a public id is not a secret"
+
+        env = load_servers()["google"].resolved_env()
+        assert env["GOOGLE_OAUTH_CLIENT_SECRET"] == "s3cret-value", "resolved at spawn time"
+        assert env["GOOGLE_OAUTH_CLIENT_ID"] == "1234.apps.googleusercontent.com"
+    finally:
+        delete_secret(ref)  # the keychain outlives the tmp_path home
+
+
+def test_a_missing_env_secret_is_reported_not_passed_as_a_reference(psok_home, monkeypatch):
+    """Passing the literal string 'keychain:...' as a credential would make the
+    server fail with something unrecognisable."""
+    from psok.mcp.commands import add_custom
+    from psok.mcp.config import add_server, load_servers
+
+    monkeypatch.setattr("psok.secrets.get_secret", lambda ref: None)
+    add_custom("google", "stdio", command="uvx")
+    config = load_servers()["google"]
+    config.env["TOKEN"] = "keychain:psok-mcp/google.env.TOKEN"
+    add_server(config)
+
+    assert "TOKEN" not in load_servers()["google"].resolved_env()
+
+
+def test_env_still_interpolates_from_the_environment(psok_home, monkeypatch):
+    from psok.mcp.commands import add_custom, set_env
+    from psok.mcp.config import load_servers
+
+    monkeypatch.setenv("PSOK_TEST_REGION", "eu-west-1")
+    add_custom("thing", "stdio", command="run")
+    set_env("thing", "REGION", "${PSOK_TEST_REGION}")
+
+    assert load_servers()["thing"].resolved_env()["REGION"] == "eu-west-1"

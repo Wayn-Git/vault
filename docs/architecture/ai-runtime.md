@@ -80,7 +80,8 @@ Ollama speaks the OpenAI format and could ride the fallback. It gets a thin adap
 - **Google/Gemini** rejects JSON Schema unions and non-string enums in function declarations that OpenAI and Anthropic accept. The Google adapter sanitizes tool schemas on the way out. Note that this is a *tool-schema* quirk, not a parameter quirk — provider differences are not confined to model settings.
 - **Anthropic** takes extended thinking as a native enabled-with-budget block, with model-version differences and a budget that must not exceed max tokens. The adapter maps PSOK's generic `thinking_budget` and clamps it.
 - **OpenAI** maps PSOK's generic `reasoning_effort` into its reasoning object, and some models reject reasoning combined with function tools on chat-completions, requiring the Responses API instead. The adapter routes accordingly.
-- **OpenAI-compatible endpoints** frequently do not implement structured multimodal content blocks. The adapter defaults to the simpler content format.
+- **OpenAI-compatible endpoints** frequently do not implement structured multimodal content blocks. The adapter defaults to the simpler content format. Some also ignore `stream: true` and answer with an ordinary JSON body; a stream that carries nothing is not an empty answer, so the adapter asks again without streaming rather than reporting silence.
+- **Message translation is per adapter, including this one.** PSOK's own message rows are not the chat-completions wire shape: tool calls need `type: "function"` and `arguments` as a JSON string, and the `tool_name` and `is_error` columns PSOK keeps for itself do not belong on the wire. Each adapter converts on the way out.
 
 PSOK's common parameter surface is deliberately small: `temperature`, `max_tokens`, `reasoning_effort` (none/low/medium/high), `thinking_budget`, `stop`, `seed`. Anything a provider does not support is dropped by its adapter, which reports the drop through capabilities rather than failing.
 
@@ -183,9 +184,10 @@ turn as it happens. The API forwards them verbatim as SSE frames.
 | `reasoning_delta` | `text` | The model's thinking. Render separately or hide — never as the answer. |
 | `assistant_text` | `text` | The whole answer at once, from a provider that cannot stream. |
 | `tool_call` | `name`, `arguments` | A tool is about to run. It may pause here for confirmation. |
+| `confirmation_required` | `request_id`, `tool_name`, `operation_key`, `risk`, `reason`, `arguments` | The turn is suspended waiting for this decision. Answer it with `request_id`. |
 | `tool_result` | `name`, `content`, `is_error` | What it returned. |
 | `warning` | `message` | The turn continues but something was lost, e.g. a truncated stream. |
-| `guard` | `reason` | A limit stopped the turn. |
+| `guard` | `reason` | A limit, or the user's stop request, ended the turn. |
 | `error` | `message` | The turn failed. Always the last event. |
 | `done` | `text`, `iterations` | The turn finished. |
 
@@ -193,6 +195,15 @@ turn as it happens. The API forwards them verbatim as SSE frames.
 `assistant_delta` chunks and no `assistant_text`; a non-streaming one produces
 `assistant_text` and no deltas. `done.text` repeats the final answer for
 convenience and must not be rendered by an interface that already showed it.
+The rule is "was the answer delivered as deltas", not "was the streaming path
+taken" — an adapter may fall back to a plain call inside `stream()` when the
+endpoint ignores `stream: true`, and that answer still arrives as
+`assistant_text`.
+
+**A suspended turn says so.** `confirmation_required` is emitted before the
+loop blocks, carrying the id the decision is answered with. An interface can
+poll `GET /api/confirmations` instead, but then it has to guess which
+`tool_call` produced a prompt and which did not — the event removes the guess.
 
 **Failures are events, not exceptions.** Nothing raises out of the loop — an
 unconfigured provider, a prompt-assembly failure and a dead database all become
@@ -202,7 +213,9 @@ browser cannot tell apart from a dropped connection.
 
 ### Interruption and confirmation
 
-Both suspend the loop mid-turn. A confirmation request pauses at dispatch, surfaces through the transport-agnostic confirmation service, and resumes on the user's answer — with a long timeout so scheduled and unattended runs remain approvable later. A user interrupt cancels in-flight work and marks pending calls as interrupted in the trajectory, so the history stays truthful about what did and did not run.
+Both suspend the loop mid-turn. A confirmation request pauses at dispatch, surfaces through the transport-agnostic confirmation service, and resumes on the user's answer — with a long timeout so scheduled and unattended runs remain approvable later.
+
+A user interrupt is a second request rather than a dropped connection, because a dropped connection is exactly what it must be distinguishable from: closing the response leaves the loop running. `POST /api/conversations/{id}/turn/stop` sets an event the loop reads before its next model call and while a dispatch is in flight; the in-flight call is cancelled — including one suspended on a confirmation, which would otherwise hold the gate for its full timeout — and marked interrupted in the trajectory, so the history stays truthful about what did and did not run. The turn ends with a `guard` event rather than silence.
 
 ### What the loop persists
 

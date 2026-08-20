@@ -6,7 +6,14 @@ import asyncio
 
 from psok.mcp import catalogue as cat
 from psok.mcp.client import OAuthRegistrationUnsupported, OAuthRequired
-from psok.mcp.config import ServerConfig, Transport, add_server, load_servers, remove_server
+from psok.mcp.config import (
+    KEYCHAIN_PREFIX,
+    ServerConfig,
+    Transport,
+    add_server,
+    load_servers,
+    remove_server,
+)
 from psok.mcp.manager import MCPManager
 from psok.mcp.oauth import REDIRECT_URI, forget, has_tokens
 from psok.secrets import set_secret
@@ -116,6 +123,30 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
 
     # A previously registered client or stale token must not shadow the new one.
     forget(name)
+    add_server(config)
+    return config
+
+
+def set_env(name: str, key: str, value: str, *, secret: bool = False) -> ServerConfig:
+    """Set one environment variable for a stdio server.
+
+    With `secret`, the value goes to the OS keychain and mcp.yaml keeps only a
+    `keychain:` reference -- the same rule every other credential in PSOK
+    follows, extended to the servers that take theirs through the environment
+    (ADR-0012).
+    """
+    servers = load_servers()
+    config = servers.get(name)
+    if config is None:
+        raise ValueError(f"no server named '{name}' in mcp.yaml")
+
+    if secret:
+        ref = f"psok-mcp/{name}.env.{key}"
+        set_secret(ref, value)
+        config.env[key] = f"{KEYCHAIN_PREFIX}{ref}"
+    else:
+        config.env[key] = value
+
     add_server(config)
     return config
 
