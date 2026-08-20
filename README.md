@@ -163,7 +163,6 @@ conflicts back rather than guessing.
 - [Components](docs/architecture/components.md) — Tool vs Skill vs MCP Tool vs Agent
 - [Data model](docs/architecture/data-model.md) · [AI runtime](docs/architecture/ai-runtime.md) · [Security](docs/architecture/security.md)
 - [Decision records](docs/architecture/decisions/) — ADRs with alternatives and trade-offs
-- [Research](docs/research/) — what was taken from Pipali, Khoj, and LibreChat, and what was rejected
 
 ## Development
 

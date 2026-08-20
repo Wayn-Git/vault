@@ -6,7 +6,7 @@ Proposed
 
 ## Context
 
-PSOK is a single-user, local-first application with no operations team. Khoj's architecture (researched in [khoj.md](../../research/khoj.md)) uses a client-server PostgreSQL instance with pgvector for everything. See [data-model.md](../data-model.md).
+PSOK is a single-user, local-first application with no operations team. Khoj's architecture uses a client-server PostgreSQL instance with pgvector for everything. See [data-model.md](../data-model.md).
 
 ## Decision
 

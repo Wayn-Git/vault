@@ -6,7 +6,7 @@ Proposed
 
 ## Context
 
-LibreChat's MCP layer (researched in [librechat.md](../../research/librechat.md)) is production-hardened for a multi-tenant deployment: four transports, four trust tiers, OAuth on-behalf-of token exchange, per-user connection pools, and cluster-coordinated boot-time discovery. PSOK is single-user and single-process. See [mcp.md](../mcp.md).
+LibreChat's MCP layer is production-hardened for a multi-tenant deployment: four transports, four trust tiers, OAuth on-behalf-of token exchange, per-user connection pools, and cluster-coordinated boot-time discovery. PSOK is single-user and single-process. See [mcp.md](../mcp.md).
 
 ## Decision
 
