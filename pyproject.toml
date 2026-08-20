@@ -1,0 +1,53 @@
+[project]
+name = "psok"
+version = "0.1.0"
+description = "Personal operating system: one AI interface to your apps, information, tasks and tools"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "mcp>=2.0",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pyyaml>=6.0",
+    "keyring>=25.0",
+    "httpx>=0.27",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+providers = [
+    "openai>=1.55",
+    "anthropic>=0.40",
+]
+vector = [
+    "sqlite-vec>=0.1.6",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[project.scripts]
+psok = "psok.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["psok"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Live tests spawn real MCP servers and reach the network; opt in with `pytest -m live`.
+addopts = "-m 'not live'"
+markers = ["live: exercises real MCP servers and the network"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
