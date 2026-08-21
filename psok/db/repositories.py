@@ -168,6 +168,18 @@ class ConfirmationPreferenceRepository:
         ).fetchone()
         return row["decision"] if row else None
 
+    def list(self) -> list[sqlite3.Row]:
+        """Every standing decision, newest first.
+
+        "Don't ask again" is a grant the user made once and then cannot see;
+        without a way to read it back there is no way to notice a tool that
+        stopped asking, and no way to take it back.
+        """
+        return self.conn.execute(
+            "SELECT operation_key, decision, risk_level, created_at"
+            " FROM confirmation_preferences ORDER BY created_at DESC"
+        ).fetchall()
+
     def remember(self, operation_key: str, decision: str, risk_level: str) -> None:
         self.conn.execute(
             "INSERT INTO confirmation_preferences (operation_key, decision, risk_level)"

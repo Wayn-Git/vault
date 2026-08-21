@@ -1,10 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
+import ServiceIcon from '../components/ServiceIcon.jsx'
+import { connectorState } from '../components/PlusMenu.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
-import { api } from '../api.js'
+import { api, copyText } from '../api.js'
 
-const EMPTY_FORM = { name: '', transport: 'stdio', command: '', args: '', url: '', oauth: false, allow_local: false }
+/* Connectors: what is added, what is running, and what each one still needs.
+
+   Two facts per server, and they are not the same fact: switched on, and
+   actually running. A row that reported only the first is what made connectors
+   look enabled while the agent had none of their tools, so every control here
+   waits for the real outcome and shows what came back. */
+
+const TABS = [
+  { id: 'all', label: 'All' },
+  { id: 'connected', label: 'Connected' },
+  { id: 'idle', label: 'Not connected' },
+]
 
 function OauthClientForm({ server, onDone }) {
   const { toast } = useApp()
@@ -47,36 +60,27 @@ function OauthClientForm({ server, onDone }) {
   )
 }
 
-function ServerRow({ server, live, onChanged }) {
+/* Some servers take their credentials through the environment rather than an
+   OAuth handshake -- Google Workspace wants a client id and secret it obtained
+   from Google Cloud. Without this the browser could add that connector and
+   then not finish it, which is the same as not supporting it. */
+function EnvForm({ server, onChanged }) {
   const { toast } = useApp()
+  const [key, setKey] = useState('')
+  const [value, setValue] = useState('')
+  const [secret, setSecret] = useState(true)
   const [busy, setBusy] = useState('')
-  const [showOauth, setShowOauth] = useState(false)
-  const [showHelp, setShowHelp] = useState(false)
+  const entries = Object.entries(server.env || {})
 
-  const act = async (action) => {
-    setBusy(action)
+  const save = async () => {
+    const name = key.trim()
+    if (!name || !value) return
+    setBusy('set')
     try {
-      if (action === 'remove') {
-        if (!window.confirm(`Remove ${server.name}? Its credentials are forgotten too.`)) return
-        await api.mcpRemove(server.name)
-        toast(`Removed ${server.name}`, 'ok')
-      } else if (action === 'connect') {
-        const r = await api.mcpConnect(server.name)
-        if (r.error) toast(`${server.name}: ${r.error}`, 'bad')
-        else toast(`Connected ${server.name} — ${r.tools} tool${r.tools === 1 ? '' : 's'}`, 'ok')
-      } else if (action === 'switch') {
-        // Starts or stops the process now and reports the outcome, rather than
-        // recording an intention and leaving the agent to discover the truth.
-        const result = await api.toggleCapability('connector', server.name, !live.enabled, null)
-        const state = result.live || {}
-        if (state.error) toast(`${server.name} could not start — ${state.error}`, 'bad')
-        else if (state.connected) toast(`${server.name} ready — ${state.tools} tools`, 'ok')
-        else toast(`${server.name} stopped`, 'ok')
-      } else if (action === 'login') {
-        const r = await api.mcpLogin(server.name)
-        if (r.authorized) toast(`Authorized ${server.name}`, 'ok')
-        else toast(r.result, 'info')
-      }
+      await api.mcpSetEnv(server.name, { key: name, value, secret })
+      toast(`${name} stored in ${secret ? 'the OS keychain' : 'mcp.yaml'}`, 'ok')
+      setKey('')
+      setValue('')
       onChanged()
     } catch (err) {
       toast(err.message, 'bad')
@@ -85,185 +89,287 @@ function ServerRow({ server, live, onChanged }) {
     }
   }
 
-  const runState = live.error
-    ? <span className="badge badge--bad">failed to start</span>
-    : live.connected
-      ? <span className="badge badge--ok">{live.tools} tool{live.tools === 1 ? '' : 's'} live</span>
-      : live.enabled
-        ? <span className="badge">on, not running</span>
-        : null
-
-  const authState = server.authorized === true
-    ? <span className="badge badge--ok">authorized</span>
-    : server.authorized === false
-      ? <span className="badge badge--amber">oauth ready</span>
-      : server.oauth
-        ? <span className="badge badge--info">oauth</span>
-        : null
+  const drop = async (name) => {
+    setBusy(name)
+    try {
+      await api.mcpUnsetEnv(server.name, name)
+      toast(`Forgot ${name}`, 'ok')
+      onChanged()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
 
   return (
-    <div className="server-row">
-      <span className={`led led--${live.error ? 'bad' : live.connected ? 'ok' : 'faint'}`} />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="server-name">{server.name}</span>
-          {runState}
-          {authState}
-          <span className="badge">{server.transport}</span>
-          {server.source === 'bundled' && <span className="badge">catalogue</span>}
+    <div style={{ display: 'grid', gap: 10, padding: '10px 14px 14px', borderTop: '1px dashed var(--hairline)' }}>
+      {entries.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {entries.map(([name, inKeychain]) => (
+            <span key={name} className="badge" style={{ gap: 6 }}>
+              <span className="mono">{name}</span>
+              <span style={{ color: 'var(--text-faint)' }}>{inKeychain ? 'keychain' : 'mcp.yaml'}</span>
+              <button
+                type="button"
+                onClick={() => drop(name)}
+                disabled={busy === name}
+                title={`Forget ${name}`}
+                aria-label={`Forget ${name}`}
+                style={{ color: 'var(--text-faint)', lineHeight: 0 }}
+              >
+                <Icon name="x" size={11} />
+              </button>
+            </span>
+          ))}
         </div>
-        <div className="server-target">{server.target || '—'}</div>
-        {live.error && (
-          <div className="server-target" style={{ color: 'var(--stop)' }}>{live.error}</div>
-        )}
+      )}
+      <div className="field-row">
+        <div className="field">
+          <label>variable</label>
+          <input value={key} onChange={(e) => setKey(e.target.value.toUpperCase())} placeholder="GOOGLE_OAUTH_CLIENT_ID" />
+        </div>
+        <div className="field">
+          <label>value</label>
+          <input
+            value={value}
+            type={secret ? 'password' : 'text'}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') save() }}
+            placeholder={secret ? 'stored in the OS keychain' : 'written to mcp.yaml'}
+          />
+        </div>
       </div>
-      <div className="server-actions">
-        <button
-          type="button"
-          className={`btn btn--small${live.enabled ? ' btn--primary' : ' btn--ghost'}`}
-          disabled={busy !== ''}
-          onClick={() => act('switch')}
-          title={
-            live.enabled
-              ? 'Switched on — click to stop it'
-              : 'Switched off — click to start it and see whether it comes up'
-          }
-        >
-          {busy === 'switch' ? 'Starting…' : live.enabled ? 'On' : 'Off'}
-        </button>
-        <button
-          type="button"
-          className="btn btn--ghost btn--small"
-          disabled={busy !== '' || !live.enabled}
-          onClick={() => act('connect')}
-          title={live.enabled ? 'Reconnect it now' : 'Switch it on first'}
-        >
-          {busy === 'connect' ? 'Connecting…' : 'Reconnect'}
-        </button>
-        {server.oauth && (
-          <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => act('login')}>
-            {busy === 'login' ? 'Logging in…' : 'Login'}
-          </button>
-        )}
-        <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => setShowOauth((s) => !s)}>
-          <Icon name="key" size={13} /> OAuth client
-        </button>
-        <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => setShowHelp((s) => !s)}>
-          Help
-        </button>
-        <button type="button" className="btn btn--danger btn--small" disabled={busy !== ''} onClick={() => act('remove')}>
-          <Icon name="trash" size={13} />
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 11.5, color: 'var(--text-dim)' }}>
+        <input type="checkbox" checked={secret} onChange={(e) => setSecret(e.target.checked)} style={{ accentColor: 'var(--clay)' }} />
+        Keep this in the OS keychain — mcp.yaml holds only a reference
+      </label>
+      <div>
+        <button type="button" className="btn btn--small" onClick={save} disabled={busy === 'set' || !key.trim() || !value}>
+          {busy === 'set' ? 'Storing…' : 'Set variable'}
         </button>
       </div>
-      {showOauth && <div style={{ gridColumn: '1 / -1', width: '100%' }}><OauthClientForm server={server} onDone={() => setShowOauth(false)} /></div>}
-      {showHelp && (
-        <div className="msg-note msg-note--guard" style={{ gridColumn: '1 / -1' }}>
-          <Icon name="key" size={15} />
-          <span>
-            Register an OAuth app with this provider, then store the client here.
-            Most servers support automatic registration and just need <strong>Login</strong>.
-            GitHub and similar require manual registration — use <strong>OAuth client</strong> first.
-          </span>
+    </div>
+  )
+}
+
+
+function SetupPanel({ server, onChanged }) {
+  return (
+    <div className="conn-setup">
+      {server.oauth && (
+        <div className="conn-setup-block">
+          <div className="conn-setup-title">
+            <Icon name="key" size={13} /> OAuth client
+          </div>
+          <p className="conn-setup-note">
+            Only needed where the provider has no dynamic registration — GitHub is the
+            example. Register an app with the callback
+            <span className="mono"> http://127.0.0.1:33418/oauth/callback</span>, then store it here.
+          </p>
+          <OauthClientForm server={server} onDone={onChanged} />
+        </div>
+      )}
+      {server.transport === 'stdio' && (
+        <div className="conn-setup-block">
+          <div className="conn-setup-title">
+            <Icon name="key" size={13} /> Environment
+          </div>
+          <p className="conn-setup-note">
+            Credentials this server reads from its environment. Secrets go to the OS keychain;
+            mcp.yaml keeps only a reference.
+          </p>
+          <EnvForm server={server} onChanged={onChanged} />
         </div>
       )}
     </div>
   )
 }
 
+function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand }) {
+  const state = cap ? connectorState(cap, busy === 'switch') : null
+  const needsLogin = server.oauth && server.authorized === false
+
+  return (
+    <>
+      <tr className={expanded ? 'is-open' : ''}>
+        <td>
+          <div className="conn-name">
+            <ServiceIcon name={server.name} size={26} />
+            <span>
+              {server.name}
+              <span className="conn-target mono">{server.target}</span>
+            </span>
+          </div>
+        </td>
+        <td className="mono conn-type">{server.transport}</td>
+        <td>
+          <span className="conn-status">
+            <span className={`led led--${state?.dot ?? 'faint'}${busy === 'switch' ? ' led--pulse' : ''}`} />
+            {live?.error
+              ? 'failed to start'
+              : live?.connected
+                ? `${live.tools} tools live`
+                : needsLogin
+                  ? 'needs sign-in'
+                  : cap?.enabled ? 'on, not running' : 'off'}
+          </span>
+          {live?.error && <span className="conn-error">{String(live.error).slice(0, 120)}</span>}
+        </td>
+        <td className="conn-actions">
+          <div className="conn-actions-inner">
+          {needsLogin && (
+            <button type="button" className="btn btn--small" disabled={Boolean(busy)} onClick={() => onAct('login')}>
+              {busy === 'login' ? 'Opening…' : 'Sign in'}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`btn btn--small${cap?.enabled ? ' btn--ghost' : ' btn--primary'}`}
+            disabled={Boolean(busy)}
+            onClick={() => onAct('switch')}
+          >
+            {busy === 'switch' ? 'Working…' : cap?.enabled ? 'Disconnect' : 'Connect'}
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            title="Set-up and credentials"
+            aria-label={`Set up ${server.name}`}
+            onClick={onExpand}
+          >
+            <Icon name="sliders" size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            title="Remove and forget its credentials"
+            aria-label={`Remove ${server.name}`}
+            disabled={Boolean(busy)}
+            onClick={() => onAct('remove')}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="conn-setup-row">
+          <td colSpan={4}><SetupPanel server={server} onChanged={onExpand} /></td>
+        </tr>
+      )}
+    </>
+  )
+}
+
 export default function Mcp() {
   const rootRef = useRef(null)
-  const { toast } = useApp()
-  const [catalogue, setCatalogue] = useState([])
+  const { toast, setOverlay, caps, refreshCaps, setCapEnabled, refreshHealth } = useApp()
   const [servers, setServers] = useState([])
+  const [catalogue, setCatalogue] = useState([])
   const [live, setLive] = useState({})
   const [auths, setAuths] = useState([])
-  const [busyAdd, setBusyAdd] = useState('')
-  const [showCustom, setShowCustom] = useState(false)
-  const [form, setForm] = useState(EMPTY_FORM)
-  const [helpText, setHelpText] = useState('')
+  const [tab, setTab] = useState('all')
+  const [busy, setBusy] = useState({})
+  const [expanded, setExpanded] = useState(null)
+  const [help, setHelp] = useState(null)
   useViewEntrance(rootRef)
 
   const refresh = useCallback(async () => {
     try {
-      const [cat, srv, auth, caps] = await Promise.all([
-        api.mcpCatalogue(), api.mcpServers(), api.mcpAuthorizations(), api.capabilities(),
+      const [srv, cat, auth, capabilities] = await Promise.all([
+        api.mcpServers(), api.mcpCatalogue(), api.mcpAuthorizations(), api.capabilities(),
       ])
-      setCatalogue(cat)
       setServers(srv)
+      setCatalogue(cat)
       setAuths(auth)
-      // Two facts per server: switched on, and actually running. The row shows
-      // both, because a switch that reported only the first is what made
-      // connectors look enabled while the agent had none of their tools.
-      setLive(Object.fromEntries((caps.connectors ?? []).map((c) => [
-        c.name,
-        { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+      setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
       ])))
+      refreshCaps()
     } catch (err) {
       toast(err.message, 'bad')
     }
-  }, [toast])
+  }, [refreshCaps, toast])
 
   useEffect(() => { refresh() }, [refresh])
 
-  const addFromCatalogue = async (entry) => {
-    setBusyAdd(entry.id)
+  // `login` blocks until the provider redirects back, so the URL it produced is
+  // only visible to a second request. Keep asking while this view is open.
+  useEffect(() => {
+    const tick = setInterval(() => { api.mcpAuthorizations().then(setAuths).catch(() => {}) }, 3000)
+    return () => clearInterval(tick)
+  }, [])
+
+  const act = useCallback(async (server, action) => {
+    setBusy((b) => ({ ...b, [server.name]: action }))
     try {
-      const r = await api.mcpAdd({ catalogue_id: entry.id })
-      setHelpText(r.registration_help ? { server: r.name, text: r.registration_help } : '')
-      toast(`Added ${r.name}${r.needs_login ? ' — log in to finish' : ''}`, r.needs_login ? 'info' : 'ok')
+      if (action === 'remove') {
+        if (!window.confirm(`Remove ${server.name}? Its stored credentials are forgotten too.`)) return
+        await api.mcpRemove(server.name)
+        toast(`Removed ${server.name}`, 'ok')
+      } else if (action === 'switch') {
+        const cap = (caps.connectors ?? []).find((c) => c.name === server.name)
+        await setCapEnabled(cap || { kind: 'connector', name: server.name, enabled: false }, !cap?.enabled)
+      } else if (action === 'login') {
+        const result = await api.mcpLogin(server.name)
+        if (result.authorized) toast(`Signed in to ${server.name}`, 'ok')
+        else { toast(result.result, 'info'); setHelp({ server: server.name, text: result.result }) }
+      }
+      await refresh()
+      refreshHealth()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy((b) => ({ ...b, [server.name]: undefined }))
+    }
+  }, [caps, refresh, refreshHealth, setCapEnabled, toast])
+
+  const addFromCatalogue = useCallback(async (entry) => {
+    setBusy((b) => ({ ...b, [entry.id]: 'add' }))
+    try {
+      const result = await api.mcpAdd({ catalogue_id: entry.id })
+      if (result.registration_help) setHelp({ server: result.name, text: result.registration_help })
+      toast(`Added ${result.name}${result.needs_login ? ' — sign in to finish' : ''}`, 'ok')
       await refresh()
     } catch (err) {
       toast(err.message, 'bad')
     } finally {
-      setBusyAdd('')
+      setBusy((b) => ({ ...b, [entry.id]: undefined }))
     }
-  }
+  }, [refresh, toast])
 
-  const addCustom = async () => {
-    if (!form.name.trim()) { toast('A custom server needs a name', 'bad'); return }
-    setBusyAdd('custom')
-    try {
-      const args = form.args.split(',').map((s) => s.trim()).filter(Boolean)
-      const r = await api.mcpAdd({
-        name: form.name.trim(),
-        transport: form.transport,
-        command: form.command.trim() || null,
-        args,
-        url: form.url.trim() || null,
-        oauth: form.oauth,
-        allow_local: form.allow_local,
-      })
-      setForm(EMPTY_FORM)
-      setShowCustom(false)
-      setHelpText(r.registration_help ? { server: r.name, text: r.registration_help } : '')
-      toast(`Added ${r.name}`, r.needs_login ? 'info' : 'ok')
-      await refresh()
-    } catch (err) {
-      toast(err.message, 'bad')
-    } finally {
-      setBusyAdd('')
-    }
-  }
+  const configured = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
+  const popular = useMemo(
+    () => catalogue.filter((entry) => !configured.has(entry.id)).slice(0, 3),
+    [catalogue, configured],
+  )
 
-  const openAuth = (url) => window.open(url, '_blank', 'noopener')
+  const rows = useMemo(() => servers.filter((server) => {
+    const state = live[server.name] || {}
+    if (tab === 'connected') return Boolean(state.connected)
+    if (tab === 'idle') return !state.connected
+    return true
+  }), [servers, live, tab])
 
   return (
     <div className="view" ref={rootRef}>
-      <div className="view-inner">
+      <div className="view-inner view-inner--wide">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow">
-              <span className="led led--amber" /> connections
-            </div>
-            <h1>MCP servers</h1>
+            <div className="vheader-eyebrow"><span className="led led--amber" /> connections</div>
+            <h1>Connectors</h1>
             <div className="vheader-sub">
-              Connect external apps. Their tools join the same flat namespace as builtins — the agent
-              can't tell them apart.
+              External apps over MCP. Their tools join the same flat namespace as the builtins, so
+              the agent cannot tell them apart — but you can.
             </div>
           </div>
           <div className="vheader-actions">
-            <button type="button" className="btn btn--ghost" onClick={refresh}>
-              <Icon name="refresh" size={15} /> Refresh
+            <button type="button" className="btn btn--primary btn--small" onClick={() => setOverlay('directory:connectors')}>
+              <Icon name="plus" size={14} /> Add
+            </button>
+            <button type="button" className="btn btn--ghost btn--small" onClick={refresh}>
+              <Icon name="refresh" size={14} /> Refresh
             </button>
           </div>
         </header>
@@ -271,134 +377,105 @@ export default function Mcp() {
         {auths.length > 0 && (
           <div className="auth-banner" data-enter>
             <span className="led led--amber led--pulse" />
-            <span>
-              {auths.length} OAuth authorization{auths.length > 1 ? 's' : ''} pending:
-            </span>
+            <span>{auths.length} sign-in{auths.length > 1 ? 's' : ''} waiting:</span>
             {auths.map((a) => (
-              <button key={a.server} type="button" className="btn btn--small" onClick={() => openAuth(a.authorization_url)}>
-                <Icon name="link" size={13} /> authorize {a.server}
-              </button>
+              <span key={a.server} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                <button type="button" className="btn btn--small" onClick={() => window.open(a.authorization_url, '_blank', 'noopener')}>
+                  <Icon name="link" size={13} /> open {a.server}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--small"
+                  title="Copy the sign-in link"
+                  onClick={async () => toast(
+                    await copyText(a.authorization_url) ? 'Sign-in link copied' : 'Could not copy — open it instead',
+                    'info',
+                  )}
+                >
+                  <Icon name="copy" size={13} />
+                </button>
+              </span>
             ))}
-            <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', marginLeft: 'auto' }}>
-              the browser may open on the backend machine too
-            </span>
           </div>
         )}
 
-        {helpText && (
+        {help && (
           <div className="msg-note msg-note--guard" style={{ marginBottom: 16, whiteSpace: 'pre-wrap' }} data-enter>
             <Icon name="key" size={15} />
-            <span>{helpText.text}</span>
+            <span>{help.text}</span>
+            <button type="button" className="icon-btn" style={{ marginLeft: 'auto' }} onClick={() => setHelp(null)} aria-label="Dismiss">
+              <Icon name="x" size={14} />
+            </button>
           </div>
         )}
 
-        <div className="card card-pad" style={{ marginBottom: 26 }} data-enter>
-          <div className="card-title"><span className="led led--ok" /> installed · {servers.length}</div>
-          {servers.length === 0 && (
-            <div className="empty-state" style={{ padding: 20 }}>
-              <Icon name="plug" size={20} />
-              Nothing installed yet. Add a server from the catalogue below, or a custom one.
-            </div>
-          )}
-          {servers.length > 0 && (
-            <p className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', margin: '0 0 10px' }}>
-              Switching one on starts its process immediately and reports what came back. Adding a
-              server never starts anything on its own.
-            </p>
-          )}
-          {servers.map((s) => (
-            <ServerRow key={s.name} server={s} live={live[s.name] || {}} onChanged={refresh} />
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }} data-enter>
-          <div className="card-title" style={{ marginBottom: 0 }}><span className="led led--amber" /> catalogue</div>
-          <button type="button" className="btn btn--ghost btn--small" onClick={() => setShowCustom((s) => !s)}>
-            <Icon name="plus" size={13} /> {showCustom ? 'Hide custom form' : 'Add custom server'}
-          </button>
-        </div>
-
-        {showCustom && (
-          <div className="card card-pad" style={{ marginBottom: 16, display: 'grid', gap: 12 }} data-enter>
-            <div className="card-title">custom server</div>
-            <div className="field">
-              <label>name</label>
-              <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="my-server" />
-            </div>
-            <div className="field">
-              <label>transport</label>
-              <select value={form.transport} onChange={(e) => setForm((f) => ({ ...f, transport: e.target.value }))}>
-                <option value="stdio">stdio</option>
-                <option value="streamable-http">streamable-http</option>
-                <option value="sse">sse</option>
-              </select>
-            </div>
-            {form.transport === 'stdio' ? (
-              <div className="field-row">
-                <div className="field">
-                  <label>command</label>
-                  <input value={form.command} onChange={(e) => setForm((f) => ({ ...f, command: e.target.value }))} placeholder="npx" />
-                </div>
-                <div className="field">
-                  <label>args (comma separated)</label>
-                  <input value={form.args} onChange={(e) => setForm((f) => ({ ...f, args: e.target.value }))} placeholder="-y, @playwright/mcp@latest" />
-                </div>
-              </div>
-            ) : (
-              <div className="field">
-                <label>url</label>
-                <input value={form.url} onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))} placeholder="https://mcp.example.com/mcp" />
-              </div>
-            )}
-            <div className="field-row">
-              <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)' }}>
-                <input type="checkbox" checked={form.oauth} onChange={(e) => setForm((f) => ({ ...f, oauth: e.target.checked }))} style={{ accentColor: 'var(--clay)' }} />
-                OAuth login
-              </label>
-              <label className="field" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-dim)' }}>
-                <input type="checkbox" checked={form.allow_local} onChange={(e) => setForm((f) => ({ ...f, allow_local: e.target.checked }))} style={{ accentColor: 'var(--clay)' }} />
-                allow local connections
-              </label>
-            </div>
-            <div>
-              <button type="button" className="btn btn--primary" disabled={busyAdd === 'custom'} onClick={addCustom}>
-                {busyAdd === 'custom' ? 'Adding…' : 'Add server'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="mcp-tiles">
-          {catalogue.map((entry) => (
-            <div className="mcp-tile" key={entry.id} data-enter>
-              <div className="mcp-tile-head">
-                <span className="mcp-tile-title">{entry.title}</span>
-                {entry.installed && <span className="badge badge--ok">installed</span>}
-              </div>
-              <div className="mcp-tile-desc">{entry.description}</div>
-              <div className="mcp-tile-meta">
-                <span className="badge">{entry.category}</span>
-                <span className="badge">{entry.auth}</span>
-                <span className="badge">{entry.transport}</span>
-                {entry.requires && <span className="badge">{entry.requires}</span>}
-              </div>
-              <div className="mcp-tile-foot">
-                {entry.installed ? (
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)' }}>in mcp.yaml</span>
-                ) : (
-                  <button type="button" className="btn btn--small" disabled={busyAdd === entry.id} onClick={() => addFromCatalogue(entry)}>
-                    {busyAdd === entry.id ? 'Adding…' : 'Add'}
+        {popular.length > 0 && (
+          <section className="conn-popular" data-enter>
+            <div className="conn-section-title">Popular</div>
+            <div className="conn-popular-grid">
+              {popular.map((entry) => (
+                <div className="conn-pop" key={entry.id}>
+                  <ServiceIcon name={entry.id} size={30} />
+                  <span className="conn-pop-name">{entry.title}</span>
+                  <button
+                    type="button"
+                    className="btn btn--small"
+                    disabled={busy[entry.id] === 'add'}
+                    onClick={() => addFromCatalogue(entry)}
+                  >
+                    {busy[entry.id] === 'add' ? 'Adding…' : 'Add'}
                   </button>
-                )}
-                {entry.homepage && (
-                  <a className="mcp-tile-home" href={entry.homepage} target="_blank" rel="noreferrer">
-                    homepage
-                  </a>
-                )}
-              </div>
+                </div>
+              ))}
             </div>
+          </section>
+        )}
+
+        <div className="conn-tabs" data-enter>
+          {TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`conn-tab${tab === item.id ? ' active' : ''}`}
+              onClick={() => setTab(item.id)}
+            >
+              {item.label}
+            </button>
           ))}
+          <span className="conn-count">{rows.length} of {servers.length}</span>
         </div>
+
+        <div className="card" data-enter>
+          <table className="conn-table">
+            <thead>
+              <tr><th>Connector</th><th>Type</th><th>Status</th><th /></tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr><td colSpan={4} className="conn-empty">
+                  {servers.length ? 'Nothing in this tab.' : 'Nothing configured yet — Add one above.'}
+                </td></tr>
+              )}
+              {rows.map((server) => (
+                <ConnectorRow
+                  key={server.name}
+                  server={server}
+                  cap={(caps.connectors ?? []).find((c) => c.name === server.name)}
+                  live={live[server.name]}
+                  busy={busy[server.name]}
+                  expanded={expanded === server.name}
+                  onExpand={() => setExpanded(expanded === server.name ? null : server.name)}
+                  onAct={(action) => act(server, action)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <p className="conn-foot" data-enter>
+          Adding a connector never starts anything on its own. Connecting one starts its process
+          now and reports what came back, and every server asks for trust once on first use.
+        </p>
       </div>
     </div>
   )

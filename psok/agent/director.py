@@ -36,6 +36,26 @@ class Guards:
     max_tool_calls: int = 40
     max_seconds: float = 600.0
     max_repeated_calls: int = 3
+    # How many times a turn may be restarted after the model ended it without
+    # actually answering -- an empty reply, or one the provider cut off. Bounded
+    # so a model that only ever returns nothing cannot spin.
+    max_continuations: int = 2
+
+
+# Providers name a truncated response differently; all of them mean the same
+# thing -- the model was still writing when it ran out of room.
+_TRUNCATED = {"length", "max_tokens", "incomplete"}
+
+CONTINUE_AFTER_EMPTY = (
+    "Your previous turn ended without a reply. The user's request is not"
+    " finished. Continue now: call the tools you still need, then answer."
+    " Do not apologise and do not restate the request."
+)
+
+CONTINUE_AFTER_TRUNCATION = (
+    "Your previous message was cut off before it finished. Continue from"
+    " exactly where it stopped. Do not repeat what you already wrote."
+)
 
 
 @dataclass
@@ -130,6 +150,11 @@ class Director:
         started = time.monotonic()
         tool_calls_made = 0
         call_fingerprints: dict[str, int] = {}
+        continuations = 0
+        # Carried into the next iteration's prompt only. It is an instruction
+        # about how to continue, not part of what was said, so it never reaches
+        # the transcript.
+        nudge: str | None = None
 
         for iteration in range(self.guards.max_iterations):
             if cancel is not None and cancel.is_set():
@@ -153,6 +178,9 @@ class Director:
                 system_prompt=system_prompt,
             )
             wire = [{"role": "system", "content": system_prompt}, *history]
+            if nudge:
+                wire.append({"role": "system", "content": nudge})
+                nudge = None
 
             tool_schemas = (
                 self.registry.schemas(hidden_servers=hidden_servers)
@@ -215,6 +243,39 @@ class Director:
 
             if not response.tool_calls:
                 answer = response.text or ""
+                truncated = (response.stop_reason or "").lower() in _TRUNCATED
+
+                # A turn that ends with nothing to show is not a finished turn.
+                # Models do this after a tool result -- they stop instead of
+                # acting on it -- and a truncated answer stops mid-sentence.
+                # Both used to end the turn silently, leaving the user to type
+                # "continue" to get the work they already asked for.
+                unfinished = not answer.strip() or truncated
+                if unfinished and continuations < self.guards.max_continuations:
+                    continuations += 1
+                    if answer.strip():
+                        self.messages.append(conversation_id, "assistant", answer)
+                        nudge = CONTINUE_AFTER_TRUNCATION
+                        yield Event(
+                            "warning",
+                            {"message": "the answer was cut off; continuing it"},
+                        )
+                    else:
+                        nudge = CONTINUE_AFTER_EMPTY
+                        yield Event(
+                            "warning",
+                            {"message": "the model stopped without answering; continuing"},
+                        )
+                    continue
+
+                if not answer.strip():
+                    # Out of continuations and still nothing. Say so rather than
+                    # closing the turn on an empty bubble.
+                    yield Event(
+                        "warning",
+                        {"message": "the model ended the turn without an answer"},
+                    )
+
                 self.messages.append(conversation_id, "assistant", answer)
                 self.conversations.touch(conversation_id)
                 yield Event("done", {"text": answer, "iterations": iteration + 1})

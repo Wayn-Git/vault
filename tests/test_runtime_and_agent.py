@@ -683,3 +683,80 @@ def test_google_declares_no_streaming_because_it_has_none():
     resolved = google.initialize(ProviderConfig(name="google", default_model="gemini-2.0-flash"))
     assert resolved.capabilities.streaming is False
     assert not hasattr(resolved.client, "stream")
+
+
+# --------------------------------------------------------------------------
+# turns that stop before the work is done
+# --------------------------------------------------------------------------
+
+
+async def test_an_empty_reply_continues_the_turn_instead_of_ending_it(db, patched_resolve):
+    """Models stop after a tool result rather than acting on it, returning no
+    text at all. That used to end the turn on an empty bubble, and the user had
+    to type "continue" to get work they had already asked for."""
+    patched_resolve(
+        [
+            ModelResponse(tool_calls=[ToolCall(id="c1", name="echo", arguments={"text": "hi"})]),
+            ModelResponse(text="   "),
+            ModelResponse(text="the repository is cloned and the skill is installed"),
+        ]
+    )
+    cid = ConversationRepository().create("fake", "fake-1")
+    events = await collect(Director(echo_registry()), cid, "install that skill")
+
+    assert events[-1].type == "done"
+    assert events[-1].data["text"] == "the repository is cloned and the skill is installed"
+    assert any(e.type == "warning" for e in events)
+
+    # The blank turn is not written to history: nothing was said.
+    contents = [m.content for m in MessageRepository().history(cid) if m.role == "assistant"]
+    assert "   " not in contents
+
+
+async def test_a_truncated_answer_is_continued_rather_than_left_mid_sentence(db, patched_resolve):
+    patched_resolve(
+        [
+            ModelResponse(text="Here is the first half", stop_reason="length"),
+            ModelResponse(text=" and here is the rest."),
+        ]
+    )
+    cid = ConversationRepository().create("fake", "fake-1")
+    events = await collect(Director(echo_registry()), cid, "write something long")
+
+    assert events[-1].type == "done"
+    said = [m.content for m in MessageRepository().history(cid) if m.role == "assistant"]
+    assert said == ["Here is the first half", " and here is the rest."]
+
+
+async def test_the_continuation_is_an_instruction_not_part_of_the_transcript(db, patched_resolve):
+    """The nudge steers the next call only. Writing it to history would put
+    words in the user's mouth and it would be recalled in every later turn."""
+    model = patched_resolve([ModelResponse(text=""), ModelResponse(text="done properly")])
+    seen: list[list[dict]] = []
+    original = model.client.complete
+
+    async def recording(messages, tools=None, params=None):
+        seen.append(list(messages))
+        return await original(messages, tools=tools, params=params)
+
+    model.client.complete = recording
+
+    cid = ConversationRepository().create("fake", "fake-1")
+    await collect(Director(echo_registry()), cid, "do the thing")
+
+    # The second call carries the instruction; the transcript does not.
+    assert any("Continue now" in m.get("content", "") for m in seen[1])
+    assert not any("Continue now" in (m.content or "") for m in MessageRepository().history(cid))
+    assert all(m.role != "system" for m in MessageRepository().history(cid))
+
+
+async def test_a_model_that_only_ever_returns_nothing_still_ends(db, patched_resolve):
+    """The continuation is bounded: an always-empty model must not spin."""
+    model = patched_resolve([ModelResponse(text="") for _ in range(10)])
+    cid = ConversationRepository().create("fake", "fake-1")
+    events = await collect(Director(echo_registry(), guards=Guards(max_continuations=2)), cid, "hi")
+
+    assert events[-1].type == "done"
+    assert model.client.calls == 3  # the first call, plus two continuations
+    warnings = [e.data.get("message", "") for e in events if e.type == "warning"]
+    assert any("without an answer" in message for message in warnings)

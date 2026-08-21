@@ -34,13 +34,21 @@ Then:
 ```bash
 psok chat --provider anthropic --workspace ~/notes
 psok logs                              # every tool call, with the decision that allowed it
-uvicorn psok.api.main:app --reload     # HTTP + SSE API for the frontend
 ```
 
-The API accepts browser requests from Vite's dev origin (`http://localhost:5173`)
-out of the box. Serving the frontend from anywhere else means setting
-`PSOK_CORS_ORIGINS` to a comma-separated list of origins — deliberately not a
-wildcard, since this API can run shell commands on the machine.
+Or use it in a browser:
+
+```bash
+cd frontend && npm install && npm run build   # once
+psok serve --open                             # http://127.0.0.1:8000
+```
+
+`psok serve` is one process for the whole product: the API under `/api`, the
+built interface everywhere else. Working on the interface itself means running
+Vite alongside it (`cd frontend && npm run dev`), which proxies `/api` to the
+API. Serving the bundle from some other origin means setting `PSOK_CORS_ORIGINS`
+to a comma-separated list — deliberately not a wildcard, since this API can run
+shell commands on the machine. See [docs/interface.md](docs/interface.md).
 
 Any OpenAI-compatible endpoint — vLLM, LM Studio, NVIDIA NIM, Groq, OpenRouter — works
 with a `base_url` entry and no code change.
@@ -76,6 +84,34 @@ memory:
   model: qwen2.5:3b
 ```
 
+## Skills
+
+```bash
+psok skills                                                  # what is installed
+psok skills --install https://github.com/o/r/blob/main/skills/x/SKILL.md
+psok skills --remove x
+```
+
+A skill is a directory with a SKILL.md (ADR-0006), so installing one is a
+download and a validation: the file is staged and parsed before it is placed,
+under the name its frontmatter declares, and a download that turns out not to be
+a skill leaves nothing behind.
+
+The interface's Directory browses the same thing: skills are read live from
+their source repositories — real names and descriptions out of the files
+themselves — and install with one click, alongside the MCP catalogue.
+
+## What runs without asking
+
+```bash
+psok permissions                                   # every standing "don't ask again"
+psok permissions --revoke run_shell_command:read-only
+```
+
+Approvals are kept by operation key rather than tool name, so approving a
+read-only shell command never approved a destructive one. The Activity view
+lists the same grants with a way to take one back.
+
 ## Connecting apps over MCP
 
 ```bash
@@ -110,8 +146,8 @@ references. See [docs/architecture/mcp-oauth.md](docs/architecture/mcp-oauth.md)
 Multi-provider AI runtime (OpenAI-compatible, Anthropic, Google, Ollama, and any
 OpenAI-compatible endpoint) with runtime model switching and retry on transient
 provider failures · the agent loop with iteration, time, and repetition guards ·
-streaming responses · 18 builtin tools across filesystem, shell, desktop, tasks,
-calendar and document search · hybrid retrieval over your notes (semantic + BM25,
+streaming responses · 20 builtin tools across filesystem, shell, desktop, tasks,
+calendar, document search and the open web · hybrid retrieval over your notes (semantic + BM25,
 incremental indexing) · MCP connectivity with OAuth 2.1, PKCE, and a curated server
 catalogue · a permission gate with OS-level sandboxing on macOS and Linux ·
 deterministic natural-language scheduling · markdown skills · a CLI and an HTTP API.
@@ -123,6 +159,13 @@ transcript.
 Skills, connectors and memory can each be switched on or off, globally or per
 conversation, and `/skill-name` engages a skill directly.
 
+A React interface over the same API: a rail of conversations, streamed answers
+rendered as markdown, inline permission prompts, a command palette over every
+action, a directory for installing skills and adding connectors, file
+attachments, and connector setup — catalogue, OAuth, credentials — without
+dropping to the CLI. Everything in it is reachable from the keyboard; `?` lists
+the bindings.
+
 Not built: first-party service integrations.
 Those are described in the [roadmap](docs/roadmap/implementation-plan.md) as future work,
 not in the architecture docs as if they exist.
@@ -130,7 +173,7 @@ not in the architecture docs as if they exist.
 ## How it is put together
 
 ```
-Interface (CLI · HTTP/SSE API · React later)
+Interface (CLI · HTTP/SSE API · React app served by the same process)
         │
    Agent Loop ── the single owner of reason → act → observe
         ├── AI Runtime ......... provider adapters behind one contract
@@ -163,14 +206,17 @@ conflicts back rather than guessing.
 - [Components](docs/architecture/components.md) — Tool vs Skill vs MCP Tool vs Agent
 - [Data model](docs/architecture/data-model.md) · [AI runtime](docs/architecture/ai-runtime.md) · [Security](docs/architecture/security.md)
 - [Decision records](docs/architecture/decisions/) — ADRs with alternatives and trade-offs
+- [The web interface](docs/interface.md) — how the React app is put together, and every keyboard binding
 - [Research](docs/research/) — what was taken from Pipali, Khoj, and LibreChat, and what was rejected
 
 ## Development
 
 ```bash
-pytest              # 216 unit tests
+pytest              # 256 unit tests
 pytest -m live      # 5 more against real MCP servers (spawns processes, uses network)
 ruff check psok tests
+cd frontend && npm run lint && npm run build
+npm run smoke       # drives a real browser against a running psok serve
 ```
 
 Sandbox containment is tested against the real OS and skips where unavailable

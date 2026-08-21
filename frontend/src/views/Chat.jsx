@@ -1,14 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
+import Markdown from '../components/Markdown.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
 import ConfirmModal from '../components/ConfirmModal.jsx'
 import PlusMenu, { connectorState } from '../components/PlusMenu.jsx'
+import ModelMenu from '../components/ModelMenu.jsx'
 import { useApp } from '../store.jsx'
-import { api, fmtDate } from '../api.js'
+import { api, copyText } from '../api.js'
+import { MOD_LABEL } from '../keys.js'
 
 /* The composer is the interface. Everything else — which skills are live, which
    connectors it may reach, what it remembers, where it may work — hangs off the
-   + menu beside it, so the surface stays one field and a sentence. */
+   + menu beside it or the palette above it, so the surface stays one field and
+   a sentence. */
 
 const FALLBACK_PROVIDER = 'nvidia'
 const FALLBACK_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b'
@@ -75,6 +79,43 @@ function historyToItems(rows) {
   }).filter(Boolean)
 }
 
+function CopyButton({ text, label = 'Copy' }) {
+  const [done, setDone] = useState(false)
+  if (!text) return null
+  return (
+    <button
+      type="button"
+      className="msg-copy"
+      title={label}
+      aria-label={label}
+      onClick={async () => {
+        setDone(await copyText(text) ? 'ok' : 'no')
+        setTimeout(() => setDone(false), 1500)
+      }}
+    >
+      <Icon name={done === 'ok' ? 'check' : done === 'no' ? 'x' : 'copy'} size={13} />
+    </button>
+  )
+}
+
+/* The chain of thought is not the answer, and rendering it as one would be a
+   lie about what the model committed to. It gets its own collapsed block. */
+function Reasoning({ text, live }) {
+  const [open, setOpen] = useState(false)
+  if (!text) return null
+  return (
+    <div className={`reasoning${open ? ' open' : ''}`}>
+      <button type="button" className="reasoning-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <Icon name="spark" size={12} />
+        <span>{live ? 'thinking' : 'thought for a moment'}</span>
+        {live && <span className="led led--amber led--pulse" />}
+        <Icon name="chevron" size={12} style={{ transform: open ? 'rotate(90deg)' : 'none' }} />
+      </button>
+      {open && <div className="reasoning-body">{text}</div>}
+    </div>
+  )
+}
+
 function Msg({ item }) {
   const role = item.kind
 
@@ -97,16 +138,7 @@ function Msg({ item }) {
       </div>
     )
   }
-  if (role === 'reasoning') {
-    return (
-      <div className="msg-reasoning">
-        <span className="mono" style={{ fontSize: 10, letterSpacing: '0.2em', textTransform: 'uppercase' }}>
-          thinking
-        </span>
-        <div>{item.text}</div>
-      </div>
-    )
-  }
+  if (role === 'reasoning') return <Reasoning text={item.text} />
   if (role === 'tool') {
     return (
       <ToolCallCard
@@ -121,26 +153,39 @@ function Msg({ item }) {
     )
   }
   if (role === 'assistant') {
+    // A turn that only called tools has nothing to say yet, and labelling each
+    // of those as a reply from PSOK turns three steps of one answer into three
+    // answers.
+    if (!item.text && item.toolCalls?.length) {
+      return <>{item.toolCalls.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}</>
+    }
     return (
       <div className="msg msg-assistant">
-        <div className="msg-role"><span className="led led--faint" /> psok</div>
-        {item.text && <div className="msg-body">{item.text}</div>}
+        <div className="msg-role">
+          <span className="led led--faint" /> psok
+          <CopyButton text={item.text} label="Copy this answer" />
+        </div>
+        {item.text && <div className="msg-body"><Markdown text={item.text} /></div>}
         {item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
       </div>
     )
   }
   return (
     <div className="msg msg-user">
-      <div className="msg-role">you</div>
-      <div className="msg-body">{item.text}</div>
+      <div className="msg-role">you<CopyButton text={item.text} label="Copy" /></div>
+      <div className="msg-body msg-body--plain">{item.text}</div>
     </div>
   )
 }
 
 export default function Chat() {
-  const { health, refreshHealth, setView, toast } = useApp()
-  const [conversations, setConversations] = useState([])
-  const [activeId, setActiveId] = useState(null)
+  const {
+    health, refreshHealth, setView, toast, registerChat,
+    conversations, refreshConvs, activeId, setActiveId, setRenaming,
+    caps, refreshCaps, setCapEnabled, busyCap,
+    workspace, setWorkspace,
+  } = useApp()
+
   const [items, setItems] = useState([])
   const [turnState, setTurnState] = useState('idle')
   const [stopping, setStopping] = useState(false)
@@ -148,19 +193,24 @@ export default function Chat() {
   const [liveBuffer, setLiveBuffer] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
   const [pending, setPending] = useState([])
-  const [workspace, setWorkspace] = useState('')
+  const [elsewhere, setElsewhere] = useState([])
   const [input, setInput] = useState('')
   const [plusOpen, setPlusOpen] = useState(false)
   const [modelOpen, setModelOpen] = useState(false)
   const [draft, setDraft] = useState({ provider: '', model: '' })
   const [acItems, setAcItems] = useState([])
   const [acIndex, setAcIndex] = useState(0)
-  const [caps, setCaps] = useState({ skills: [], connectors: [] })
-  const [arming, setArming] = useState('')
+  const [attachments, setAttachments] = useState([])
+  // Plan mode is a real instruction, not a mode flag: it is prepended to the
+  // message so the model outlines the work before touching anything.
+  const [plan, setPlan] = useState(false)
+  const [atBottom, setAtBottom] = useState(true)
+  const [lastSent, setLastSent] = useState('')
 
   const abortRef = useRef(null)
   const scrollRef = useRef(null)
   const textareaRef = useRef(null)
+  const fileRef = useRef(null)
   const acTimerRef = useRef(null)
   const liveRef = useRef({ buffer: '', reasoning: '', tool: null })
 
@@ -179,43 +229,8 @@ export default function Chat() {
   const setTool = useCallback((t) => { liveRef.current.tool = t; setLiveTool(t) }, [])
   const setReasoning = useCallback((t) => { liveRef.current.reasoning = t; setLiveReasoning(t) }, [])
 
-  const refreshConvs = useCallback(async () => {
-    try { setConversations(await api.conversations()) } catch (err) { toast(err.message, 'bad') }
-  }, [toast])
-
-  useEffect(() => { refreshConvs() }, [refreshConvs])
-
-  // What the agent can actually reach. Refreshed when the conversation changes
-  // and after every turn, because a connector can die between messages.
-  const refreshCaps = useCallback(async () => {
-    try { setCaps(await api.capabilities(activeId || null)) } catch { /* strip stays as it was */ }
-  }, [activeId])
-
-  useEffect(() => { refreshCaps() }, [refreshCaps])
-
-  const armConnector = useCallback(async (cap) => {
-    setArming(cap.name)
-    try {
-      // Starts or stops the process and waits for the outcome, so the chip
-      // never reports a capability the agent does not have.
-      const result = await api.toggleCapability('connector', cap.name, !cap.enabled, activeId || null)
-      const live = result.live || {}
-      if (live.error) toast(`${cap.name} could not start — ${live.error}`, 'bad')
-      else if (live.connected) toast(`${cap.name} ready — ${live.tools} tools`, 'ok')
-      await refreshCaps()
-      refreshHealth()
-    } catch (err) {
-      toast(err.message, 'bad')
-    } finally {
-      setArming('')
-    }
-  }, [activeId, refreshCaps, refreshHealth, toast])
-
-  // Prompts arrive on the stream; this one fetch recovers anything a reload left
-  // suspended, since the turn survives the page and the stream does not.
-  useEffect(() => { api.confirmations().then(setPending).catch(() => {}) }, [])
-
   const loadMessages = useCallback(async (cid) => {
+    if (!cid) { setItems([]); return }
     try {
       setItems(historyToItems(await api.messages(cid)))
     } catch (err) {
@@ -224,28 +239,32 @@ export default function Chat() {
     }
   }, [toast])
 
+  // A reload lands here with a conversation id from the last session, so the
+  // transcript has to be fetched before anything is typed.
+  useEffect(() => { loadMessages(activeId) }, [activeId, loadMessages])
+
   const selectConversation = useCallback((cid) => {
-    if (turnState !== 'idle') return
+    if (turnState !== 'idle') { toast('Finish or stop this turn first', 'amber'); return }
     setActiveId(cid)
-    loadMessages(cid)
-  }, [turnState, loadMessages])
+  }, [turnState, setActiveId, toast])
 
   const startFresh = useCallback(() => {
-    if (turnState !== 'idle') return
+    if (turnState !== 'idle') { toast('Finish or stop this turn first', 'amber'); return }
     setActiveId(null)
     setItems([])
     setInput('')
-  }, [turnState])
+    setTimeout(() => textareaRef.current?.focus(), 0)
+  }, [turnState, setActiveId, toast])
 
   const pushAssistant = useCallback(() => {
     const { buffer, reasoning } = liveRef.current
-    if (buffer || reasoning) {
-      setItems((prev) => [...prev, { id: nextId(), kind: 'assistant', text: buffer, callsRaw: [] }])
-      setBuffer('')
-    }
     if (reasoning) {
       setItems((prev) => [...prev, { id: nextId(), kind: 'reasoning', text: reasoning }])
       setReasoning('')
+    }
+    if (buffer) {
+      setItems((prev) => [...prev, { id: nextId(), kind: 'assistant', text: buffer, callsRaw: [] }])
+      setBuffer('')
     }
   }, [setBuffer, setReasoning])
 
@@ -261,12 +280,14 @@ export default function Chat() {
     setReasoning('')
     setTool(null)
     setPending([])
+    setElsewhere([])
     await loadMessages(cid)
     refreshConvs()
     // A turn is when connectors reconcile, so the tool count and any connector
     // failure only become knowable once one has run.
     refreshHealth()
-  }, [loadMessages, refreshConvs, refreshHealth, setBuffer, setReasoning, setTool])
+    refreshCaps()
+  }, [loadMessages, refreshConvs, refreshHealth, refreshCaps, setBuffer, setReasoning, setTool])
 
   const onEvent = useCallback((evt) => {
     switch (evt.type) {
@@ -331,6 +352,7 @@ export default function Chat() {
   const openTurn = useCallback(async (cid, message) => {
     setItems((prev) => [...prev, { id: nextId(), kind: 'user', text: message }])
     setTurnState('running')
+    setAtBottom(true)
     const controller = new AbortController()
     abortRef.current = controller
     try {
@@ -349,10 +371,34 @@ export default function Chat() {
     }
   }, [workspace, onEvent, finish, pushNote])
 
+  // A browser cannot hand the agent a path, so the file is uploaded and the
+  // message carries where it landed -- which the ordinary file tools can read.
+  const uploadFiles = useCallback(async (files) => {
+    for (const file of files) {
+      try {
+        const stored = await api.upload(file)
+        setAttachments((list) => [...list, stored])
+      } catch (err) {
+        toast(`${file.name}: ${err.message}`, 'bad')
+      }
+    }
+  }, [toast])
+
   const send = useCallback(async () => {
-    const message = input.trim()
-    if (!message || turnState !== 'idle') return
+    const typed = input.trim()
+    if ((!typed && attachments.length === 0) || turnState !== 'idle') return
+    const attached = attachments.length
+      ? `\n\nAttached files (read them with view_file):\n${attachments.map((f) => `- ${f.path}`).join('\n')}`
+      : ''
+    const prefix = plan
+      ? 'Plan first: list the steps you intend to take and what each one will'
+        + ' touch, then stop and wait. Do not write files or run commands this turn.\n\n'
+      : ''
+    const message = `${prefix}${typed}${attached}`
+    if (!message.trim()) return
     setInput('')
+    setAttachments([])
+    setLastSent(typed)
     setAcItems([])
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     let cid = activeId
@@ -362,7 +408,7 @@ export default function Chat() {
         const { id } = await api.createConversation(
           draftProvider,
           draftModel || 'default',
-          message.slice(0, 56),
+          (typed || attachments[0]?.name || 'untitled').slice(0, 56),
         )
         cid = id
         setActiveId(id)
@@ -371,8 +417,12 @@ export default function Chat() {
       await openTurn(cid, message)
     } catch (err) {
       toast(err.message, 'bad')
+      setTurnState('idle')
     }
-  }, [input, turnState, activeId, draftProvider, draftModel, refreshConvs, openTurn, toast])
+  }, [
+    input, attachments, plan, turnState, activeId, draftProvider, draftModel,
+    refreshConvs, openTurn, toast, setActiveId,
+  ])
 
   const stop = useCallback(async () => {
     if (!activeId) { abortRef.current?.abort(); return }
@@ -398,6 +448,62 @@ export default function Chat() {
     }
   }, [activeId, refreshConvs, toast])
 
+  const toggleMemory = useCallback(async () => {
+    try {
+      const current = await api.memory(activeId || null)
+      const next = await api.toggleMemory(!current.enabled, activeId || null)
+      toast(next.enabled ? 'Memory on — facts are recalled each turn' : 'Memory off', next.enabled ? 'ok' : 'info')
+    } catch (err) {
+      toast(err.message, 'bad')
+    }
+  }, [activeId, toast])
+
+  const focusComposer = useCallback((seed) => {
+    const el = textareaRef.current
+    if (!el) return
+    el.focus()
+    if (seed) setInput((v) => (v.endsWith(seed) ? v : v + seed))
+  }, [])
+
+  // What the keyboard layer and the palette drive. Registered as callbacks so
+  // neither needs a copy of the turn's state to act on it.
+  useEffect(() => {
+    registerChat({
+      stop,
+      startFresh,
+      selectConversation,
+      focusComposer,
+      toggleMemory,
+      openPlus: () => setPlusOpen(true),
+      attach: () => fileRef.current?.click(),
+      beginRename: (cid) => setRenaming(cid),
+      turnRunning: turnState === 'running',
+    })
+  }, [registerChat, stop, startFresh, selectConversation, focusComposer, toggleMemory, turnState, setRenaming])
+
+  // Prompts arrive on the stream; this fetch recovers anything a reload left
+  // suspended, since the turn survives the page and the stream does not.
+  //
+  // Pending prompts are process-wide, so they are split by conversation. One
+  // belonging to a different conversation must not be raised over the
+  // transcript being read here -- answering it would approve a tool call the
+  // user cannot see the context for, and it blocks the page until they do.
+  const refreshPending = useCallback(async () => {
+    try {
+      const rows = await api.confirmations()
+      setPending(rows.filter((r) => !r.conversation_id || r.conversation_id === activeId))
+      setElsewhere(rows.filter((r) => r.conversation_id && r.conversation_id !== activeId))
+    } catch {
+      /* the prompt still arrives on the stream; this is only the recovery path */
+    }
+  }, [activeId])
+
+  useEffect(() => {
+    // Only between turns: mid-turn the stream is the authority, and a fetch
+    // would race it.
+    if (turnState === 'idle') refreshPending()
+  }, [refreshPending, turnState])
+
   const runAc = useCallback((value, cid) => {
     const m = value.match(/\/[\w-]{1,}$/)
     if (!m) { setAcItems([]); return }
@@ -411,6 +517,7 @@ export default function Chat() {
   }, [])
 
   const acceptAc = useCallback((item) => {
+    if (!item) return
     const m = input.match(/\/[\w-]*$/)
     const start = m ? m.index : input.length
     setInput(input.slice(0, start) + '/' + item.name + ' ')
@@ -420,17 +527,23 @@ export default function Chat() {
 
   const onDecide = useCallback((id) => setPending((p) => p.filter((x) => x.id !== id)), [])
 
-  const rendered = buildRendered(items)
+  const rendered = useMemo(() => buildRendered(items), [items])
   const streamingAssistant = turnState === 'running' && !liveTool && (liveBuffer || liveReasoning)
   const isEmpty = rendered.length === 0 && !streamingAssistant && turnState === 'idle'
   const connectorErrors = Object.entries(health?.connector_errors ?? {})
   const shownModel = (active?.model ?? draftModel ?? '').split('/').pop() || 'no model'
+  // Follow the stream, but never yank the view away from someone reading back.
+  const onScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 90)
+  }, [])
 
   useEffect(() => {
     const el = scrollRef.current
-    if (!el) return
+    if (!el || !atBottom) return
     el.scrollTo({ top: el.scrollHeight, behavior: turnState === 'running' ? 'auto' : 'smooth' })
-  }, [rendered.length, turnState, liveTool, liveBuffer])
+  }, [rendered.length, turnState, liveTool, liveBuffer, atBottom])
 
   const composer = (
     <div className={`composer-wrap${isEmpty ? ' composer-wrap--hero' : ''}`}>
@@ -440,8 +553,18 @@ export default function Chat() {
           workspace={workspace}
           onWorkspace={setWorkspace}
           onNavigate={setView}
-          onChanged={setCaps}
+          onAttach={(file) => setAttachments((list) => [...list, file])}
           onClose={() => { setPlusOpen(false); refreshCaps() }}
+        />
+      )}
+
+      {modelOpen && (
+        <ModelMenu
+          provider={active?.provider ?? draftProvider}
+          model={active?.model ?? draftModel}
+          scoped={Boolean(activeId)}
+          onChange={applyModel}
+          onClose={() => setModelOpen(false)}
         />
       )}
 
@@ -462,116 +585,127 @@ export default function Chat() {
         </div>
       )}
 
-      {modelOpen && (
-        <div className="plus-menu" style={{ left: 'auto', right: 26, width: 320 }}>
-          <div className="plus-head">model · {activeId ? 'this conversation' : 'for the next one'}</div>
-          <div style={{ padding: '4px 11px 12px', display: 'grid', gap: 10 }}>
-            <div className="field">
-              <label htmlFor="mdl-provider">provider</label>
-              <select
-                id="mdl-provider"
-                value={active?.provider ?? draftProvider}
-                onChange={(e) => {
-                  const provider = e.target.value
-                  applyModel({ provider, ...(defaults[provider] ? { model: defaults[provider] } : {}) })
-                }}
-              >
-                {providers.length === 0 && <option value="">none configured</option>}
-                {providers.map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="mdl-model">model</label>
-              <input
-                id="mdl-model"
-                key={`${activeId ?? 'draft'}-${active?.model ?? draftModel}`}
-                defaultValue={active?.model ?? draftModel}
-                onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }}
-                onBlur={(e) => {
-                  const model = e.target.value.trim()
-                  if (model && model !== (active?.model ?? draftModel)) applyModel({ model })
-                }}
-              />
-              <span className="hint">Resolved fresh every turn — switching mid-conversation is this write.</span>
-            </div>
-            <button type="button" className="btn btn--small" onClick={() => setModelOpen(false)}>Done</button>
-          </div>
-        </div>
-      )}
-
       <div className="composer">
-        <div className="composer-core">
-          <textarea
-            ref={textareaRef}
-            rows={1}
-            value={input}
-            placeholder={turnState === 'running' ? 'Working…' : 'Ask for anything on this machine'}
-            disabled={turnState === 'running'}
-            onChange={(e) => {
-              setInput(e.target.value)
-              runAc(e.target.value, activeId)
-              e.target.style.height = 'auto'
-              e.target.style.height = `${Math.min(e.target.scrollHeight, 220)}px`
-            }}
-            onKeyDown={(e) => {
-              if (acItems.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-                e.preventDefault()
-                setAcIndex((i) => (i + (e.key === 'ArrowDown' ? 1 : acItems.length - 1)) % acItems.length)
-                return
-              }
-              if (acItems.length && (e.key === 'Enter' || e.key === 'Tab')) {
-                e.preventDefault()
-                acceptAc(acItems[acIndex])
-                return
-              }
-              if (acItems.length && e.key === 'Escape') { setAcItems([]); return }
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
-            }}
-          />
-          <div className="composer-bar">
+        {attachments.length > 0 && (
+          <div className="composer-files">
+            {attachments.map((file) => (
+              <span className="file-chip" key={file.path}>
+                <Icon name="paperclip" size={12} />
+                {file.name}
+                <span className="file-chip-size">{Math.max(1, Math.round(file.bytes / 1024))}kB</span>
+                <button
+                  type="button"
+                  onClick={() => setAttachments((list) => list.filter((f) => f.path !== file.path))}
+                  aria-label={`Remove ${file.name}`}
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={input}
+          placeholder={turnState === 'running' ? 'Working — Esc stops it' : 'Type / for skills'}
+          disabled={turnState === 'running'}
+          aria-label="Message"
+          onChange={(e) => {
+            setInput(e.target.value)
+            runAc(e.target.value, activeId)
+            e.target.style.height = 'auto'
+            e.target.style.height = `${Math.min(e.target.scrollHeight, 260)}px`
+          }}
+          onPaste={(e) => {
+            const files = [...(e.clipboardData?.files || [])]
+            if (files.length) { e.preventDefault(); uploadFiles(files) }
+          }}
+          onKeyDown={(e) => {
+            if (acItems.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault()
+              setAcIndex((i) => (i + (e.key === 'ArrowDown' ? 1 : acItems.length - 1)) % acItems.length)
+              return
+            }
+            if (acItems.length && (e.key === 'Enter' || e.key === 'Tab')) {
+              e.preventDefault()
+              acceptAc(acItems[acIndex])
+              return
+            }
+            if (acItems.length && e.key === 'Escape') { e.stopPropagation(); setAcItems([]); return }
+            if (e.key === 'ArrowUp' && !input && lastSent) {
+              e.preventDefault()
+              setInput(lastSent)
+              return
+            }
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
+          }}
+        />
+
+        <div className="composer-bar">
+          <button
+            type="button"
+            className={`composer-chip${plusOpen ? ' active' : ''}`}
+            onClick={() => { setPlusOpen((o) => !o); setModelOpen(false) }}
+            title={`Files, skills, connectors, memory — ${MOD_LABEL}+/`}
+            aria-label="Files, skills, connectors, memory"
+          >
+            <Icon name="plus" size={16} />
+          </button>
+
+          <div className="composer-modes">
             <button
               type="button"
-              className={`composer-chip${plusOpen ? ' active' : ''}`}
-              onClick={() => { setPlusOpen((o) => !o); setModelOpen(false) }}
-              title="Skills, connectors, memory, workspace"
-              aria-label="Skills, connectors, memory, workspace"
+              className={`mode${plan ? '' : ' active'}`}
+              onClick={() => setPlan(false)}
+              title="Answer and act in one turn"
             >
-              <Icon name="plus" size={15} />
+              Chat
             </button>
             <button
               type="button"
-              className={`composer-chip${modelOpen ? ' active' : ''}`}
+              className={`mode${plan ? ' active' : ''}`}
+              onClick={() => setPlan(true)}
+              title="Ask for the plan before anything is run"
+            >
+              Plan
+            </button>
+          </div>
+
+          <div className="composer-bar-right">
+            <button
+              type="button"
+              className={`composer-model${modelOpen ? ' active' : ''}`}
               onClick={() => { setModelOpen((o) => !o); setPlusOpen(false) }}
               title="Provider and model"
             >
               {shownModel}
-              <Icon name="chevron" size={11} style={{ transform: 'rotate(-90deg)', opacity: 0.6 }} />
+              <Icon name="chevron" size={11} style={{ transform: 'rotate(90deg)', opacity: 0.6 }} />
             </button>
-            <div className="composer-bar-right">
-              {turnState === 'running' ? (
-                <button
-                  type="button"
-                  className="composer-send composer-send--stop"
-                  onClick={stop}
-                  disabled={stopping}
-                  title="Stop this turn on the server"
-                  aria-label="Stop"
-                >
-                  <Icon name="stop" size={13} />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="composer-send"
-                  onClick={send}
-                  disabled={!input.trim()}
-                  title="Send — Enter"
-                  aria-label="Send"
-                >
-                  <Icon name="send" size={14} />
-                </button>
-              )}
-            </div>
+            {turnState === 'running' ? (
+              <button
+                type="button"
+                className="composer-send composer-send--stop"
+                onClick={stop}
+                disabled={stopping}
+                title="Stop this turn on the server — Esc"
+                aria-label="Stop"
+              >
+                <Icon name="stop" size={13} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="composer-send"
+                onClick={send}
+                disabled={!input.trim() && attachments.length === 0}
+                title="Send — Enter"
+                aria-label="Send"
+              >
+                <Icon name="send" size={15} />
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -580,14 +714,14 @@ export default function Chat() {
         <div className="armed">
           <span className="armed-label">reach</span>
           {caps.connectors.map((cap) => {
-            const state = connectorState(cap, arming === cap.name)
+            const state = connectorState(cap, busyCap === `connector:${cap.name}`)
             return (
               <button
                 key={cap.name}
                 type="button"
                 className={`armed-chip${state.tone === 'live' ? ' is-live' : ''}${state.tone === 'error' ? ' is-error' : ''}${state.tone === 'busy' ? ' is-busy' : ''}`}
-                onClick={() => armConnector(cap)}
-                disabled={arming === cap.name}
+                onClick={() => setCapEnabled(cap, !cap.enabled)}
+                disabled={busyCap === `connector:${cap.name}`}
                 title={
                   state.detail
                     ? `${cap.name}: ${state.detail}`
@@ -610,102 +744,108 @@ export default function Chat() {
         <span>enter sends</span>
         <span>shift + enter for a new line</span>
         <span>/name engages a skill</span>
-        <span>writes and shell commands ask first</span>
+        <span><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd> for everything else</span>
       </div>
     </div>
   )
 
   return (
     <div className="view view--flush">
-      <div className="chat-layout">
-        <aside className="chat-side">
-          <div className="chat-side-head">
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => { uploadFiles([...e.target.files]); e.target.value = '' }}
+      />
+
+      <div className="chat-main">
+        {elsewhere.length > 0 && (
+          <div className="chat-banner msg-note msg-note--guard">
+            <Icon name="key" size={14} />
+            <span>
+              {elsewhere.length === 1
+                ? 'A tool call in another conversation is waiting for an answer.'
+                : `${elsewhere.length} tool calls in other conversations are waiting for an answer.`}
+              {' '}That turn stays suspended until it is answered.
+            </span>
             <button
               type="button"
-              className="chat-new"
-              onClick={startFresh}
-              disabled={turnState !== 'idle'}
+              className="btn btn--small"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => selectConversation(elsewhere[0].conversation_id)}
             >
-              <Icon name="plus" size={14} /> New conversation
+              Open it
             </button>
           </div>
-          <div className="chat-convs">
-            {conversations.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className={`chat-conv${c.id === activeId ? ' active' : ''}`}
-                onClick={() => selectConversation(c.id)}
-                title={`${c.provider} · ${c.model}`}
-              >
-                <span className="chat-conv-title">{c.title || 'untitled'}</span>
-                <span className="chat-conv-meta">{fmtDate(c.updated_at)}</span>
-              </button>
-            ))}
+        )}
+
+        {connectorErrors.length > 0 && (
+          <div className="chat-banner msg-note msg-note--error">
+            <Icon name="plug" size={14} />
+            <span>
+              {connectorErrors.map(([name, err]) => `${name}: ${String(err).slice(0, 90)}`).join(' · ')}
+              {' '}— its tools are not reaching the agent.
+            </span>
           </div>
-        </aside>
+        )}
 
-        <div className="chat-main">
-          {connectorErrors.length > 0 && (
-            <div className="msg-note msg-note--error" style={{ margin: '14px 26px 0' }}>
-              <Icon name="plug" size={14} />
-              <span>
-                {connectorErrors.map(([name, err]) => `${name}: ${String(err).slice(0, 90)}`).join(' · ')}
-                {' '}— its tools are not reaching the agent.
-              </span>
+        {isEmpty ? (
+          <div className="hero-stack">
+            <div className="hero">
+              <h1><span className="hero-mark">✳</span> What needs doing?</h1>
             </div>
-          )}
-
-          {isEmpty ? (
-            <div className="hero-stack">
-              <div className="hero">
-                <h1>What needs doing?</h1>
-                <p className="hero-sub">
-                  Files, shell, tasks, calendar, your notes and whatever you have connected,
-                  reachable from one line. Anything that writes or runs asks you first.
-                </p>
-                <div className="hero-hints">
-                  {OPENERS.map((o) => (
-                    <button
-                      key={o}
-                      type="button"
-                      className="hero-hint"
-                      onClick={() => { setInput(o); textareaRef.current?.focus() }}
-                    >
-                      {o}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {composer}
+            {composer}
+            <div className="hero-hints">
+              {OPENERS.map((o) => (
+                <button
+                  key={o}
+                  type="button"
+                  className="hero-hint"
+                  onClick={() => { setInput(o); textareaRef.current?.focus() }}
+                >
+                  {o}
+                </button>
+              ))}
             </div>
-          ) : (
-            <>
-              <div className="chat-scroll" ref={scrollRef}>
-                <div className="chat-stream">
-                  {rendered.map((item) => <Msg key={item.id} item={item} />)}
-                  {streamingAssistant && (
-                    <div className="msg msg-assistant">
-                      <div className="msg-role"><span className="led led--faint led--pulse" /> psok</div>
-                      {liveReasoning && <div className="msg-reasoning">{liveReasoning}</div>}
+          </div>
+        ) : (
+          <>
+            <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
+              <div className="chat-stream">
+                {rendered.map((item) => <Msg key={item.id} item={item} />)}
+                {streamingAssistant && (
+                  <div className="msg msg-assistant">
+                    <div className="msg-role"><span className="led led--faint led--pulse" /> psok</div>
+                    {liveReasoning && <Reasoning text={liveReasoning} live />}
+                    {liveBuffer && (
                       <div className="msg-body">
-                        {liveBuffer}
+                        <Markdown text={liveBuffer} />
                         <span className="tele-cursor" />
                       </div>
-                    </div>
-                  )}
-                  {turnState === 'running' && liveTool && <ToolCallCard call={liveTool} running />}
-                  {turnState === 'running' && !liveTool && !streamingAssistant && (
-                    <div className="msg-note msg-note--guard">
-                      <span className="led led--amber led--pulse" /> thinking
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
+                {turnState === 'running' && liveTool && <ToolCallCard call={liveTool} running />}
+                {turnState === 'running' && !liveTool && !streamingAssistant && (
+                  <div className="msg-note msg-note--guard">
+                    <span className="led led--amber led--pulse" /> thinking
+                  </div>
+                )}
               </div>
-              {composer}
-            </>
-          )}
-        </div>
+            </div>
+            {!atBottom && (
+              <button
+                type="button"
+                className="jump-latest"
+                onClick={() => { setAtBottom(true); const el = scrollRef.current; el?.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }) }}
+              >
+                <Icon name="down" size={13} /> latest
+              </button>
+            )}
+            {composer}
+          </>
+        )}
       </div>
 
       <ConfirmModal pending={pending} onDecide={onDecide} />

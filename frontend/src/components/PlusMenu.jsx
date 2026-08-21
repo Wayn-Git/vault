@@ -1,39 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { api } from '../api.js'
+import { useApp } from '../store.jsx'
+import { MOD_LABEL } from '../keys.js'
 
 /* Everything the agent can be given for the next message, one keystroke from
    the composer.
 
-   A connector row reports what is running, not what is switched on. Those are
-   different facts: a row can say "on" while the process failed to start, died,
-   or was never asked to. Switching one on starts it here and waits for the
-   answer, so the row never claims a capability the agent does not have. */
-
-function Row({ index, icon, label, hint, tail, onClick, disabled }) {
-  return (
-    <button
-      type="button"
-      className="plus-item"
-      style={{ '--i': index }}
-      onClick={onClick}
-      disabled={disabled}
-    >
-      {icon && <Icon name={icon} size={15} />}
-      <span style={{ minWidth: 0 }}>
-        {label}
-        {hint && (
-          <span style={{ display: 'block', fontSize: 11.5, color: 'var(--text-faint)', marginTop: 1, lineHeight: 1.45 }}>
-            {hint}
-          </span>
-        )}
-      </span>
-      {tail && <span className="plus-tail">{tail}</span>}
-    </button>
-  )
-}
-
-const Toggle = ({ on }) => <span className={`plus-toggle${on ? ' on' : ''}`} />
+   A row that changes what the agent can reach reports what is running, not what
+   is switched on. Those are different facts: a row can say "on" while the
+   process failed to start, died, or was never asked to. Switching a connector
+   on starts it here and waits for the answer, so the row never claims a
+   capability the agent does not have. */
 
 export function connectorState(cap, busy) {
   const live = cap.live || {}
@@ -44,222 +22,258 @@ export function connectorState(cap, busy) {
   return { tone: 'off', label: 'off', dot: 'faint' }
 }
 
-export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onChanged }) {
-  const [panel, setPanel] = useState('root')
-  const [caps, setCaps] = useState({ skills: [], connectors: [] })
+function Row({ icon, label, hint, tail, onClick, disabled, danger, submenu, active }) {
+  return (
+    <button
+      type="button"
+      className={`menu-row${danger ? ' danger' : ''}${active ? ' active' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-haspopup={submenu ? 'menu' : undefined}
+      aria-expanded={submenu ? Boolean(active) : undefined}
+    >
+      {icon ? <Icon name={icon} size={15} /> : <span className="menu-gutter" />}
+      <span className="menu-label">
+        {label}
+        {hint && <span className="menu-hint">{hint}</span>}
+      </span>
+      {tail}
+      {submenu && <Icon name="chevron" size={13} className="menu-caret" />}
+    </button>
+  )
+}
+
+const Toggle = ({ on }) => <span className={`switch${on ? ' on' : ''}`}><span /></span>
+
+export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onAttach }) {
+  const { caps, refreshCaps, setCapEnabled, busyCap, setOverlay, toast } = useApp()
+  const [panel, setPanel] = useState(null)      // which submenu is open
+  const [tools_open, setToolsOpen] = useState(false)
   const [memory, setMemory] = useState(null)
-  const [busy, setBusy] = useState('')
+  const [tools, setTools] = useState([])
   const [draftWorkspace, setDraftWorkspace] = useState(workspace || '')
+  const [busy, setBusy] = useState('')
   const ref = useRef(null)
+  const fileRef = useRef(null)
 
   const scope = conversationId || null
 
-  const load = useCallback(async () => {
-    try {
-      const [c, m] = await Promise.all([api.capabilities(scope), api.memory(scope)])
-      setCaps(c)
-      setMemory(m)
-      onChanged?.(c)
-    } catch {
-      /* the menu still opens; the rows simply show nothing to toggle */
-    }
-  }, [scope, onChanged])
-
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    refreshCaps(scope)
+    api.memory(scope).then(setMemory).catch(() => setMemory(null))
+    api.tools().then(setTools).catch(() => setTools([]))
+  }, [scope, refreshCaps])
 
   useEffect(() => {
     const away = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
-    const key = (e) => { if (e.key === 'Escape') (panel === 'root' ? onClose() : setPanel('root')) }
+    const key = (e) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      if (tools_open) setToolsOpen(false)
+      else if (panel) setPanel(null)
+      else onClose()
+    }
     document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', key)
+    document.addEventListener('keydown', key, true)
     return () => {
       document.removeEventListener('mousedown', away)
-      document.removeEventListener('keydown', key)
+      document.removeEventListener('keydown', key, true)
     }
-  }, [onClose, panel])
+  }, [onClose, panel, tools_open])
 
-  const toggleCap = async (cap) => {
-    setBusy(cap.kind + cap.name)
-    try {
-      // Connectors start a real process, so this waits for the outcome rather
-      // than flipping the switch and hoping.
-      await api.toggleCapability(cap.kind, cap.name, !cap.enabled, scope)
-      await load()
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const toggleMemory = async () => {
+  const toggleMemory = useCallback(async () => {
     setBusy('memory')
     try {
-      await api.toggleMemory(!memory.enabled, scope)
-      await load()
+      const next = await api.toggleMemory(!memory?.enabled, scope)
+      setMemory((m) => ({ ...m, enabled: next.enabled }))
+    } catch (err) {
+      toast(err.message, 'bad')
     } finally {
       setBusy('')
     }
-  }
+  }, [memory, scope, toast])
 
-  const counts = useMemo(() => ({
-    skills: caps.skills.filter((s) => s.enabled).length,
-    connectors: caps.connectors.filter((c) => c.live?.connected).length,
-  }), [caps])
+  const pickFiles = useCallback(async (files) => {
+    for (const file of files) {
+      try {
+        onAttach?.(await api.upload(file))
+      } catch (err) {
+        toast(`${file.name}: ${err.message}`, 'bad')
+      }
+    }
+    onClose()
+  }, [onAttach, onClose, toast])
 
-  const scopeLabel = scope ? 'this conversation' : 'new conversations'
+  const skills = caps.skills ?? []
+  const connectors = caps.connectors ?? []
+  const live = connectors.filter((c) => c.live?.connected).length
+  const engaged = skills.filter((s) => s.enabled).length
+  const byServer = useMemo(() => {
+    const groups = new Map()
+    for (const tool of tools) {
+      const key = tool.server || 'builtin'
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(tool)
+    }
+    return [...groups.entries()]
+  }, [tools])
 
-  if (panel === 'skills' || panel === 'connectors') {
-    const items = panel === 'skills' ? caps.skills : caps.connectors
-    return (
-      <div className="plus-menu" ref={ref}>
-        <div className="plus-head">
-          <button type="button" className="plus-back" onClick={() => setPanel('root')} aria-label="Back">
-            <Icon name="chevron" size={13} style={{ transform: 'rotate(180deg)' }} />
-          </button>
-          {panel} · {scopeLabel}
-        </div>
-        <div className="plus-scroll">
-          {items.length === 0 && (
-            <div className="plus-empty">
-              {panel === 'skills'
-                ? 'No skills installed. Drop a SKILL.md into ~/.psok/skills/<name>/.'
-                : 'No connectors configured. Add one from the Connectors view.'}
-            </div>
-          )}
-          {items.map((cap, i) => {
-            const working = busy === cap.kind + cap.name
-            const state = panel === 'connectors' ? connectorState(cap, working) : null
-            return (
-              <Row
-                key={cap.name}
-                index={i}
-                label={cap.title || cap.name}
-                hint={
-                  state
-                    ? state.detail
-                      ? `${state.detail.slice(0, 64)} — switch on to retry`
-                      : state.label
-                    : cap.description?.slice(0, 58)
-                }
-                tail={
-                  <>
-                    {state && <span className={`led led--${state.dot}${working ? ' led--pulse' : ''}`} />}
-                    {working ? <span className="plus-count">…</span> : <Toggle on={cap.enabled} />}
-                  </>
-                }
-                onClick={() => toggleCap(cap)}
-                disabled={working}
-              />
-            )
-          })}
-        </div>
-        {panel === 'connectors' && (
-          <>
-            <div className="plus-sep" />
-            <Row
-              index={items.length}
-              icon="plus"
-              label="Add a connector"
-              onClick={() => { onNavigate('mcp'); onClose() }}
-            />
-          </>
-        )}
-      </div>
-    )
-  }
+  const submenu = (title, body, width = 250) => (
+    <div className="menu-flyout" style={{ width }}>
+      <div className="menu-flyout-head">{title}</div>
+      {body}
+    </div>
+  )
 
-  if (panel === 'workspace') {
-    return (
-      <div className="plus-menu" ref={ref} style={{ width: 320 }}>
-        <div className="plus-head">
-          <button type="button" className="plus-back" onClick={() => setPanel('root')} aria-label="Back">
-            <Icon name="chevron" size={13} style={{ transform: 'rotate(180deg)' }} />
-          </button>
-          workspace root
-        </div>
-        <div style={{ padding: '4px 10px 11px', display: 'grid', gap: 9 }}>
-          <div className="field">
-            <input
-              autoFocus
-              value={draftWorkspace}
-              placeholder="~/notes"
-              onChange={(e) => setDraftWorkspace(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { onWorkspace(draftWorkspace.trim()); onClose() } }}
-            />
-            <span className="hint">
-              File and shell tools are confined here. Empty means the directory the API started in.
-            </span>
-          </div>
+  return (
+    <div className="menu" ref={ref} role="menu">
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => pickFiles([...e.target.files])}
+      />
+
+      <Row
+        icon="paperclip"
+        label="Add files or photos"
+        tail={<span className="menu-keys"><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">U</kbd></span>}
+        onClick={() => fileRef.current?.click()}
+      />
+      <Row
+        icon="folder"
+        label="Working directory"
+        hint={workspace || 'where the API was started'}
+        submenu
+        active={panel === 'workspace'}
+        onClick={() => setPanel(panel === 'workspace' ? null : 'workspace')}
+      />
+      {panel === 'workspace' && submenu('file and shell tools are confined here', (
+        <div className="menu-pad">
+          <input
+            autoFocus
+            className="menu-input"
+            value={draftWorkspace}
+            placeholder="~/notes"
+            onChange={(e) => setDraftWorkspace(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { onWorkspace(draftWorkspace.trim()); onClose() }
+            }}
+          />
           <button
             type="button"
             className="btn btn--primary btn--small"
+            style={{ marginTop: 8 }}
             onClick={() => { onWorkspace(draftWorkspace.trim()); onClose() }}
           >
             Use this directory
           </button>
         </div>
-      </div>
-    )
-  }
+      ), 280)}
 
-  const failed = caps.connectors.filter((c) => c.enabled && c.live?.error).length
+      <div className="menu-sep" />
 
-  return (
-    <div className="plus-menu" ref={ref}>
       <Row
-        index={0}
         icon="book"
         label="Skills"
-        hint={`${counts.skills} of ${caps.skills.length} available`}
-        tail={<Icon name="chevron" size={13} />}
-        onClick={() => setPanel('skills')}
+        hint={`${engaged} of ${skills.length} engaged`}
+        submenu
+        active={panel === 'skills'}
+        onClick={() => setPanel(panel === 'skills' ? null : 'skills')}
       />
+      {panel === 'skills' && submenu('engaged for this conversation', (
+        <>
+          <div className="menu-scroll">
+            {skills.length === 0 && <div className="menu-empty">Nothing installed yet.</div>}
+            {skills.map((skill) => (
+              <Row
+                key={skill.name}
+                icon="book"
+                label={skill.name}
+                tail={busyCap === `skill:${skill.name}`
+                  ? <span className="menu-hint">…</span>
+                  : <Toggle on={skill.enabled} />}
+                onClick={() => setCapEnabled(skill, !skill.enabled)}
+              />
+            ))}
+          </div>
+          <div className="menu-sep" />
+          <Row icon="sliders" label="Manage skills" onClick={() => { onNavigate('skills'); onClose() }} />
+          <Row icon="plus" label="Browse skills" onClick={() => { setOverlay('directory:skills'); onClose() }} />
+        </>
+      ))}
+
       <Row
-        index={1}
         icon="plug"
         label="Connectors"
-        hint={
-          failed
-            ? `${counts.connectors} running · ${failed} failed to start`
-            : `${counts.connectors} running of ${caps.connectors.length}`
-        }
-        tail={
-          <>
-            {failed > 0 && <span className="led led--bad" />}
-            <Icon name="chevron" size={13} />
-          </>
-        }
-        onClick={() => setPanel('connectors')}
+        hint={`${live} running of ${connectors.length}`}
+        submenu
+        active={panel === 'connectors'}
+        onClick={() => setPanel(panel === 'connectors' ? null : 'connectors')}
       />
+      {panel === 'connectors' && submenu('switching one on starts it now', (
+        <>
+          <Row icon="plus" label="Add connector" onClick={() => { setOverlay('directory:connectors'); onClose() }} />
+          <Row icon="sliders" label="Manage connectors" onClick={() => { onNavigate('mcp'); onClose() }} />
+          <div className="menu-sep" />
+          <div className="menu-scroll">
+            {connectors.length === 0 && <div className="menu-empty">None configured.</div>}
+            {connectors.map((cap) => {
+              const state = connectorState(cap, busyCap === `connector:${cap.name}`)
+              return (
+                <Row
+                  key={cap.name}
+                  icon={null}
+                  label={cap.name}
+                  hint={state.detail ? state.detail.slice(0, 40) : state.label}
+                  tail={<Toggle on={cap.enabled} />}
+                  onClick={() => setCapEnabled(cap, !cap.enabled)}
+                />
+              )
+            })}
+          </div>
+          <div className="menu-sep" />
+          <Row
+            icon="grid"
+            label="Tool access"
+            hint={`${tools.length} tools reachable`}
+            submenu
+            active={tools_open}
+            onClick={() => setToolsOpen((o) => !o)}
+          />
+          {tools_open && (
+            <div className="menu-flyout menu-flyout--nested" style={{ width: 300 }}>
+              <div className="menu-flyout-head">what the model can call right now</div>
+              <div className="menu-scroll menu-scroll--tall">
+                {byServer.map(([server, group]) => (
+                  <div key={server}>
+                    <div className="menu-group">{server === 'builtin' ? 'builtin' : server}</div>
+                    {group.map((tool) => (
+                      <div key={tool.name} className="menu-tool" title={tool.description}>
+                        <span className={`led led--${tool.risk === 'high' ? 'bad' : tool.risk === 'medium' ? 'amber' : 'ok'}`} />
+                        <span className="mono">{tool.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      ), 288)}
+
+      <div className="menu-sep" />
+
       <Row
-        index={2}
         icon="spark"
         label="Memory"
-        hint={memory ? `${memory.facts.length} fact${memory.facts.length === 1 ? '' : 's'} recalled each turn` : null}
-        tail={busy === 'memory' ? '…' : <Toggle on={Boolean(memory?.enabled)} />}
+        hint={memory ? `${memory.facts.length} facts recalled each turn` : null}
+        tail={busy === 'memory' ? <span className="menu-hint">…</span> : <Toggle on={Boolean(memory?.enabled)} />}
         onClick={toggleMemory}
-        disabled={!memory || busy === 'memory'}
+        disabled={!memory}
       />
-      <div className="plus-sep" />
-      <Row
-        index={3}
-        icon="term"
-        label="Workspace"
-        hint={workspace || 'the API working directory'}
-        tail={<Icon name="chevron" size={13} />}
-        onClick={() => setPanel('workspace')}
-      />
-      <Row
-        index={4}
-        icon="logs"
-        label="What it just did"
-        hint="every tool call, and what allowed it"
-        onClick={() => { onNavigate('logs'); onClose() }}
-      />
-      <div className="plus-sep" />
-      <div className="plus-empty" style={{ paddingTop: 0, paddingBottom: 7 }}>
-        Applies to {scopeLabel}. Type <span className="mono" style={{ color: 'var(--text-dim)' }}>/name</span> to
-        engage a skill directly.
-      </div>
+      <Row icon="logs" label="What it just did" onClick={() => { onNavigate('logs'); onClose() }} />
     </div>
   )
 }

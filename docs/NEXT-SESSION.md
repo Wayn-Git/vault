@@ -1,17 +1,18 @@
 # Backend contract for the PSOK web interface
 
-The frontend is being built against this API. The backend surface is complete,
-tested, and now hardened for a browser client; this document is the contract it
-exposes. Read `docs/architecture/overview.md` for the system it sits on top of,
-and `docs/architecture/ai-runtime.md#what-the-loop-emits` for the event contract
-in its permanent home.
+**Status: the interface is built against this contract.** `psok serve` runs the
+API and the built bundle in one process; see
+[interface.md](interface.md) for how the app is put together and
+[architecture/overview.md](architecture/overview.md) for the system underneath
+it. `architecture/ai-runtime.md#what-the-loop-emits` holds the event contract in
+its permanent home. This document stays as the API's own description of itself.
 
-**Definition of done for the frontend:** a person can run
-`uvicorn psok.api.main:app` plus `npm run dev`, open the browser, and hold a full
-conversation — streamed token by token, approving a tool confirmation inline,
-switching skills and connectors on and off — without touching the CLI.
+The original definition of done — hold a full conversation in the browser,
+streamed token by token, approving a tool confirmation inline, switching skills
+and connectors on and off, without touching the CLI — is met, and verified by
+driving a real browser against a real model rather than by reading the code.
 
-## The blocker is gone
+## CORS
 
 **CORS is configured.** The API allows `http://localhost:5173` and
 `http://127.0.0.1:5173`. Any other origin needs `PSOK_CORS_ORIGINS` set to a
@@ -23,7 +24,7 @@ does not.
 
 ## Endpoints
 
-26 endpoints, all verified against a running server.
+36 endpoints, all verified against a running server.
 
 | Need | Endpoint |
 |---|---|
@@ -34,14 +35,21 @@ does not.
 | **Stop a running turn** | `POST /api/conversations/{id}/turn/stop` |
 | **Pending confirmations** | `GET /api/confirmations` |
 | **Approve / deny** | `POST /api/confirmations/{request_id}` |
+| **What runs without asking, and taking one back** | `GET /api/confirmations/preferences`, `DELETE /api/confirmations/preferences/{operation_key}` |
 | Skills + connectors with on/off state | `GET /api/capabilities` |
 | Toggle one | `POST,DELETE /api/capabilities/{kind}/{name}` |
 | `/` autocomplete | `GET /api/skills/search?q=` |
 | Every skill, with load errors | `GET /api/skills` |
+| **Install a skill from a URL, or delete one** | `POST /api/skills/install`, `DELETE /api/skills/{name}` |
+| **Browse installable skills** | `GET /api/skills/catalogue` |
+| **Every tool the agent can reach** | `GET /api/tools` |
+| **A file from the browser, as a path** | `POST /api/attachments` |
+| Tasks and calendar, read-only | `GET /api/tasks`, `GET /api/calendar` |
 | Connector catalogue | `GET /api/mcp/catalogue` |
 | Configured connectors | `GET /api/mcp/servers` |
 | Add / remove a connector | `POST,DELETE /api/mcp/servers` |
 | Attach a hand-registered OAuth app | `POST /api/mcp/servers/{name}/oauth-client` |
+| **Credentials a stdio server takes through the environment** | `POST /api/mcp/servers/{name}/env`, `DELETE /api/mcp/servers/{name}/env/{key}` |
 | Start OAuth, poll for the login URL | `POST /api/mcp/servers/{name}/login`, `GET /api/mcp/authorizations` |
 | Connect one now | `POST /api/mcp/servers/{name}/connect` |
 | **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}` |
@@ -120,6 +128,10 @@ though, and the event exists because polling cannot answer either of these:
 - **Two pending calls to the same tool are indistinguishable by name.** The
   event carries the request id; the poll response has to be matched by guesswork.
 
+The pending payload also carries `conversation_id`: prompts are process-wide, so
+an interface recovering one after a reload has to know whether the suspended turn
+is the conversation on screen or a different one.
+
 `remember: true` persists a standing approval keyed by `operation_key`, which the
 pending-confirmation payload now carries — `run_shell_command:read-only` rather
 than `run_shell_command`. That distinction is load-bearing: approving a read-only
@@ -129,27 +141,42 @@ about to remember, not just the tool name.
 Every MCP server also requires a one-time trust confirmation on first use, so
 expect two prompts the first time someone uses a new connector.
 
-## Suggested build order
+## What the interface does with all of this
 
-1. **A hello-world fetch of `/api/health`** in the browser, to confirm the
-   origin is allowed.
-2. **Conversation view** — create, list, render history.
-3. **Streaming** — consume the SSE stream, render `assistant_delta` live. This
-   is the core interaction; get it right before anything else.
-4. **Confirmation UI** — the flow above. Without it the app hangs on any write,
-   so it is not optional polish.
-5. **Composer `+` menu** — skills and connectors from `/api/capabilities` with
-   toggles. Switching a connector on takes effect on the next turn — the API
-   reconciles its live connections at the start of one — so the tiles do not
-   need a separate "connect" step. Skills apply immediately.
-6. **`/` autocomplete** — backed by `/api/skills/search`. Typing `/name` into the
-   message is all the backend needs; it parses and strips the marker itself.
-7. **Connector setup** — catalogue, add, OAuth login (render the URL from
-   `/api/mcp/authorizations` as a link).
-8. **Audit view** — `/api/logs`.
-9. **Memory view** — `/api/memory`: what PSOK holds about the user, a switch, and a
-   way to forget one fact. The `memory` frame arriving after `done` is the live
-   signal that something was learned.
+1. **Conversations** — create, list, rename (`F2`), filter, switch with
+   `⌘↑`/`⌘↓`; the open one survives a reload.
+2. **Streaming** — `assistant_delta` rendered as markdown while it arrives,
+   `reasoning_delta` in a separate collapsed block, `done.text` deliberately not
+   rendered.
+3. **Confirmations** — the `confirmation_required` frame raises an inline
+   prompt showing the arguments and the operation key, answerable with
+   `Enter` / `Escape` / `R`. `GET /api/confirmations` is the reload-recovery
+   path only.
+4. **Skills and connectors** — from the composer's `+` menu, the chips beneath
+   it, the command palette (`⌘K`) and their own views, all reading one store, so
+   a connector reports what is running rather than what was switched on.
+5. **`/` autocomplete** — backed by `/api/skills/search`; the marker is left in
+   the message for the backend to parse and strip.
+6. **Connector setup** — catalogue with each entry's setup steps, OAuth client,
+   login with the authorization URL polled and shown as a link, and environment
+   credentials for stdio servers.
+7. **Audit and memory views** — the trail with an optional follow mode, and the
+   standing facts with a switch and a way to retire one.
+
+## Still not built
+
+- **Projects, artifacts, plugins, voice input, a "cowork" mode.** Nothing in
+  PSOK backs them, and a menu row that opens nothing is worse than an absent
+  one.
+- **Screenshot capture from the composer.** There is no portable way to take one
+  on Linux without assuming a compositor; the Playwright connector takes page
+  screenshots today.
+- **Extended-thinking toggles.** Provider-specific thinking budgets are absorbed
+  inside each adapter and not exposed as a setting.
+
+- **Deleting a conversation.** There is no endpoint; nothing in the
+  architecture docs calls for one.
+- **Anything multi-user.** Out of scope by design (ADR-0001).
 
 ## Ground rules from previous sessions
 
@@ -184,8 +211,9 @@ fails. A test that cannot fail protects nothing.
   embeddings instead.
 - `sqlite-vec` and FTS5 both work. Bubblewrap is available, so the shell sandbox
   is real and differentially tested.
-- Tests: `pytest` (216 unit), `pytest -m live` (5, spawns real MCP servers and
-  uses the network). `ruff check psok tests`.
+- Tests: `pytest` (238 unit), `pytest -m live` (5, spawns real MCP servers and
+  uses the network). `ruff check psok tests`. Frontend: `npm run lint`,
+  `npm run build`.
 
 ## What exists, verified end to end
 
@@ -201,6 +229,4 @@ CLI and HTTP API.
 First-party service integrations (Gmail, Calendar and GitHub
 are reachable as MCP connectors instead, which may make a separate integration
 layer unnecessary — decide based on whether their data needs to be *synced
-locally* for cross-referencing). Recurring tasks. Background jobs. Deleting a
-conversation: there is no endpoint, because nothing in the architecture docs
-calls for one.
+locally* for cross-referencing). Recurring tasks. Background jobs.

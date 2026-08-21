@@ -58,6 +58,10 @@ class ConfirmationRequest:
     # learns of a prompt only by polling cannot tell two pending calls to the
     # same tool apart.
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Which conversation is suspended on this. Pending prompts are process-wide,
+    # so without it an interface recovering one after a reload cannot tell
+    # whether it belongs to the conversation on screen or another one.
+    conversation_id: str | None = None
 
 
 @dataclass
@@ -157,6 +161,7 @@ class ConfirmationService:
                         "risk": request.risk.value,
                         "reason": request.reason,
                         "arguments": request.arguments,
+                        "conversation_id": request.conversation_id,
                     },
                 )
             )
@@ -180,6 +185,7 @@ class ConfirmationService:
                     risk=RiskLevel.HIGH,
                     reason=f"first use of MCP server '{tool.server_name}'",
                     arguments=arguments,
+                    conversation_id=context.conversation_id if context else None,
                 )
                 if await self._ask(request, context):
                     self.mcp_trust.trust(tool.server_name)
@@ -205,6 +211,7 @@ class ConfirmationService:
             risk=risk,
             reason=reason,
             arguments=arguments,
+            conversation_id=context.conversation_id if context else None,
         )
         allowed = await self._ask(request, context)
         return ConfirmationOutcome(allowed, "approved" if allowed else "denied", risk)

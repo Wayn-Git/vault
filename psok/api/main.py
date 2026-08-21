@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -57,6 +60,10 @@ _mcp: dict[str, Any] = {"manager": None, "registry": None, "workspace": None, "e
 # shut down the manager the other turn was mid-tool-call against.
 _registry_lock = asyncio.Lock()
 
+# Big enough for a document or a screenshot, small enough that a stray upload
+# cannot fill the disk.
+MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
+
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
@@ -96,6 +103,11 @@ class PendingConfirmation(BaseModel):
     risk: str
     reason: str
     arguments: dict[str, Any]
+    # Pending prompts are process-wide. An interface recovering one after a
+    # reload has to know whether the suspended turn is the conversation on
+    # screen or a different one, or it raises another conversation's prompt
+    # over the transcript the user is reading.
+    conversation_id: str | None = None
 
 
 async def _await_confirmation(request: ConfirmationRequest) -> bool:
@@ -120,6 +132,7 @@ async def _await_confirmation(request: ConfirmationRequest) -> bool:
             risk=request.risk.value,
             reason=request.reason,
             arguments=request.arguments,
+            conversation_id=request.conversation_id,
         ),
     }
     try:
@@ -329,6 +342,30 @@ class ConfirmationDecision(BaseModel):
     remember: bool = False
 
 
+@app.get("/api/confirmations/preferences")
+def list_confirmation_preferences() -> list[dict[str, Any]]:
+    """Standing "don't ask again" decisions, keyed by operation.
+
+    Declared above the decision endpoint so `preferences` is not read as a
+    request id -- FastAPI matches in declaration order.
+    """
+    from psok.db.repositories import ConfirmationPreferenceRepository
+
+    return [dict(row) for row in ConfirmationPreferenceRepository().list()]
+
+
+@app.delete("/api/confirmations/preferences/{operation_key}")
+def revoke_confirmation_preference(operation_key: str) -> dict[str, str]:
+    """Take back a standing approval, so that operation asks again."""
+    from psok.db.repositories import ConfirmationPreferenceRepository
+
+    repo = ConfirmationPreferenceRepository()
+    if repo.get(operation_key) is None:
+        raise HTTPException(404, f"no standing decision for '{operation_key}'")
+    repo.clear(operation_key)
+    return {"status": "revoked", "operation_key": operation_key}
+
+
 @app.post("/api/confirmations/{request_id}")
 async def decide_confirmation(request_id: str, body: ConfirmationDecision) -> dict[str, str]:
     entry = _pending.get(request_id)
@@ -448,6 +485,52 @@ def mcp_set_oauth_client(name: str, body: OAuthClient) -> dict[str, str]:
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"status": "stored"}
+
+
+class ServerEnv(BaseModel):
+    key: str
+    value: str
+    secret: bool = True
+
+
+# A stdio server that takes its credentials through the environment -- Google
+# Workspace is the catalogue's example -- could otherwise only be configured
+# from the CLI, which makes "set it up in the browser" false for exactly the
+# connectors that need setting up.
+_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@app.post("/api/mcp/servers/{name}/env")
+def mcp_set_env(name: str, body: ServerEnv) -> dict[str, Any]:
+    """Set one environment variable for a stdio server."""
+    from psok.mcp import commands as mcp
+
+    if not _ENV_KEY.match(body.key):
+        raise HTTPException(400, f"'{body.key}' is not a valid environment variable name")
+    try:
+        config = mcp.set_env(name, body.key, body.value, secret=body.secret)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {
+        "status": "set",
+        "name": name,
+        "key": body.key,
+        "stored": "keychain" if body.secret else "mcp.yaml",
+        "env": sorted(config.env),
+    }
+
+
+@app.delete("/api/mcp/servers/{name}/env/{key}")
+def mcp_unset_env(name: str, key: str) -> dict[str, Any]:
+    from psok.mcp import commands as mcp
+
+    try:
+        removed = mcp.unset_env(name, key)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if not removed:
+        raise HTTPException(404, f"'{name}' has no environment variable '{key}'")
+    return {"status": "unset", "name": name, "key": key}
 
 
 @app.post("/api/mcp/servers/{name}/login")
@@ -658,6 +741,173 @@ def list_skills() -> dict[str, Any]:
     }
 
 
+@app.get("/api/skills/catalogue")
+async def skills_catalogue(refresh: bool = False) -> dict[str, Any]:
+    """Skills that can be installed, read from their source repositories.
+
+    Cards need a real name and description, so this parses each SKILL.md's
+    frontmatter rather than shipping a hand-written list that would drift the
+    moment the source changed. `error` is populated when the fetch failed and
+    the list is stale or empty -- never silently.
+    """
+    from psok.skills.catalogue import fetch
+
+    catalogue = await fetch(force=refresh)
+    installed = {skill.name for skill in scan()[0]}
+    return {
+        "error": catalogue.error,
+        "skills": [
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "description": entry.description,
+                "publisher": entry.publisher,
+                "source": entry.source,
+                "url": entry.url,
+                "homepage": entry.homepage,
+                "installed": entry.name in installed,
+            }
+            for entry in catalogue.skills
+        ],
+    }
+
+
+class InstallSkill(BaseModel):
+    url: str
+    overwrite: bool = False
+
+
+@app.post("/api/skills/install")
+async def install_skill(body: InstallSkill) -> dict[str, Any]:
+    """Install a skill from a URL -- a GitHub page URL included.
+
+    Skills are markdown, so "install" is a download and a validation. It is a
+    first-class action because the alternative is asking the agent to write
+    files into its own skills directory, which is a shell command the user has
+    to approve and cannot easily check.
+    """
+    from psok.mcp.ssrf import UnsafeURL
+    from psok.skills.install import SkillInstallError, install_from_url
+
+    try:
+        skill = await install_from_url(body.url, overwrite=body.overwrite)
+    except (SkillInstallError, UnsafeURL) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"could not fetch {body.url}: {exc}") from exc
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "path": str(skill.path),
+        "version": skill.version,
+    }
+
+
+@app.delete("/api/skills/{name}")
+def remove_skill(name: str) -> dict[str, str]:
+    from psok.skills.install import SkillInstallError, remove
+
+    try:
+        removed = remove(name)
+    except SkillInstallError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not removed:
+        raise HTTPException(404, f"no skill named '{name}'")
+    return {"status": "removed", "name": name}
+
+
+@app.get("/api/tools")
+def list_tools() -> list[dict[str, Any]]:
+    """Every tool the agent can currently reach, builtin and connected alike.
+
+    The flat namespace is the point (ADR-0003) -- the model cannot tell a
+    builtin from an MCP tool -- but a person deciding what to switch on can, so
+    the source and server come back with each one.
+    """
+    # Deliberately not _registry_for: listing what exists must not start
+    # connector processes as a side effect. Before the first turn this is the
+    # builtin set, which is exactly what is true at that moment.
+    registry = _mcp["registry"] or build_default_registry()
+    rows = []
+    for tool in registry.list():
+        rows.append(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "source": tool.source.value,
+                "server": tool.server_name,
+                "risk": tool.risk.value,
+            }
+        )
+    return sorted(rows, key=lambda r: (r["server"] or "", r["name"]))
+
+
+# ------------------------------------------------------------- attachments
+#
+# A browser cannot hand the agent a file path -- it has no idea where the file
+# is on disk, and PSOK's tools work on paths. So a file dropped into the
+# composer is written into the PSOK home first, and the message carries the
+# path it landed at, which the ordinary file tools then read.
+
+
+@app.post("/api/attachments")
+async def upload_attachment(file: UploadFile) -> dict[str, Any]:
+    from uuid import uuid4
+
+    name = Path(file.filename or "attachment").name
+    if not name or name in {".", ".."}:
+        raise HTTPException(400, "the upload has no usable filename")
+
+    folder = paths().home / "attachments" / uuid4().hex[:12]
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / name
+
+    size = 0
+    with target.open("wb") as out:
+        while chunk := await file.read(1 << 20):
+            size += len(chunk)
+            if size > MAX_ATTACHMENT_BYTES:
+                out.close()
+                shutil.rmtree(folder, ignore_errors=True)
+                raise HTTPException(413, "attachments are limited to 32MB")
+            out.write(chunk)
+
+    return {
+        "name": name,
+        "path": str(target),
+        "bytes": size,
+        "content_type": file.content_type,
+    }
+
+
+# ------------------------------------------------------------------ tasks
+#
+# The agent creates tasks and calendar events through its tools; these are the
+# read-only views of what it created, so the interface can show them without
+# spending a model call to ask.
+
+
+@app.get("/api/tasks")
+def list_tasks(limit: int = 50, include_done: bool = False) -> list[dict[str, Any]]:
+    from psok.db.repositories import TaskRepository
+
+    return [dict(row) for row in TaskRepository().upcoming(limit, include_done)]
+
+
+@app.get("/api/calendar")
+def list_calendar(days: int = 14) -> list[dict[str, Any]]:
+    from datetime import datetime, timedelta
+
+    from psok.db.repositories import CalendarRepository
+
+    now = datetime.now()
+    rows = CalendarRepository().in_window(
+        now.isoformat(timespec="seconds"),
+        (now + timedelta(days=days)).isoformat(timespec="seconds"),
+    )
+    return [dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------- memory
 #
 # The standing facts PSOK holds about the user, and the switch that governs
@@ -712,3 +962,44 @@ def forget_memory(memory_id: int) -> dict[str, Any]:
     if not MemoryStore().supersede([memory_id]):
         raise HTTPException(404, f"no live memory with id {memory_id}")
     return {"status": "superseded", "id": memory_id}
+
+
+# ------------------------------------------------------------------- the app
+
+# In development the interface is served by Vite on another port and reaches
+# this API across origins. A built bundle is different: `npm run build` writes
+# frontend/dist, and if that exists it is served from here, so one `uvicorn`
+# process is the whole product and there is no second server to run, no second
+# port to remember, and no cross-origin request to configure.
+_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def _mount_frontend() -> None:
+    if not (_DIST / "index.html").is_file():
+        return
+
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    # Hashed filenames, so the bundle can be cached hard; index.html must not be
+    # or a deploy would keep serving the previous build's script tags.
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str) -> FileResponse:
+        """Every non-API path is the single page.
+
+        Registered last, so it cannot shadow a real endpoint: FastAPI matches in
+        declaration order and every `/api/...` route is already above it. An
+        unknown `/api/...` path still has to 404 rather than quietly returning
+        HTML, or a typo in a fetch would look like a parse error instead.
+        """
+        if path.startswith("api/"):
+            raise HTTPException(404, f"no such endpoint: /{path}")
+        candidate = (_DIST / path).resolve()
+        if path and candidate.is_file() and candidate.is_relative_to(_DIST):
+            return FileResponse(candidate)
+        return FileResponse(_DIST / "index.html", headers={"Cache-Control": "no-store"})
+
+
+_mount_frontend()

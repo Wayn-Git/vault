@@ -167,7 +167,7 @@ def build_default_registry(
     *,
     workspace_root: str | None = None,
 ) -> ToolRegistry:
-    from psok.tools.builtin import desktop, documents, filesystem, shell, tasks
+    from psok.tools.builtin import desktop, documents, filesystem, shell, tasks, web
 
     registry = ToolRegistry(confirmation=confirmation)
     registry.register_all(filesystem.tools(workspace_root))
@@ -175,6 +175,7 @@ def build_default_registry(
     registry.register_all(desktop.tools())
     registry.register_all(tasks.tools())
     registry.register_all(documents.tools())
+    registry.register_all(web.tools())
     return registry
 
 

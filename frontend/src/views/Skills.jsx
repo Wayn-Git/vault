@@ -6,22 +6,27 @@ import { api } from '../api.js'
 
 export default function Skills() {
   const rootRef = useRef(null)
-  const { toast } = useApp()
+  // Listing skills without being able to engage one made this a read-only
+  // inventory of things the user could only switch on somewhere else.
+  const { toast, caps, refreshCaps, setCapEnabled, busyCap } = useApp()
   const [data, setData] = useState(null)
   useViewEntrance(rootRef)
 
   const load = useCallback(async () => {
     try {
       setData(await api.skills())
+      refreshCaps()
     } catch (err) {
       toast(err.message, 'bad')
     }
-  }, [toast])
+  }, [toast, refreshCaps])
 
   useEffect(() => { load() }, [load])
 
   const skills = data?.skills ?? []
   const errors = data?.errors ?? []
+  const capability = (name) => (caps.skills ?? []).find((c) => c.name === name)
+  const engaged = (caps.skills ?? []).filter((c) => c.enabled).length
 
   return (
     <div className="view" ref={rootRef}>
@@ -46,7 +51,11 @@ export default function Skills() {
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 16 }} data-enter>
           <span className="badge badge--amber">{skills.length} discovered</span>
+          <span className="badge badge--ok">{engaged} engaged</span>
           {errors.length > 0 && <span className="badge badge--bad">{errors.length} broken</span>}
+          <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>
+            engaged skills apply to new conversations · type /name to use one in the moment
+          </span>
         </div>
 
         {skills.length === 0 && !errors.length && (
@@ -58,17 +67,36 @@ export default function Skills() {
         )}
 
         <div className="skill-grid">
-          {skills.map((s) => (
-            <div className="skill-card" key={s.path} data-enter>
-              <div className="skill-name">
-                <span className={`led led--${s.version ? 'ok' : 'info'}`} />
-                {s.name}
-                {s.version && <span className="badge">v{s.version}</span>}
+          {skills.map((s) => {
+            const cap = capability(s.name)
+            const working = busyCap === `skill:${s.name}`
+            return (
+              <div className="skill-card" key={s.path} data-enter>
+                <div className="skill-name">
+                  <span className={`led led--${cap?.enabled ? 'ok' : 'faint'}`} />
+                  {s.name}
+                  {s.version && <span className="badge">v{s.version}</span>}
+                </div>
+                <div className="skill-desc">{s.description}</div>
+                <div className="skill-path">{s.path}</div>
+                {cap && (
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      type="button"
+                      className={`btn btn--small${cap.enabled ? ' btn--primary' : ' btn--ghost'}`}
+                      disabled={working}
+                      onClick={() => setCapEnabled(cap, !cap.enabled)}
+                      title={cap.enabled
+                        ? 'Engaged — its instructions are offered to the agent'
+                        : 'Stood down — the agent is not told about it'}
+                    >
+                      {working ? '…' : cap.enabled ? 'Engaged' : 'Stood down'}
+                    </button>
+                  </div>
+                )}
               </div>
-              <div className="skill-desc">{s.description}</div>
-              <div className="skill-path">{s.path}</div>
-            </div>
-          ))}
+            )
+          })}
         </div>
 
         {errors.length > 0 && (

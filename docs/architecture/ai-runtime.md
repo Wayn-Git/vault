@@ -173,7 +173,23 @@ No tool failure raises out of the dispatcher. Every failure — timeout, permiss
 
 This is Pipali's most valuable implementation habit and LibreChat's most valuable error-handling habit, and they agree. Specificity matters: "this MCP server requires authentication" and "OAuth is not configured for this server" lead to different useful next actions, while "tool call failed" leads to none.
 
-### What the loop emits
+### Turns that stop before the work is done
+
+A turn ends when the model returns text and no tool calls. Two responses look
+like that without being it: an empty reply, which models produce after a tool
+result instead of acting on it, and a truncated one, which the provider reports
+as `length` / `max_tokens`. Both used to end the turn silently -- an empty
+bubble, or an answer stopping mid-sentence -- and left the user typing
+"continue" to get work they had already asked for.
+
+The loop now treats either as unfinished. It emits a `warning`, appends a
+continuation instruction to the *next* request only, and iterates again,
+bounded by `Guards.max_continuations` (2) so a model that always returns nothing
+cannot spin. The instruction never reaches the transcript: it is steering, not
+something anybody said, and persisting it would put words in the user's mouth
+and recall them in every later turn.
+
+## What the loop emits
 
 The loop yields events rather than returning a result, so an interface can show a
 turn as it happens. The API forwards them verbatim as SSE frames.
