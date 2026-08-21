@@ -32,6 +32,43 @@ CORS does not enter into it. `PSOK_CORS_ORIGINS` exists for the case where the
 bundle really is served from somewhere else, and is deliberately not a wildcard:
 this API runs shell commands on the machine.
 
+## The design, and why it is this one
+
+Stated so it can be argued with rather than absorbed as taste.
+
+**The direction is an instrument panel.** PSOK sits open all day beside a
+terminal and does real things to a real filesystem. That rules out the product
+page look, and it rules out the two defaults generative design falls into: cream
+with a serif, or acid green on black.
+
+**Colour.** Warm graphite for every neutral — each one carries a little red,
+which is what keeps it off the standard slate-blue dark theme. Colour itself is
+spent on exactly three meanings and nothing else: green is running, amber is
+waiting on you, coral is destructive. Nothing decorative is coloured, so the eye
+goes to what is true.
+
+**Type.** Space Grotesk names things, Archivo carries prose because it holds at
+12px, IBM Plex Mono sets anything the machine reports — paths, tool names, key
+hints, counts — because numbers that change should sit still. None of the three
+is the face reached for on autopilot, and each was picked for a job.
+
+**Icons.** One family (Phosphor) drawn on a 24px grid, at one weight. The marks
+used to be hand-drawn paths and it showed; a row of icons now lines up because
+the family says so.
+
+**Motion.** Transform and opacity only, strong custom curves, nothing over
+220ms, transitions rather than keyframes so a re-triggered animation retargets
+instead of restarting. Menus scale from the control that opened them; modals
+scale from their own centre because they are not anchored to anything. The
+command palette does not animate at all — it opens dozens of times a day, and an
+entrance on something that frequent reads as lag. `prefers-reduced-motion` stops
+all of it.
+
+**The signature.** The signal strip under the composer: one channel per
+connector, lit only when its process is actually running, carrying the number of
+tools it is contributing right now. Everything around it is quiet so it reads at
+a glance.
+
 ## The shape of it
 
 ```

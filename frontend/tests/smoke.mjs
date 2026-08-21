@@ -198,16 +198,23 @@ try {
   const target = page.locator('.dcard').filter({ hasNot: page.locator('.dcard-gear-wrap') }).first()
   const installedName = (await target.locator('.dcard-title').innerText()).replace('/', '').trim()
   await target.locator('.dcard-act').click()
-  await page.waitForTimeout(2500)
-  const nowInstalled = await page.locator('.dcard', { hasText: installedName }).locator('.dcard-gear-wrap').count()
+  // The install refetches both the installed list and the catalogue, and the
+  // grid re-sorts around the result, so wait for the card's own state to change
+  // rather than for a fixed interval.
+  const installedCard = page.locator('.dcard', { hasText: installedName }).first()
+  let nowInstalled = 0
+  try {
+    await installedCard.locator('.dcard-gear-wrap').waitFor({ state: 'visible', timeout: 20000 })
+    nowInstalled = 1
+  } catch { /* reported below */ }
   check('installing a skill from the directory works', nowInstalled === 1, `/${installedName}`)
   if (nowInstalled) {
-    await page.locator('.dcard', { hasText: installedName }).locator('.dcard-act').first().click()
-    await page.waitForTimeout(200)
+    await installedCard.locator('.dcard-act').first().click()
+    await page.waitForSelector('.dcard-menu', { timeout: 4000 })
     await page.locator('.dcard-menu .menu-row.danger').click()
-    await page.waitForTimeout(1200)
+    await installedCard.locator('.dcard-gear-wrap').waitFor({ state: 'detached', timeout: 20000 }).catch(() => {})
     check('and uninstalling it again works',
-      (await page.locator('.dcard', { hasText: installedName }).locator('.dcard-gear-wrap').count()) === 0)
+      (await installedCard.locator('.dcard-gear-wrap').count()) === 0)
   }
 
   await page.locator('.dir-nav-item', { hasText: 'Connectors' }).click()

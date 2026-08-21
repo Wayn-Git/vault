@@ -9,7 +9,7 @@ import { useApp } from '../store.jsx'
    endpoint accepts works -- so the list is a shortcut, not a whitelist, and the
    field below it takes anything. */
 
-export default function ModelMenu({ provider, model, onChange, onClose, scoped }) {
+export default function ModelMenu({ provider, model, onChange, onClose, scoped, placement = 'up' }) {
   const { health } = useApp()
   const ref = useRef(null)
   const [custom, setCustom] = useState(model || '')
@@ -29,7 +29,7 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped }
   }, [onClose])
 
   return (
-    <div className="menu menu--right" ref={ref} role="menu">
+    <div className={`menu menu--right${placement === "down" ? " menu--down" : ""}`} ref={ref} role="menu">
       <div className="menu-flyout-head">
         {scoped ? 'model for this conversation' : 'model for the next conversation'}
       </div>

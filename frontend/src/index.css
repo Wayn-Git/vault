@@ -1,36 +1,47 @@
-/* PSOK — an instrument for an agent with root on this machine.
+/* PSOK — an instrument panel for an agent with root on this machine.
 
-   One rule carries the design: colour means liveness or risk, nothing else.
-   A connector that is actually running is mint. Something about to touch your
-   files is amber. Something destructive is coral. Everything else in the
-   interface is achromatic, so the eye goes straight to what matters.
+   The brief, stated so it can be argued with. PSOK sits open all day beside a
+   terminal and does real things to a real filesystem, so the surface it wears
+   is a machine console, not a product page: warm graphite rather than the
+   blue-black every dark app defaults to, one family of grotesques, and data set
+   in a typewriter face because numbers that change should sit still. It is
+   deliberately none of the three looks generative design falls into -- no cream
+   and serif, no acid green on black, no broadsheet rules.
 
-   Motion follows Emil Kowalski's framework: custom curves, nothing over 300ms,
-   transform and opacity only, transitions rather than keyframes wherever a
-   thing can be re-triggered mid-flight. */
+   One rule carries the colour: it means liveness or risk, nothing else. A
+   connector that is actually running is green. Something about to touch your
+   files is amber. Something destructive is coral. Everything else is
+   achromatic, so the eye goes to what is true rather than to what is decorated.
+
+   Motion follows Emil Kowalski's framework: strong custom curves, nothing over
+   220ms, transform and opacity only, transitions rather than keyframes wherever
+   a thing can be re-triggered mid-flight -- and no animation at all on the
+   things a person hits a hundred times a day. */
 
 :root {
-  --canvas: #0f1115;
-  --canvas-deep: #0a0c0f;
-  --raised: #151920;
-  --surface: #1a1f27;
-  --surface-2: #212731;
+  /* Warm graphite. Every neutral carries a little red, which is what keeps it
+     from reading as the standard slate-blue dark theme. */
+  --canvas: #0a0a0b;
+  --canvas-deep: #060607;
+  --raised: #141416;
+  --surface: #1b1b1e;
+  --surface-2: #232327;
 
-  --hairline: rgba(255, 255, 255, 0.06);
-  --hairline-strong: rgba(255, 255, 255, 0.11);
+  --hairline: rgba(255, 255, 255, 0.075);
+  --hairline-strong: rgba(255, 255, 255, 0.15);
 
-  --text: #e6e8ec;
-  --text-dim: #9aa1ac;
-  --text-faint: #646b77;
+  --text: #f2f0ec;
+  --text-dim: #9c9892;
+  --text-faint: #67645f;
 
   /* Semantic only. Never used to decorate. */
-  --live: #5fd3a6;
-  --confirm: #f0b764;
-  --stop: #f0796b;
+  --live: #63c68a;
+  --confirm: #e9b04d;
+  --stop: #e5675c;
 
-  --live-soft: rgba(95, 211, 166, 0.1);
-  --confirm-soft: rgba(240, 183, 100, 0.1);
-  --stop-soft: rgba(240, 121, 107, 0.1);
+  --live-soft: rgba(99, 198, 138, 0.1);
+  --confirm-soft: rgba(233, 176, 77, 0.1);
+  --stop-soft: rgba(229, 103, 92, 0.1);
 
   /* Legacy aliases: a handful of inline styles still name these. */
   --clay: var(--confirm);
@@ -38,26 +49,33 @@
   --rust: var(--stop);
   --steel: var(--text-dim);
 
-  --font-display: 'Bricolage Grotesque', 'Schibsted Grotesk', system-ui, sans-serif;
-  --font-body: 'Schibsted Grotesk', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  /* Space Grotesk for anything that names something, Archivo for prose because
+     it holds up at 12px, IBM Plex Mono for machine facts. None of them is the
+     face a model reaches for on autopilot, and each was picked for a job. */
+  --font-display: 'Space Grotesk', 'Archivo', system-ui, sans-serif;
+  --font-body: 'Archivo', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
 
-  --r-xl: 22px;
-  --r-lg: 16px;
-  --r-md: 10px;
-  --r-sm: 7px;
+  /* Crisper than before: a console has corners. */
+  --r-xl: 16px;
+  --r-lg: 12px;
+  --r-md: 9px;
+  --r-sm: 6px;
 
   /* The built-in easings are too weak to read as intentional. */
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
 
-  --press: 140ms;
-  --pop: 180ms;
-  --menu: 200ms;
-  --modal: 240ms;
+  --press: 120ms;
+  --pop: 160ms;
+  --menu: 180ms;
+  --modal: 220ms;
 
-  --lift: 0 20px 44px -26px rgba(0, 0, 0, 0.9);
+  /* Two layers: a tight contact shadow so an edge exists, and a wide soft one
+     so the panel sits above the page rather than floating in it. */
+  --lift: 0 1px 1px rgba(0, 0, 0, 0.5), 0 18px 40px -24px rgba(0, 0, 0, 0.85);
+  --focus: 0 0 0 2px var(--canvas), 0 0 0 4px rgba(233, 176, 77, 0.6);
   --bar-h: 52px;
 }
 
@@ -68,6 +86,37 @@
 * { margin: 0; padding: 0; }
 
 html, body, #root { height: 100%; }
+
+/* Every pressable answers the press. 97% is felt rather than seen, which is
+   the point: the interface confirms it heard you before anything else does. */
+button:active:not(:disabled) { transform: scale(0.97); }
+button { transition: transform var(--press) var(--ease-out); }
+
+/* Keyboard users get the same affordance as the mouse, in the colour that
+   already means "this is waiting on you". Text fields are excluded: they sit
+   inside a container that already lights up, and two rings around one control
+   reads as a mistake rather than as focus. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: var(--r-sm);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible { outline: none; box-shadow: none; }
+
+/* Anyone who has asked their system to stop moving things gets a still one. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 body {
   background: var(--canvas);
@@ -125,7 +174,9 @@ a { color: inherit; }
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 36px;
+  margin-bottom: 34px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--hairline);
 }
 
 .vheader-eyebrow {
@@ -142,13 +193,20 @@ a { color: inherit; }
 
 .vheader h1 {
   font-family: var(--font-display);
-  font-size: 34px;
-  font-weight: 600;
-  line-height: 1.08;
-  letter-spacing: -0.03em;
+  font-size: 32px;
+  font-weight: 500;
+  line-height: 1.06;
+  letter-spacing: -0.032em;
+  color: var(--text);
 }
 
-.vheader-sub { color: var(--text-dim); font-size: 13.5px; margin-top: 10px; max-width: 60ch; }
+.vheader-sub {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.6;
+  margin-top: 9px;
+  max-width: 62ch;
+}
 .vheader-actions { display: flex; gap: 7px; align-items: center; flex: none; }
 
 @media (max-width: 768px) {
@@ -386,7 +444,7 @@ a { color: inherit; }
 /* ------------------------------------------------------------ chat shell */
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .chat-scroll { flex: 1; overflow-y: auto; padding: 26px 24px 14px; display: flex; flex-direction: column; }
-.chat-stream { max-width: 720px; width: 100%; margin: auto auto 0; display: grid; gap: 18px; }
+.chat-stream { max-width: 780px; width: 100%; margin: auto auto 0; display: grid; gap: 18px; }
 
 /* ------------------------------------------------------------------ hero */
 
@@ -412,11 +470,12 @@ a { color: inherit; }
 
 .hero h1 {
   font-family: var(--font-display);
-  font-size: clamp(30px, 4.6vw, 44px);
-  font-weight: 600;
-  line-height: 1.05;
+  font-size: clamp(32px, 4.4vw, 46px);
+  font-weight: 500;
+  line-height: 1.02;
   letter-spacing: -0.035em;
-  max-width: 18ch;
+  max-width: 20ch;
+  color: var(--text);
 }
 
 /* One orchestrated entrance on load, then the page is still. */
@@ -451,17 +510,21 @@ a { color: inherit; }
 
 /* ------------------------------------------------------------- composer */
 
-.composer-wrap { position: relative; padding: 10px 24px 20px; max-width: 780px; width: 100%; margin: 0 auto; }
+.composer-wrap { position: relative; padding: 10px 24px 20px; max-width: 860px; width: 100%; margin: 0 auto; }
 .composer-wrap--hero { padding-top: 0; padding-bottom: 0; }
 
 .composer {
-  border: 1px solid var(--hairline-strong);
-  border-radius: var(--r-xl);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
   background: var(--raised);
-  transition: border-color var(--pop) var(--ease-out);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -24px rgba(0, 0, 0, 0.9);
+  transition: border-color var(--pop) var(--ease-out), box-shadow var(--pop) var(--ease-out);
 }
 
-.composer:focus-within { border-color: rgba(255, 255, 255, 0.2); }
+.composer:focus-within {
+  border-color: var(--hairline-strong);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 14px 34px -24px rgba(0, 0, 0, 0.95);
+}
 
 .composer-bar { display: flex; align-items: center; gap: 6px; }
 .composer-bar-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
@@ -502,6 +565,8 @@ a { color: inherit; }
 .composer-send:active { transform: scale(0.94); }
 .composer-send:disabled { opacity: 0.25; cursor: not-allowed; transform: none; }
 .composer-send--stop { background: var(--stop); color: #1b0c0a; }
+.composer-send { width: 32px; height: 32px; border-radius: 8px; }
+.composer-send:not(:disabled) { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.25) inset; }
 
 .composer-hint {
   display: flex;
@@ -515,54 +580,9 @@ a { color: inherit; }
 }
 
 @media (max-width: 768px) {
-  .composer-hint { display: none; }
+  
   .composer-wrap { padding: 10px 12px 14px; }
 }
-
-/* --------------------------------------------------- the armed strip
-   The signature. What the agent can reach right now, always visible, always
-   the truth: a chip is mint only when its process is actually running. */
-
-.armed {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 8px 6px 0;
-}
-
-.armed-label {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  margin-right: 2px;
-}
-
-.armed-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 8px;
-  border: 1px solid var(--hairline);
-  border-radius: 99px;
-  font-size: 11.5px;
-  color: var(--text-faint);
-  transition: color var(--press) var(--ease-out), border-color var(--press) var(--ease-out),
-              background var(--press) var(--ease-out), transform var(--press) var(--ease-out);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .armed-chip:hover { color: var(--text-dim); border-color: var(--hairline-strong); }
-}
-.armed-chip:active { transform: scale(0.96); }
-
-.armed-chip.is-live { color: var(--text); border-color: rgba(95, 211, 166, 0.28); background: var(--live-soft); }
-.armed-chip.is-error { color: var(--stop); border-color: rgba(240, 121, 107, 0.32); background: var(--stop-soft); }
-.armed-chip.is-busy { color: var(--text-dim); }
-
-.armed-count { font-family: var(--font-mono); font-size: 10px; opacity: 0.7; }
 
 /* ------------------------------------------------------------- popovers
    Origin-aware: a popover belongs to its trigger, so it grows from it. */
@@ -1114,17 +1134,18 @@ a { color: inherit; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
+  min-width: 19px;
+  height: 19px;
   padding: 0 5px;
-  border: 1px solid var(--hairline-strong);
-  border-bottom-width: 2px;
+  border: 1px solid var(--hairline);
+  border-bottom: 2px solid var(--hairline-strong);
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.03);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
   font-family: var(--font-mono);
   font-size: 10px;
+  font-weight: 500;
   line-height: 1;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 
 .icon-btn {
@@ -1160,7 +1181,8 @@ a { color: inherit; }
   background: var(--raised);
   box-shadow: var(--lift);
   overflow: hidden;
-  animation: modal-in var(--modal) var(--ease-out) both;
+  /* Deliberately not animated: this opens dozens of times a day, and an
+     entrance on something that frequent reads as lag, not polish. */
 }
 
 .palette-input {
@@ -1458,9 +1480,10 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .rail-brand {
   font-family: var(--font-display);
-  font-size: 19px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
 }
 
 .rail-top-actions { margin-left: auto; display: flex; gap: 2px; }
@@ -1484,7 +1507,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 .rail-place {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   padding: 7px 12px;
   border-radius: var(--r-sm);
   text-align: left;
@@ -1492,7 +1515,9 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
-.rail-place:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
+.rail-place svg { color: var(--text-faint); transition: color var(--press) var(--ease-out); }
+.rail-place:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.rail-place:hover svg, .rail-place.active svg { color: var(--text-dim); }
 .rail-place.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
 
 .rail-section {
@@ -1609,7 +1634,12 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .rail-foot-text { flex: 1; min-width: 0; display: grid; }
 .rail-foot-name { font-size: 12.5px; }
-.rail-foot-sub { font-family: var(--font-mono); font-size: 10px; color: var(--text-faint); }
+.rail-foot-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+}
 
 .rail-peek {
   position: fixed;
@@ -1661,6 +1691,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   position: absolute;
   bottom: calc(100% + 10px);
   left: 24px;
+  transform-origin: bottom left;
   z-index: 40;
   width: 268px;
   /* Deliberately not scrollable: a submenu is an absolutely positioned child,
@@ -1675,10 +1706,24 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   animation: menu-in var(--menu) var(--ease-out) both;
 }
 
-.menu--right { left: auto; right: 24px; width: 300px; }
+.menu--right { left: auto; right: 24px; width: 300px; transform-origin: bottom right; }
+
+/* On an empty conversation the composer sits mid-screen, so a menu anchored
+   above it runs off the top of the window. The composer knows which state it
+   is in, so the direction is decided there rather than measured here. */
+.menu--down {
+  top: calc(100% + 10px);
+  bottom: auto;
+  transform-origin: top left;
+}
+.menu--right.menu--down { transform-origin: top right; }
+@keyframes menu-in-down {
+  from { opacity: 0; transform: translate3d(0, -4px, 0) scale(0.98); }
+}
+.menu--down { animation-name: menu-in-down; }
 
 @keyframes menu-in {
-  from { opacity: 0; transform: translate3d(0, 6px, 0) scale(0.99); }
+  from { opacity: 0; transform: translate3d(0, 4px, 0) scale(0.98); }
 }
 
 .menu-row {
@@ -1872,7 +1917,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   background: var(--canvas-deep);
   color: var(--text-faint);
 }
-.dir-search:focus-within, .dir-install:focus-within { border-color: rgba(90, 140, 255, 0.5); }
+.dir-search:focus-within,
+.dir-install:focus-within { border-color: var(--hairline-strong); background: var(--canvas); }
 
 .dir-search input, .dir-install input {
   flex: 1;
@@ -2177,8 +2223,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .composer textarea {
   width: 100%;
-  min-height: 54px;
-  padding: 12px 14px 4px;
+  min-height: 44px;
+  padding: 12px 14px 2px;
   border: none;
   outline: none;
   background: transparent;
@@ -2189,8 +2235,9 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   resize: none;
 }
 .composer textarea::placeholder { color: var(--text-faint); }
+.composer textarea:focus-visible { box-shadow: none; }
 
-.composer-bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px; }
+.composer-bar { display: flex; align-items: center; gap: 8px; padding: 4px 8px 8px; }
 .composer-bar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
 .composer-modes {
@@ -2334,7 +2381,16 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 }
 .conn-type { color: var(--text-dim); font-size: 11.5px; }
 .conn-status { display: inline-flex; align-items: center; gap: 7px; color: var(--text-dim); }
-.conn-error { display: block; margin-top: 3px; font-size: 11px; color: var(--stop); }
+.conn-error {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--stop);
+}
 .conn-actions-inner {
   display: flex;
   gap: 6px;
@@ -2363,3 +2419,77 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 }
 .conn-setup-note { margin: 10px 14px 0; font-size: 12px; line-height: 1.6; color: var(--text-faint); }
 .conn-foot { margin-top: 16px; font-size: 12px; color: var(--text-faint); }
+
+/* ------------------------------------------------------ the signal strip
+
+   The one place this interface is allowed to be memorable, and it earns it by
+   being true: one channel per connector, lit only when its process is actually
+   running, carrying the number of tools it is contributing to the agent right
+   now. Everything around it stays quiet so this reads at a glance. */
+
+.armed {
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  margin: 12px 0 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.armed-label {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: var(--canvas-deep);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.armed-chip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 9px;
+  white-space: nowrap;
+  background: var(--raised);
+  font-size: 12.5px;
+  color: var(--text-faint);
+  transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
+}
+
+.armed-chip:hover:not(:disabled) { background: var(--surface); color: var(--text-dim); }
+.armed-chip:active:not(:disabled) { transform: none; background: var(--surface-2); }
+.armed-chip.is-live { color: var(--text); }
+.armed-chip.is-error { color: var(--stop); }
+.armed-chip.is-busy { color: var(--confirm); }
+
+.armed-chip > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.armed-count {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.armed-chip.is-live .armed-count { background: var(--live-soft); color: var(--live); }
+.armed-chip.is-error .armed-count { background: var(--stop-soft); color: var(--stop); }
+
+@media (max-width: 860px) {
+  .armed { flex-wrap: wrap; }
+  .armed-chip { flex: 1 0 40%; }
+}

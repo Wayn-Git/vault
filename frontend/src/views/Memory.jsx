@@ -57,9 +57,6 @@ export default function Memory() {
       <div className="view-inner">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow">
-              <span className={`led led--${enabled ? 'ok' : 'faint'}`} /> memory
-            </div>
             <h1>What PSOK remembers</h1>
             <div className="vheader-sub">
               Standing facts, extracted after a turn and recalled in later conversations.

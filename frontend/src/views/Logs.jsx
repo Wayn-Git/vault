@@ -64,9 +64,6 @@ export default function Logs() {
       <div className="view-inner">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow">
-              <span className="led led--amber" /> activity
-            </div>
             <h1>Execution log</h1>
             <div className="vheader-sub">
               Every tool call from every source, with the decision that allowed it.

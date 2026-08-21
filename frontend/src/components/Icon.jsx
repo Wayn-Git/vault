@@ -1,154 +1,85 @@
-const PATHS = {
-  dash: <path d="M3 3h7v7H3V3Zm11 0h7v7h-7V3ZM3 14h7v7H3v-7Zm11 0h7v7h-7v-7Z" />,
-  chat: <path d="M21 12a8 8 0 0 1-8 8H4l2.5-2.5A8 8 0 1 1 21 12Z" />,
-  plug: (
-    <>
-      <path d="M9 3v5m6-5v5M7 8h10v3a5 5 0 0 1-10 0V8Z" />
-      <path d="M12 16v5" />
-    </>
-  ),
-  book: (
-    <>
-      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
-    </>
-  ),
-  logs: (
-    <>
-      <path d="M8 6h13M8 12h13M8 18h13" />
-      <circle cx="4" cy="6" r="1" fill="currentColor" />
-      <circle cx="4" cy="12" r="1" fill="currentColor" />
-      <circle cx="4" cy="18" r="1" fill="currentColor" />
-    </>
-  ),
-  plus: <path d="M12 5v14M5 12h14" />,
-  x: <path d="M6 6l12 12M18 6L6 18" />,
-  refresh: (
-    <>
-      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
-      <path d="M20 3v5h-5" />
-    </>
-  ),
-  send: <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z" />,
-  stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
-  check: <path d="M4 12l5 5L20 6" />,
-  chevron: <path d="M9 6l6 6-6 6" />,
-  key: (
-    <>
-      <circle cx="8" cy="15" r="4.5" />
-      <path d="M11.5 11.5 20 3m-3.5 3.5 3 3M14.5 9.5 17 7" />
-    </>
-  ),
-  trash: (
-    <>
-      <path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" />
-      <path d="M10 11v6m4-6v6" />
-    </>
-  ),
-  link: (
-    <>
-      <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5" />
-      <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19" />
-    </>
-  ),
-  term: (
-    <>
-      <rect x="2" y="4" width="20" height="16" rx="2" />
-      <path d="M6 9l3 3-3 3m5 0h5" />
-    </>
-  ),
-  spark: <path d="M12 3v4m0 10v4m9-9h-4M7 12H3m14.5-6.5-2.8 2.8m-5.4 5.4-2.8 2.8m0-11 2.8 2.8m5.4 5.4 2.8 2.8" />,
-  clock: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 3" />
-    </>
-  ),
-  copy: (
-    <>
-      <rect x="9" y="9" width="12" height="12" rx="2" />
-      <path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" />
-    </>
-  ),
-  search: (
-    <>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.6-3.6" />
-    </>
-  ),
-  edit: (
-    <>
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
-    </>
-  ),
-  keyboard: (
-    <>
-      <rect x="2" y="6" width="20" height="12" rx="2" />
-      <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" />
-    </>
-  ),
-  down: <path d="M12 5v14m0 0-6-6m6 6 6-6" />,
-  info: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 11v5m0-8.5v.01" />
-    </>
-  ),
-  sidebar: (
-    <>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M9 4v16" />
-    </>
-  ),
-  sliders: (
-    <>
-      <path d="M4 6h16M4 12h16M4 18h16" />
-      <circle cx="9" cy="6" r="2" fill="var(--raised)" />
-      <circle cx="15" cy="12" r="2" fill="var(--raised)" />
-      <circle cx="8" cy="18" r="2" fill="var(--raised)" />
-    </>
-  ),
-  paperclip: <path d="M21 12.5 12.5 21a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 1 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 1 1-2.6-2.6l7.9-7.9" />,
-  globe: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18Z" />
-    </>
-  ),
-  folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
-  grid: (
-    <>
-      <rect x="3" y="3" width="7" height="7" rx="1.5" />
-      <rect x="14" y="3" width="7" height="7" rx="1.5" />
-      <rect x="3" y="14" width="7" height="7" rx="1.5" />
-      <rect x="14" y="14" width="7" height="7" rx="1.5" />
-    </>
-  ),
-  cpu: (
-    <>
-      <rect x="5" y="5" width="14" height="14" rx="2" />
-      <rect x="9.5" y="9.5" width="5" height="5" rx="1" />
-      <path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" />
-    </>
-  ),
+import {
+  ArrowDown,
+  ArrowsClockwise,
+  Books,
+  CaretRight,
+  ChatTeardropText,
+  Check,
+  Circuitry,
+  ClockCountdown,
+  Copy,
+  FolderOpen,
+  GlobeHemisphereWest,
+  Info,
+  Key,
+  Keyboard,
+  Link,
+  ListChecks,
+  MagnifyingGlass,
+  NotePencil,
+  Paperclip,
+  Plus,
+  PlugsConnected,
+  PaperPlaneRight,
+  SidebarSimple,
+  SlidersHorizontal,
+  SquaresFour,
+  Sparkle,
+  Stop,
+  Terminal,
+  Trash,
+  X,
+} from '@phosphor-icons/react'
+
+/* One icon set, one stroke weight, one grid.
+
+   The marks used to be hand-drawn paths, and it showed: strokes disagreed by a
+   third of a pixel, optical sizes drifted, and every new one was a small act of
+   invention. Phosphor is a real family drawn on a 24px grid, so a row of icons
+   lines up because the typeface-equivalent says so, not because each path was
+   nudged until it looked close.
+
+   The `<Icon name="…">` API is deliberately unchanged: the names describe what
+   the thing does in PSOK -- `plug`, `spark`, `logs` -- not what the drawing is
+   called upstream, so swapping the family again would touch this file only. */
+
+const MARKS = {
+  book: Books,
+  chat: ChatTeardropText,
+  check: Check,
+  chevron: CaretRight,
+  clock: ClockCountdown,
+  copy: Copy,
+  cpu: Circuitry,
+  down: ArrowDown,
+  edit: NotePencil,
+  info: Info,
+  key: Key,
+  keyboard: Keyboard,
+  link: Link,
+  logs: ListChecks,
+  paperclip: Paperclip,
+  plug: PlugsConnected,
+  plus: Plus,
+  refresh: ArrowsClockwise,
+  search: MagnifyingGlass,
+  send: PaperPlaneRight,
+  sidebar: SidebarSimple,
+  sliders: SlidersHorizontal,
+  spark: Sparkle,
+  grid: SquaresFour,
+  folder: FolderOpen,
+  globe: GlobeHemisphereWest,
+  stop: Stop,
+  term: Terminal,
+  trash: Trash,
+  x: X,
 }
 
-export default function Icon({ name, size = 18, ...rest }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      {...rest}
-    >
-      {PATHS[name] || null}
-    </svg>
-  )
+// Phosphor's own default weight is too light against a dark panel; `regular`
+// at 1.5px reads at 13-16px, which is where nearly every icon here sits.
+export default function Icon({ name, size = 18, weight = 'regular', ...rest }) {
+  const Mark = MARKS[name]
+  if (!Mark) return null
+  return <Mark size={size} weight={weight} aria-hidden="true" {...rest} />
 }

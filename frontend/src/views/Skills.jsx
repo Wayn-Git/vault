@@ -33,9 +33,6 @@ export default function Skills() {
       <div className="view-inner">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow">
-              <span className="led led--amber" /> procedures
-            </div>
             <h1>Skills</h1>
             <div className="vheader-sub">
               Markdown skill files discovered on disk. The agent reads the ones it needs

@@ -45,7 +45,7 @@ function Row({ icon, label, hint, tail, onClick, disabled, danger, submenu, acti
 
 const Toggle = ({ on }) => <span className={`switch${on ? ' on' : ''}`}><span /></span>
 
-export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onAttach }) {
+export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onAttach, placement = 'up' }) {
   const { caps, refreshCaps, setCapEnabled, busyCap, setOverlay, toast } = useApp()
   const [panel, setPanel] = useState(null)      // which submenu is open
   const [tools_open, setToolsOpen] = useState(false)
@@ -126,7 +126,7 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
   )
 
   return (
-    <div className="menu" ref={ref} role="menu">
+    <div className={`menu${placement === "down" ? " menu--down" : ""}`} ref={ref} role="menu">
       <input
         ref={fileRef}
         type="file"

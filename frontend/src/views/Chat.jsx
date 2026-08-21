@@ -549,6 +549,7 @@ export default function Chat() {
     <div className={`composer-wrap${isEmpty ? ' composer-wrap--hero' : ''}`}>
       {plusOpen && (
         <PlusMenu
+          placement={isEmpty ? 'down' : 'up'}
           conversationId={activeId}
           workspace={workspace}
           onWorkspace={setWorkspace}
@@ -560,6 +561,7 @@ export default function Chat() {
 
       {modelOpen && (
         <ModelMenu
+          placement={isEmpty ? 'down' : 'up'}
           provider={active?.provider ?? draftProvider}
           model={active?.model ?? draftModel}
           scoped={Boolean(activeId)}
@@ -731,9 +733,10 @@ export default function Chat() {
                 }
               >
                 <span className={`led led--${state.dot}${state.tone === 'busy' ? ' led--pulse' : ''}`} />
-                {cap.name}
+                <span>{cap.name}</span>
                 {state.tone === 'live' && <span className="armed-count">{cap.live.tools}</span>}
                 {state.tone === 'error' && <span className="armed-count">failed</span>}
+                {state.tone === 'off' && <span className="armed-count">off</span>}
               </button>
             )
           })}
@@ -793,7 +796,7 @@ export default function Chat() {
         {isEmpty ? (
           <div className="hero-stack">
             <div className="hero">
-              <h1><span className="hero-mark">✳</span> What needs doing?</h1>
+              <h1>What needs doing?</h1>
             </div>
             {composer}
             <div className="hero-hints">

@@ -86,6 +86,10 @@ Each of these was exercised end to end, not just wired up.
 
 ![The directory](docs/images/directory.png)
 
+Everything the agent can be given for the next message hangs off one button beside the composer — files, the working directory, skills, connectors, and the full list of tools it can currently call.
+
+![The composer menu](docs/images/menu.png)
+
 **A web interface** over the same API: streamed answers rendered as markdown, inline permission prompts, a command palette, file attachments, connector setup — catalogue, OAuth, credentials — and a keyboard layer where `?` lists every binding.
 
 **A CLI** that does all of it: `chat`, `serve`, `skills`, `mcp`, `memory`, `permissions`, `index`, `search`, `logs`, `capabilities`, `doctor`.
@@ -156,5 +160,7 @@ The smoke suite is the one that matters: it drives Chromium against a live model
 Sandbox containment is tested against the real OS and skips where unavailable (Windows, or Linux without `bubblewrap`). The live MCP suite exists because a transport that only works against a mock is not evidence that MCP works.
 
 ---
+
+**On the look of it.** The interface is deliberately an instrument panel rather than a product page: warm graphite instead of the blue-black every dark app defaults to, Space Grotesk and Archivo over IBM Plex Mono for anything the machine reports, Phosphor icons on a single grid, and colour reserved for exactly three meanings — running, waiting on you, destructive. Motion follows Emil Kowalski's rules: transform and opacity only, nothing over 220ms, and no animation at all on the things you hit a hundred times a day. The signal strip under the composer is the one place it spends any boldness, and it earns it by being true.
 
 Built with Python 3.11+, FastAPI, SQLite, React and Vite. No licence file was ever added, so all rights are reserved by default; treat it as reference material rather than something to redistribute.

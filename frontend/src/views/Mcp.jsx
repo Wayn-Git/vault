@@ -209,7 +209,7 @@ function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand }) {
             {live?.error
               ? 'failed to start'
               : live?.connected
-                ? `${live.tools} tools live`
+                ? `${live.tools} tool${live.tools === 1 ? '' : 's'} live`
                 : needsLogin
                   ? 'needs sign-in'
                   : cap?.enabled ? 'on, not running' : 'off'}
@@ -357,7 +357,6 @@ export default function Mcp() {
       <div className="view-inner view-inner--wide">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow"><span className="led led--amber" /> connections</div>
             <h1>Connectors</h1>
             <div className="vheader-sub">
               External apps over MCP. Their tools join the same flat namespace as the builtins, so

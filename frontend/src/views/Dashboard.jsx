@@ -79,9 +79,6 @@ export default function Dashboard() {
       <div className="view-inner">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow">
-              <span className="led led--amber led--pulse" /> status
-            </div>
             <h1>Everything, on one machine</h1>
             <div className="vheader-sub">
               One agent over your files, shell, tasks, calendar and connected services.

@@ -42,7 +42,6 @@ export default function Tasks() {
       <div className="view-inner">
         <header className="vheader" data-enter>
           <div>
-            <div className="vheader-eyebrow"><span className="led led--ok" /> commitments</div>
             <h1>Tasks and calendar</h1>
             <div className="vheader-sub">
               Created by the agent during a turn, resolved against the real clock rather than guessed.
