@@ -2,8 +2,6 @@
 
 **A personal operating system: one AI agent over your files, shell, tasks, calendar, notes and connected services.** Single-user and local-first — your data stays in a SQLite file on your machine, your secrets stay in the OS keychain, and nothing is sent anywhere except to the model provider you choose.
 
-> **Archived.** This repository is no longer maintained. It is left public as a finished, working snapshot: everything described below ran on real hardware against a real model, and the verification commands at the bottom reproduce it. Nothing here is aspirational.
-
 ![The PSOK interface](docs/images/interface.png)
 
 ---
