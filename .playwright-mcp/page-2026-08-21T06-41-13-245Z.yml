@@ -1,0 +1,147 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [active] [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: 72 tools
+  - main [ref=e147]:
+    - generic [ref=e149]:
+      - generic [ref=e150]:
+        - generic [ref=e151]:
+          - generic [ref=e152]: connections
+          - heading "MCP servers" [level=1] [ref=e154]
+          - generic [ref=e155]: Connect external apps. Their tools join the same flat namespace as builtins — the agent can't tell them apart.
+        - button "Refresh" [ref=e157] [cursor=pointer]
+      - generic [ref=e161]:
+        - generic [ref=e162]: installed · 3
+        - paragraph [ref=e164]: Switching one on starts its process immediately and reports what came back. Adding a server never starts anything on its own.
+        - generic [ref=e165]:
+          - generic [ref=e167]:
+            - generic [ref=e168]:
+              - generic [ref=e169]: chrome-devtools
+              - generic [ref=e170]: 29 tools live
+              - generic [ref=e171]: stdio
+              - generic [ref=e172]: catalogue
+            - generic [ref=e173]: npx -y chrome-devtools-mcp@latest
+          - generic [ref=e174]:
+            - button "On" [ref=e175] [cursor=pointer]
+            - button "Reconnect" [ref=e176] [cursor=pointer]
+            - button "OAuth client" [ref=e177] [cursor=pointer]
+            - button "Help" [ref=e181] [cursor=pointer]
+            - button [ref=e182] [cursor=pointer]
+        - generic [ref=e186]:
+          - generic [ref=e188]:
+            - generic [ref=e189]:
+              - generic [ref=e190]: fetch
+              - generic [ref=e191]: 1 tools live
+              - generic [ref=e192]: stdio
+              - generic [ref=e193]: catalogue
+            - generic [ref=e194]: uvx mcp-server-fetch
+          - generic [ref=e195]:
+            - button "On" [ref=e196] [cursor=pointer]
+            - button "Reconnect" [ref=e197] [cursor=pointer]
+            - button "OAuth client" [ref=e198] [cursor=pointer]
+            - button "Help" [ref=e202] [cursor=pointer]
+            - button [ref=e203] [cursor=pointer]
+        - generic [ref=e207]:
+          - generic [ref=e209]:
+            - generic [ref=e210]:
+              - generic [ref=e211]: playwright
+              - generic [ref=e212]: 24 tools live
+              - generic [ref=e213]: stdio
+              - generic [ref=e214]: catalogue
+            - generic [ref=e215]: npx -y @playwright/mcp@latest
+          - generic [ref=e216]:
+            - button "On" [ref=e217] [cursor=pointer]
+            - button "Reconnect" [ref=e218] [cursor=pointer]
+            - button "OAuth client" [ref=e219] [cursor=pointer]
+            - button "Help" [ref=e223] [cursor=pointer]
+            - button [ref=e224] [cursor=pointer]
+      - generic [ref=e228]:
+        - generic [ref=e229]: catalogue
+        - button "Add custom server" [ref=e231] [cursor=pointer]
+      - generic [ref=e234]:
+        - generic [ref=e235]:
+          - generic [ref=e236]:
+            - generic [ref=e237]: Browser (Playwright)
+            - generic [ref=e238]: installed
+          - generic [ref=e239]: "Drive a real browser: navigate, click, fill forms, extract content, take screenshots. Works from the accessibility tree, so it does not depend on screenshots to decide what to click."
+          - generic [ref=e240]:
+            - generic [ref=e241]: Browser
+            - generic [ref=e242]: none
+            - generic [ref=e243]: stdio
+            - generic [ref=e244]: Node.js (npx)
+          - generic [ref=e245]:
+            - generic [ref=e246]: in mcp.yaml
+            - link "homepage" [ref=e247] [cursor=pointer]:
+              - /url: https://github.com/microsoft/playwright-mcp
+        - generic [ref=e248]:
+          - generic [ref=e249]:
+            - generic [ref=e250]: Browser (Chrome DevTools)
+            - generic [ref=e251]: installed
+          - generic [ref=e252]: Control Chrome through the DevTools protocol, including performance traces and network inspection. Use when debugging a page rather than just using it.
+          - generic [ref=e253]:
+            - generic [ref=e254]: Browser
+            - generic [ref=e255]: none
+            - generic [ref=e256]: stdio
+            - generic [ref=e257]: Node.js (npx) and Chrome
+          - generic [ref=e258]:
+            - generic [ref=e259]: in mcp.yaml
+            - link "homepage" [ref=e260] [cursor=pointer]:
+              - /url: https://github.com/ChromeDevTools/chrome-devtools-mcp
+        - generic [ref=e261]:
+          - generic [ref=e262]: GitHub
+          - generic [ref=e264]: Repositories, issues, pull requests, code search, actions and notifications through GitHub's own hosted MCP server.
+          - generic [ref=e265]:
+            - generic [ref=e266]: Development
+            - generic [ref=e267]: oauth
+            - generic [ref=e268]: streamable-http
+          - generic [ref=e269]:
+            - button "Add" [ref=e270] [cursor=pointer]
+            - link "homepage" [ref=e271] [cursor=pointer]:
+              - /url: https://github.com/github/github-mcp-server
+        - generic [ref=e272]:
+          - generic [ref=e273]: Google Workspace
+          - generic [ref=e275]: Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks and Chat in one server. Sign in once with Google and every surface is available.
+          - generic [ref=e276]:
+            - generic [ref=e277]: Google
+            - generic [ref=e278]: setup
+            - generic [ref=e279]: stdio
+            - generic [ref=e280]: uv (uvx) and a Google Cloud OAuth client
+          - generic [ref=e281]:
+            - button "Add" [ref=e282] [cursor=pointer]
+            - link "homepage" [ref=e283] [cursor=pointer]:
+              - /url: https://github.com/taylorwilsdon/google_workspace_mcp
+        - generic [ref=e284]:
+          - generic [ref=e285]:
+            - generic [ref=e286]: Web Fetch
+            - generic [ref=e287]: installed
+          - generic [ref=e288]: Fetch a URL and convert the page to markdown for the model to read.
+          - generic [ref=e289]:
+            - generic [ref=e290]: Web
+            - generic [ref=e291]: none
+            - generic [ref=e292]: stdio
+            - generic [ref=e293]: uv (uvx)
+          - generic [ref=e294]:
+            - generic [ref=e295]: in mcp.yaml
+            - link "homepage" [ref=e296] [cursor=pointer]:
+              - /url: https://github.com/modelcontextprotocol/servers
+        - generic [ref=e297]:
+          - generic [ref=e298]: Knowledge Graph Memory
+          - generic [ref=e300]: "A persistent knowledge graph of entities and relations. Complementary to PSOK's own memory: this one is explicitly curated by the model."
+          - generic [ref=e301]:
+            - generic [ref=e302]: Knowledge
+            - generic [ref=e303]: none
+            - generic [ref=e304]: stdio
+            - generic [ref=e305]: Node.js (npx)
+          - generic [ref=e306]:
+            - button "Add" [ref=e307] [cursor=pointer]
+            - link "homepage" [ref=e308] [cursor=pointer]:
+              - /url: https://github.com/modelcontextprotocol/servers

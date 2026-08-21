@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api, fmtDate } from '../api.js'
 
 export default function Memory() {
@@ -93,7 +93,7 @@ export default function Memory() {
         )}
 
         <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }} data-enter>
-          <span className="badge badge--amber">{state?.facts?.length ?? 0} held</span>
+          <span className="badge">{state?.facts?.length ?? 0} held</span>
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}

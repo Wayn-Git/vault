@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
 
 export default function Skills() {

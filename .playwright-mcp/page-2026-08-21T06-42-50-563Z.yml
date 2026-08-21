@@ -1,0 +1,90 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: 72 tools
+  - main [ref=e22]:
+    - generic [ref=e24]:
+      - complementary [ref=e25]:
+        - button "New conversation" [ref=e27] [cursor=pointer]
+        - generic [ref=e30]:
+          - button "untitled 21 Aug" [ref=e60] [cursor=pointer]:
+            - generic [ref=e61]: untitled
+            - generic [ref=e62]: 21 Aug
+          - button "untitled 20 Aug" [ref=e63] [cursor=pointer]:
+            - generic [ref=e64]: untitled
+            - generic [ref=e65]: 20 Aug
+          - button "Hi there 20 Aug" [ref=e66] [cursor=pointer]:
+            - generic [ref=e67]: Hi there
+            - generic [ref=e68]: 20 Aug
+          - button "Hi there 20 Aug" [ref=e69] [cursor=pointer]:
+            - generic [ref=e70]: Hi there
+            - generic [ref=e71]: 20 Aug
+          - button "gate smoke test 20 Aug" [active] [ref=e72] [cursor=pointer]:
+            - generic [ref=e73]: gate smoke test
+            - generic [ref=e74]: 20 Aug
+          - button "smoke test 20 Aug" [ref=e75] [cursor=pointer]:
+            - generic [ref=e76]: smoke test
+            - generic [ref=e77]: 20 Aug
+          - button "test turn 20 Aug" [ref=e78] [cursor=pointer]:
+            - generic [ref=e79]: test turn
+            - generic [ref=e80]: 20 Aug
+          - button "Hi there 20 Aug" [ref=e81] [cursor=pointer]:
+            - generic [ref=e82]: Hi there
+            - generic [ref=e83]: 20 Aug
+          - button "final turn 20 Aug" [ref=e84] [cursor=pointer]:
+            - generic [ref=e85]: final turn
+            - generic [ref=e86]: 20 Aug
+          - button "test turn 20 Aug" [ref=e87] [cursor=pointer]:
+            - generic [ref=e88]: test turn
+            - generic [ref=e89]: 20 Aug
+      - generic [ref=e31]:
+        - generic [ref=e103]:
+          - generic [ref=e104]:
+            - generic [ref=e105]: you
+            - generic [ref=e106]: Create a task called 'ui smoke test' due tomorrow.
+          - generic [ref=e107]:
+            - generic [ref=e108]: psok
+            - generic [ref=e110]:
+              - button "create_task error" [ref=e111] [cursor=pointer]:
+                - generic [ref=e115]: create_task
+                - generic [ref=e116]: error
+              - generic [ref=e119]:
+                - generic [ref=e120]: arguments
+                - generic [ref=e121]: "{ \"due_date_hint\": \"tomorrow\", \"title\": \"ui smoke test\" }"
+                - generic [ref=e122]: result
+                - generic [ref=e123]: "'create_task' was not run: the user declined to approve this medium-risk operation."
+          - generic [ref=e124]:
+            - generic [ref=e125]: psok
+            - generic [ref=e127]: The task creation was declined. Would you like me to try again, or would you prefer to create it yourself?
+        - generic [ref=e128]:
+          - generic [ref=e130]:
+            - textbox "Ask for anything on this machine" [ref=e131]
+            - generic [ref=e132]:
+              - button "Skills, connectors, memory, workspace" [ref=e133] [cursor=pointer]
+              - button "nemotron-3-ultra-550b-a55b" [ref=e136] [cursor=pointer]
+              - button "Send" [disabled] [ref=e140]
+          - generic [ref=e143]:
+            - generic [ref=e144]: reach
+            - button "chrome-devtools 29" [ref=e145] [cursor=pointer]:
+              - text: chrome-devtools
+              - generic [ref=e147]: "29"
+            - button "fetch 1" [ref=e148] [cursor=pointer]:
+              - text: fetch
+              - generic [ref=e150]: "1"
+            - button "playwright 24" [ref=e151] [cursor=pointer]:
+              - text: playwright
+              - generic [ref=e153]: "24"
+          - generic [ref=e154]:
+            - generic [ref=e155]: enter sends
+            - generic [ref=e156]: shift + enter for a new line
+            - generic [ref=e157]: /name engages a skill
+            - generic [ref=e158]: writes and shell commands ask first

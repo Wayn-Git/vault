@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: connecting
+  - main [ref=e22]:
+    - generic [ref=e24]:
+      - complementary [ref=e25]:
+        - button "New conversation" [ref=e27] [cursor=pointer]
+      - generic [ref=e32]:
+        - generic [ref=e33]:
+          - heading "What needs doing?" [level=1] [ref=e34]
+          - paragraph [ref=e35]: Files, shell, tasks, calendar, your notes and whatever you have connected, reachable from one line. Anything that writes or runs asks you first.
+          - generic [ref=e36]:
+            - button "What am I meant to be doing tomorrow?" [ref=e37] [cursor=pointer]
+            - button "Find where I wrote about the deploy error" [ref=e38] [cursor=pointer]
+            - button "Summarise what changed in this folder today" [ref=e39] [cursor=pointer]
+        - generic [ref=e40]:
+          - generic [ref=e42]:
+            - textbox "Ask for anything on this machine" [ref=e43]
+            - generic [ref=e44]:
+              - button "Skills, connectors, memory, workspace" [ref=e45] [cursor=pointer]
+              - button "no model" [ref=e48] [cursor=pointer]
+              - button "Send" [disabled] [ref=e52]
+          - generic [ref=e55]:
+            - generic [ref=e56]: enter sends
+            - generic [ref=e57]: shift + enter for a new line
+            - generic [ref=e58]: /name engages a skill
+            - generic [ref=e59]: writes and shell commands ask first

@@ -1,9 +1,6 @@
 import { useEffect, useRef } from 'react'
-import gsap from 'gsap'
-import { useGSAP } from '@gsap/react'
 import Icon from './components/Icon.jsx'
 import { useApp } from './store.jsx'
-import { useMotionToggler } from './gsapFx.js'
 import Dashboard from './views/Dashboard.jsx'
 import Chat from './views/Chat.jsx'
 import Mcp from './views/Mcp.jsx'
@@ -76,19 +73,8 @@ function Toasts() {
 export default function App() {
   const { view } = useApp()
   const mainRef = useRef(null)
-  useMotionToggler()
 
   const Active = VIEWS[view] || Chat
-
-  useGSAP(
-    () => {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-      const el = mainRef.current
-      gsap.set(el, { autoAlpha: 0, y: 8 })
-      gsap.to(el, { autoAlpha: 1, y: 0, duration: 0.5, ease: 'expo.out' })
-    },
-    { scope: mainRef, dependencies: [view] },
-  )
 
   useEffect(() => {
     document.title = 'PSOK · personal operating system'
@@ -97,7 +83,7 @@ export default function App() {
   return (
     <div className="shell">
       <Topbar />
-      <main className="main" ref={mainRef} key={view}>
+      <main className="main view-swap" ref={mainRef} key={view}>
         <Active />
       </main>
       <Toasts />

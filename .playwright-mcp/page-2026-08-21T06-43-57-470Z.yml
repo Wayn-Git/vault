@@ -1,0 +1,27 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [active] [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: 72 tools
+  - main [ref=e1048]:
+    - generic [ref=e1050]:
+      - generic [ref=e1051]:
+        - generic [ref=e1052]:
+          - generic [ref=e1053]: memory
+          - heading "What PSOK remembers" [level=1] [ref=e1055]
+          - generic [ref=e1056]: Standing facts, extracted after a turn and recalled in later conversations. Correcting one retires it rather than deleting it, so what PSOK believed — and when that changed — stays answerable.
+        - generic [ref=e1057]:
+          - button "Memory on" [ref=e1058] [cursor=pointer]
+          - button "Refresh" [ref=e1059] [cursor=pointer]
+      - generic [ref=e1063]:
+        - generic [ref=e1064]: 0 held
+        - textbox "filter facts…" [ref=e1065]
+      - generic [ref=e1066]: Nothing remembered yet. Tell PSOK something durable about you — a preference, a project, a constraint — and it will be recorded after the turn.

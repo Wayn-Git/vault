@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
 
 const EMPTY_FORM = { name: '', transport: 'stdio', command: '', args: '', url: '', oauth: false, allow_local: false }
@@ -65,10 +65,13 @@ function ServerRow({ server, live, onChanged }) {
         if (r.error) toast(`${server.name}: ${r.error}`, 'bad')
         else toast(`Connected ${server.name} — ${r.tools} tool${r.tools === 1 ? '' : 's'}`, 'ok')
       } else if (action === 'switch') {
-        // The agent reaches a connector only while it is switched on, and the
-        // API starts it at the beginning of the next turn.
-        await api.toggleCapability('connector', server.name, !live, null)
-        toast(`${server.name} switched ${live ? 'off' : 'on'}`, 'ok')
+        // Starts or stops the process now and reports the outcome, rather than
+        // recording an intention and leaving the agent to discover the truth.
+        const result = await api.toggleCapability('connector', server.name, !live.enabled, null)
+        const state = result.live || {}
+        if (state.error) toast(`${server.name} could not start — ${state.error}`, 'bad')
+        else if (state.connected) toast(`${server.name} ready — ${state.tools} tools`, 'ok')
+        else toast(`${server.name} stopped`, 'ok')
       } else if (action === 'login') {
         const r = await api.mcpLogin(server.name)
         if (r.authorized) toast(`Authorized ${server.name}`, 'ok')
@@ -82,6 +85,14 @@ function ServerRow({ server, live, onChanged }) {
     }
   }
 
+  const runState = live.error
+    ? <span className="badge badge--bad">failed to start</span>
+    : live.connected
+      ? <span className="badge badge--ok">{live.tools} tool{live.tools === 1 ? '' : 's'} live</span>
+      : live.enabled
+        ? <span className="badge">on, not running</span>
+        : null
+
   const authState = server.authorized === true
     ? <span className="badge badge--ok">authorized</span>
     : server.authorized === false
@@ -92,34 +103,42 @@ function ServerRow({ server, live, onChanged }) {
 
   return (
     <div className="server-row">
-      <span className={`led led--${live ? 'ok' : 'faint'}`} />
+      <span className={`led led--${live.error ? 'bad' : live.connected ? 'ok' : 'faint'}`} />
       <div style={{ minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="server-name">{server.name}</span>
+          {runState}
           {authState}
           <span className="badge">{server.transport}</span>
           {server.source === 'bundled' && <span className="badge">catalogue</span>}
         </div>
         <div className="server-target">{server.target || '—'}</div>
+        {live.error && (
+          <div className="server-target" style={{ color: 'var(--stop)' }}>{live.error}</div>
+        )}
       </div>
       <div className="server-actions">
         <button
           type="button"
-          className={`btn btn--small${live ? ' btn--primary' : ' btn--ghost'}`}
+          className={`btn btn--small${live.enabled ? ' btn--primary' : ' btn--ghost'}`}
           disabled={busy !== ''}
           onClick={() => act('switch')}
-          title={live ? 'Switched on — the agent can use its tools' : 'Switched off — its tools are not offered to the agent'}
+          title={
+            live.enabled
+              ? 'Switched on — click to stop it'
+              : 'Switched off — click to start it and see whether it comes up'
+          }
         >
-          {busy === 'switch' ? '…' : live ? 'On' : 'Off'}
+          {busy === 'switch' ? 'Starting…' : live.enabled ? 'On' : 'Off'}
         </button>
         <button
           type="button"
           className="btn btn--ghost btn--small"
-          disabled={busy !== '' || !live}
+          disabled={busy !== '' || !live.enabled}
           onClick={() => act('connect')}
-          title={live ? 'Connect now instead of at the next turn' : 'Switch it on first'}
+          title={live.enabled ? 'Reconnect it now' : 'Switch it on first'}
         >
-          {busy === 'connect' ? 'Connecting…' : 'Connect now'}
+          {busy === 'connect' ? 'Connecting…' : 'Reconnect'}
         </button>
         {server.oauth && (
           <button type="button" className="btn btn--ghost btn--small" disabled={busy !== ''} onClick={() => act('login')}>
@@ -172,7 +191,13 @@ export default function Mcp() {
       setCatalogue(cat)
       setServers(srv)
       setAuths(auth)
-      setLive(Object.fromEntries((caps.connectors ?? []).map((c) => [c.name, c.enabled])))
+      // Two facts per server: switched on, and actually running. The row shows
+      // both, because a switch that reported only the first is what made
+      // connectors look enabled while the agent had none of their tools.
+      setLive(Object.fromEntries((caps.connectors ?? []).map((c) => [
+        c.name,
+        { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+      ])))
     } catch (err) {
       toast(err.message, 'bad')
     }
@@ -277,12 +302,12 @@ export default function Mcp() {
           )}
           {servers.length > 0 && (
             <p className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', margin: '0 0 10px' }}>
-              A connector starts when it is switched on, at the beginning of the next turn. Adding
-              one never starts a process on its own.
+              Switching one on starts its process immediately and reports what came back. Adding a
+              server never starts anything on its own.
             </p>
           )}
           {servers.map((s) => (
-            <ServerRow key={s.name} server={s} live={Boolean(live[s.name])} onChanged={refresh} />
+            <ServerRow key={s.name} server={s} live={live[s.name] || {}} onChanged={refresh} />
           ))}
         </div>
 

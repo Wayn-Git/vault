@@ -143,6 +143,9 @@ async def _registry_for(workspace: str | None):
                     _mcp["errors"].pop(name, None)
                 else:
                     _mcp["errors"][name] = str(outcome)
+            # A server that is no longer configured cannot be degraded.
+            for name in [n for n in _mcp["errors"] if n not in _mcp["manager"].state()]:
+                del _mcp["errors"][name]
             return _mcp["registry"], root
 
         if _mcp["manager"] is not None:
@@ -522,10 +525,24 @@ def _capability_json(c) -> dict[str, Any]:
 
 @app.get("/api/capabilities")
 def list_capabilities(conversation_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
-    from psok.capabilities import CapabilityService
+    from psok.capabilities import CapabilityService, Kind
 
     overview = CapabilityService().overview(conversation_id)
-    return {group: [_capability_json(c) for c in items] for group, items in overview.items()}
+    # Connector rows carry what is actually running, not just what is switched
+    # on: those are different facts, and only one of them is the truth.
+    live = _mcp["manager"].state() if _mcp["manager"] else {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for group, items in overview.items():
+        rows = []
+        for capability in items:
+            row = _capability_json(capability)
+            if capability.kind is Kind.CONNECTOR:
+                row["live"] = live.get(
+                    capability.name, {"connected": False, "tools": 0, "error": None}
+                )
+            rows.append(row)
+        out[group] = rows
+    return out
 
 
 class CapabilityToggle(BaseModel):
@@ -534,7 +551,14 @@ class CapabilityToggle(BaseModel):
 
 
 @app.post("/api/capabilities/{kind}/{name}")
-def toggle_capability(kind: str, name: str, body: CapabilityToggle) -> dict[str, Any]:
+async def toggle_capability(kind: str, name: str, body: CapabilityToggle) -> dict[str, Any]:
+    """Switch a capability on or off -- and, for a connector, make it so now.
+
+    Writing the row and deferring the connection to the next turn is what
+    produced a switch that said "on" while no process was running. Connectors
+    start and stop here, and the outcome comes back with the response, so the
+    interface can report what actually happened rather than what was intended.
+    """
     from psok.capabilities import CapabilityService, Kind
 
     try:
@@ -544,12 +568,48 @@ def toggle_capability(kind: str, name: str, body: CapabilityToggle) -> dict[str,
 
     service = CapabilityService()
     service.set_enabled(parsed, name, body.enabled, conversation_id=body.conversation_id)
-    return {
+    enabled = service.is_enabled(parsed, name, body.conversation_id)
+
+    result = {
         "kind": kind,
         "name": name,
-        "enabled": service.is_enabled(parsed, name, body.conversation_id),
+        "enabled": enabled,
         "scope": body.conversation_id or "global",
     }
+    if parsed is Kind.CONNECTOR:
+        result["live"] = await _apply_connector(name, enabled)
+    return result
+
+
+async def _apply_connector(name: str, enabled: bool) -> dict[str, Any]:
+    """Start or stop one connector immediately, reporting the real outcome."""
+    from psok.mcp.config import load_servers
+
+    config = load_servers().get(name)
+    if config is None:
+        return {"connected": False, "tools": 0, "error": f"'{name}' is not in mcp.yaml"}
+
+    if _mcp["manager"] is None:
+        # No turn has run yet, so there is nothing live to attach to. Build the
+        # registry against the working directory; a later turn naming a
+        # workspace rebuilds it and reconnects whatever is switched on.
+        await _registry_for(None)
+    manager = _mcp["manager"]
+
+    async with _registry_lock:
+        if not enabled:
+            await manager.disconnect_server(name)
+            _mcp["errors"].pop(name, None)
+            return {"connected": False, "tools": 0, "error": None}
+
+        manager.errors.pop(name, None)  # an explicit switch-on retries a failure
+        try:
+            tools = await manager.connect_server(config)
+        except Exception as exc:
+            _mcp["errors"][name] = str(exc)
+            return {"connected": False, "tools": 0, "error": str(exc)}
+        _mcp["errors"].pop(name, None)
+        return {"connected": True, "tools": tools, "error": None}
 
 
 @app.delete("/api/capabilities/{kind}/{name}")

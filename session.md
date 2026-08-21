@@ -11,7 +11,7 @@ tree is 42 modified files plus 3 new ones, on top of `009587c`.
 |---|---|
 | Backend | `uvicorn psok.api.main:app --port 8000`, running against the real `~/.psok` |
 | Frontend | Vite dev on `:5173` — open **http://127.0.0.1:5173** |
-| Tests | 223 unit passing (1 skipped: sandbox case), 5 live MCP passing, `ruff` clean |
+| Tests | 225 unit passing (1 skipped: sandbox case), 5 live MCP passing, `ruff` clean |
 | Frontend checks | `npm run build` and `oxlint` clean. **No frontend test suite exists.** |
 | Default model | `nvidia/nemotron-3-ultra-550b-a55b` |
 
@@ -152,6 +152,50 @@ server requires a **Web application** one, and its callback defaults to port
 8000 — where the PSOK API runs. The entry now pins `WORKSPACE_MCP_PORT=8765`.
 
 ---
+
+## Second pass — the shadow-state fix and the interface
+
+### The connector switch reported intent, not fact
+
+Switching a connector on wrote a capability row and left connecting until the
+next turn. The row then read "on" whether the process had started, had died, or
+had never been asked to start, which is why connectors looked enabled while the
+agent had none of their tools.
+
+- `POST /api/capabilities/connector/{name}` now starts or stops the process and
+  waits for the outcome, answering with `{connected, tools, error}`.
+- `GET /api/capabilities` carries the same live block on every connector row.
+- `MCPManager.state()` is the single source of that truth.
+- A server removed from `mcp.yaml` no longer leaves its failure behind, which
+  used to keep `/api/health` degraded over a connector that no longer existed.
+- Verified against the real thing: playwright reports 24 tools about three
+  seconds after the switch, a server whose binary is missing reports
+  `FileNotFoundError` on its row instead of reading "on", and a turn driven
+  through Vite's proxy actually calls `fetch__mcp__fetch`.
+
+### Interface, second revision
+
+Type is Bricolage Grotesque / Schibsted Grotesk / JetBrains Mono. The palette is
+cool graphite and **colour is reserved for liveness and risk** — a connector
+that is actually running is mint, a confirmation is amber, a stop is coral, and
+nothing else on the screen carries chroma.
+
+The signature is the **armed strip** under the composer: what the agent can
+reach right now, with real state per connector. Clicking a chip starts or stops
+that process and the chip changes only when the process does.
+
+Motion follows Emil Kowalski's framework: custom curves, nothing over 300ms,
+`scale(0.97)` on press, popovers scaling from their trigger, transitions rather
+than keyframes for anything re-triggerable, hover behind
+`(hover: hover)`, reduced motion respected. GSAP is gone — CSS animations run
+off the main thread, which matters while a turn is streaming. Bundle went from
+323KB to 251KB (103KB to 76KB gzipped).
+
+Checked by driving PSOK's own Playwright connector against its own interface and
+reading the screenshots: home, the + menu, a conversation, connectors, activity,
+memory, and a 430px viewport. That pass caught and fixed a stranded hero, an
+audit table whose rows stretched to several hundred pixels, invented timestamps
+on the status panel, and three places where colour was decoration.
 
 ## Not done yet — pick up here
 

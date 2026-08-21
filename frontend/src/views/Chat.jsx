@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
 import ConfirmModal from '../components/ConfirmModal.jsx'
-import PlusMenu from '../components/PlusMenu.jsx'
+import PlusMenu, { connectorState } from '../components/PlusMenu.jsx'
 import { useApp } from '../store.jsx'
 import { api, fmtDate } from '../api.js'
 
@@ -123,7 +123,7 @@ function Msg({ item }) {
   if (role === 'assistant') {
     return (
       <div className="msg msg-assistant">
-        <div className="msg-role"><span className="led led--amber" /> psok</div>
+        <div className="msg-role"><span className="led led--faint" /> psok</div>
         {item.text && <div className="msg-body">{item.text}</div>}
         {item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
       </div>
@@ -155,6 +155,8 @@ export default function Chat() {
   const [draft, setDraft] = useState({ provider: '', model: '' })
   const [acItems, setAcItems] = useState([])
   const [acIndex, setAcIndex] = useState(0)
+  const [caps, setCaps] = useState({ skills: [], connectors: [] })
+  const [arming, setArming] = useState('')
 
   const abortRef = useRef(null)
   const scrollRef = useRef(null)
@@ -182,6 +184,32 @@ export default function Chat() {
   }, [toast])
 
   useEffect(() => { refreshConvs() }, [refreshConvs])
+
+  // What the agent can actually reach. Refreshed when the conversation changes
+  // and after every turn, because a connector can die between messages.
+  const refreshCaps = useCallback(async () => {
+    try { setCaps(await api.capabilities(activeId || null)) } catch { /* strip stays as it was */ }
+  }, [activeId])
+
+  useEffect(() => { refreshCaps() }, [refreshCaps])
+
+  const armConnector = useCallback(async (cap) => {
+    setArming(cap.name)
+    try {
+      // Starts or stops the process and waits for the outcome, so the chip
+      // never reports a capability the agent does not have.
+      const result = await api.toggleCapability('connector', cap.name, !cap.enabled, activeId || null)
+      const live = result.live || {}
+      if (live.error) toast(`${cap.name} could not start — ${live.error}`, 'bad')
+      else if (live.connected) toast(`${cap.name} ready — ${live.tools} tools`, 'ok')
+      await refreshCaps()
+      refreshHealth()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setArming('')
+    }
+  }, [activeId, refreshCaps, refreshHealth, toast])
 
   // Prompts arrive on the stream; this one fetch recovers anything a reload left
   // suspended, since the turn survives the page and the stream does not.
@@ -412,7 +440,8 @@ export default function Chat() {
           workspace={workspace}
           onWorkspace={setWorkspace}
           onNavigate={setView}
-          onClose={() => setPlusOpen(false)}
+          onChanged={setCaps}
+          onClose={() => { setPlusOpen(false); refreshCaps() }}
         />
       )}
 
@@ -547,6 +576,36 @@ export default function Chat() {
         </div>
       </div>
 
+      {caps.connectors.length > 0 && (
+        <div className="armed">
+          <span className="armed-label">reach</span>
+          {caps.connectors.map((cap) => {
+            const state = connectorState(cap, arming === cap.name)
+            return (
+              <button
+                key={cap.name}
+                type="button"
+                className={`armed-chip${state.tone === 'live' ? ' is-live' : ''}${state.tone === 'error' ? ' is-error' : ''}${state.tone === 'busy' ? ' is-busy' : ''}`}
+                onClick={() => armConnector(cap)}
+                disabled={arming === cap.name}
+                title={
+                  state.detail
+                    ? `${cap.name}: ${state.detail}`
+                    : state.tone === 'live'
+                      ? `${cap.name} is running with ${cap.live.tools} tools — click to stop it`
+                      : `${cap.name} is ${state.label} — click to start it`
+                }
+              >
+                <span className={`led led--${state.dot}${state.tone === 'busy' ? ' led--pulse' : ''}`} />
+                {cap.name}
+                {state.tone === 'live' && <span className="armed-count">{cap.live.tools}</span>}
+                {state.tone === 'error' && <span className="armed-count">failed</span>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       <div className="composer-hint">
         <span>enter sends</span>
         <span>shift + enter for a new line</span>
@@ -577,12 +636,10 @@ export default function Chat() {
                 type="button"
                 className={`chat-conv${c.id === activeId ? ' active' : ''}`}
                 onClick={() => selectConversation(c.id)}
+                title={`${c.provider} · ${c.model}`}
               >
                 <span className="chat-conv-title">{c.title || 'untitled'}</span>
-                <span className="chat-conv-meta">
-                  <span>{c.model?.split('/').pop() ?? c.provider}</span>
-                  <span style={{ marginLeft: 'auto' }}>{fmtDate(c.updated_at)}</span>
-                </span>
+                <span className="chat-conv-meta">{fmtDate(c.updated_at)}</span>
               </button>
             ))}
           </div>
@@ -600,13 +657,12 @@ export default function Chat() {
           )}
 
           {isEmpty ? (
-            <>
+            <div className="hero-stack">
               <div className="hero">
-                <span className="hero-mark"><Icon name="spark" size={30} /></span>
-                <h1>What shall we get done?</h1>
+                <h1>What needs doing?</h1>
                 <p className="hero-sub">
-                  Files, shell, tasks, calendar, your notes and anything you have connected —
-                  one agent, on this machine. Nothing irreversible happens without your say-so.
+                  Files, shell, tasks, calendar, your notes and whatever you have connected,
+                  reachable from one line. Anything that writes or runs asks you first.
                 </p>
                 <div className="hero-hints">
                   {OPENERS.map((o) => (
@@ -622,7 +678,7 @@ export default function Chat() {
                 </div>
               </div>
               {composer}
-            </>
+            </div>
           ) : (
             <>
               <div className="chat-scroll" ref={scrollRef}>
@@ -630,7 +686,7 @@ export default function Chat() {
                   {rendered.map((item) => <Msg key={item.id} item={item} />)}
                   {streamingAssistant && (
                     <div className="msg msg-assistant">
-                      <div className="msg-role"><span className="led led--amber led--pulse" /> psok</div>
+                      <div className="msg-role"><span className="led led--faint led--pulse" /> psok</div>
                       {liveReasoning && <div className="msg-reasoning">{liveReasoning}</div>}
                       <div className="msg-body">
                         {liveBuffer}

@@ -971,6 +971,9 @@ async def test_a_connector_switched_on_mid_session_becomes_usable(api, db, tmp_p
 class _AlwaysConnected:
     connected = True
 
+    def __init__(self, tools=()):
+        self.tools = list(tools)
+
     async def disconnect(self):
         pass
 
@@ -1157,3 +1160,109 @@ def test_migrating_twice_changes_nothing(tmp_path):
     after = sorted(r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE sql NOT NULL"))
     assert before == after
     assert isinstance(conn, sqlite3.Connection)
+
+
+# --- 26: a connector switch that reported intent, not fact ------------------
+
+
+async def test_switching_a_connector_on_starts_it_and_says_what_happened(api, db, monkeypatch):
+    """The switch wrote a capability row and left connecting to the next turn,
+    so it read "on" whether the process had started, had died, or had never
+    been asked to start. Nothing in the interface could tell the difference --
+    the user saw connectors enabled and an agent with none of their tools."""
+    from psok.mcp.config import ServerConfig, Transport, add_server
+    from psok.mcp.manager import MCPManager
+    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+
+    add_server(ServerConfig(name="browser", transport=Transport.STDIO, command="true"))
+
+    class FakeManager(MCPManager):
+        fail = False
+
+        async def connect_server(self, config):
+            # Same contract as the real one: connecting an already-connected
+            # server replaces it rather than colliding with its own tools.
+            await self.disconnect_server(config.name)
+            if FakeManager.fail:
+                self.errors[config.name] = "npx: command not found"
+                raise RuntimeError("npx: command not found")
+
+            async def handler(args, ctx):
+                return ToolResult.ok("ok")
+
+            self.connections[config.name] = _AlwaysConnected(tools=[1, 2, 3])
+            self.registry.register(
+                Tool(
+                    name=f"navigate__mcp__{config.name}",
+                    description="",
+                    parameters={},
+                    handler=handler,
+                    risk=RiskLevel.MEDIUM,
+                    source=ToolSource.MCP,
+                    server_name=config.name,
+                )
+            )
+            return 3
+
+        async def disconnect_server(self, name):
+            self.connections.pop(name, None)
+            self.registry.unregister_server(name)
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(api, "MCPManager", FakeManager)
+    try:
+        on = await api.toggle_capability(
+            "connector", "browser", api.CapabilityToggle(enabled=True)
+        )
+        assert on["live"] == {"connected": True, "tools": 3, "error": None}, (
+            "the response has to carry what actually happened"
+        )
+
+        listed = api.list_capabilities()["connectors"]
+        row = next(c for c in listed if c["name"] == "browser")
+        assert row["enabled"] is True
+        assert row["live"]["connected"] is True and row["live"]["tools"] == 3
+
+        off = await api.toggle_capability(
+            "connector", "browser", api.CapabilityToggle(enabled=False)
+        )
+        assert off["live"]["connected"] is False
+        assert not [t for t in api._mcp["registry"].list() if t.server_name == "browser"]
+
+        # A server that cannot start reports the reason instead of reading "on".
+        FakeManager.fail = True
+        broken = await api.toggle_capability(
+            "connector", "browser", api.CapabilityToggle(enabled=True)
+        )
+        assert broken["enabled"] is True, "the preference is still recorded"
+        assert broken["live"]["connected"] is False
+        assert "npx" in broken["live"]["error"], "the reason has to reach the interface"
+
+        row = next(c for c in api.list_capabilities()["connectors"] if c["name"] == "browser")
+        assert row["live"]["error"], "and it has to persist on the row, not just the response"
+    finally:
+        FakeManager.fail = False
+        api._mcp.update({"manager": None, "registry": None, "workspace": None, "errors": {}})
+
+
+async def test_removing_a_connector_takes_its_failure_with_it(db, psok_home):
+    """A server removed from mcp.yaml left its error behind, so /api/health
+    reported degraded forever over a connector that no longer existed."""
+    from psok.mcp.config import ServerConfig, Transport, add_server, remove_server
+    from psok.mcp.manager import MCPManager
+    from psok.security.confirmation import ConfirmationService, auto_approve
+    from psok.tools.registry import ToolRegistry
+
+    add_server(ServerConfig(name="gone", transport=Transport.STDIO, command="true"))
+    manager = MCPManager(ToolRegistry(ConfirmationService(auto_approve)), open_browser=False)
+    manager.errors["gone"] = "npx: command not found"
+
+    assert manager.state()["gone"]["error"]
+
+    remove_server("gone")
+    await manager.reconcile()
+
+    assert "gone" not in manager.errors
+    assert "gone" not in manager.state()

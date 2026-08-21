@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { api } from '../api.js'
 
-/* Everything the agent can be given for the next message, one keystroke from the
-   composer: which skills it may read, which connectors it may reach, whether it
-   remembers, and where on disk it is allowed to work.
+/* Everything the agent can be given for the next message, one keystroke from
+   the composer.
 
-   Scope follows the conversation when there is one, because "not this one, not
-   here" is the useful unit — and falls back to the global default before the
-   first message exists. */
+   A connector row reports what is running, not what is switched on. Those are
+   different facts: a row can say "on" while the process failed to start, died,
+   or was never asked to. Switching one on starts it here and waits for the
+   answer, so the row never claims a capability the agent does not have. */
 
 function Row({ index, icon, label, hint, tail, onClick, disabled }) {
   return (
@@ -23,7 +23,7 @@ function Row({ index, icon, label, hint, tail, onClick, disabled }) {
       <span style={{ minWidth: 0 }}>
         {label}
         {hint && (
-          <span style={{ display: 'block', fontSize: 11.5, color: 'var(--text-faint)', marginTop: 1 }}>
+          <span style={{ display: 'block', fontSize: 11.5, color: 'var(--text-faint)', marginTop: 1, lineHeight: 1.45 }}>
             {hint}
           </span>
         )}
@@ -33,11 +33,18 @@ function Row({ index, icon, label, hint, tail, onClick, disabled }) {
   )
 }
 
-function Toggle({ on }) {
-  return <span className={`plus-toggle${on ? ' on' : ''}`} />
+const Toggle = ({ on }) => <span className={`plus-toggle${on ? ' on' : ''}`} />
+
+export function connectorState(cap, busy) {
+  const live = cap.live || {}
+  if (busy) return { tone: 'busy', label: 'starting', dot: 'amber' }
+  if (live.error) return { tone: 'error', label: 'failed', dot: 'bad', detail: live.error }
+  if (live.connected) return { tone: 'live', label: `${live.tools} tools`, dot: 'ok' }
+  if (cap.enabled) return { tone: 'idle', label: 'not running', dot: 'faint' }
+  return { tone: 'off', label: 'off', dot: 'faint' }
 }
 
-export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate }) {
+export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onChanged }) {
   const [panel, setPanel] = useState('root')
   const [caps, setCaps] = useState({ skills: [], connectors: [] })
   const [memory, setMemory] = useState(null)
@@ -52,15 +59,14 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
       const [c, m] = await Promise.all([api.capabilities(scope), api.memory(scope)])
       setCaps(c)
       setMemory(m)
+      onChanged?.(c)
     } catch {
       /* the menu still opens; the rows simply show nothing to toggle */
     }
-  }, [scope])
+  }, [scope, onChanged])
 
   useEffect(() => { load() }, [load])
 
-  // Click-away and Escape, because a popover that traps the user is a modal
-  // wearing a disguise.
   useEffect(() => {
     const away = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
     const key = (e) => { if (e.key === 'Escape') (panel === 'root' ? onClose() : setPanel('root')) }
@@ -75,6 +81,8 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
   const toggleCap = async (cap) => {
     setBusy(cap.kind + cap.name)
     try {
+      // Connectors start a real process, so this waits for the outcome rather
+      // than flipping the switch and hoping.
       await api.toggleCapability(cap.kind, cap.name, !cap.enabled, scope)
       await load()
     } finally {
@@ -94,10 +102,10 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
 
   const counts = useMemo(() => ({
     skills: caps.skills.filter((s) => s.enabled).length,
-    connectors: caps.connectors.filter((c) => c.enabled).length,
+    connectors: caps.connectors.filter((c) => c.live?.connected).length,
   }), [caps])
 
-  const scopeLabel = scope ? 'this conversation' : 'default for new chats'
+  const scopeLabel = scope ? 'this conversation' : 'new conversations'
 
   if (panel === 'skills' || panel === 'connectors') {
     const items = panel === 'skills' ? caps.skills : caps.connectors
@@ -114,19 +122,35 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
             <div className="plus-empty">
               {panel === 'skills'
                 ? 'No skills installed. Drop a SKILL.md into ~/.psok/skills/<name>/.'
-                : 'No connectors configured yet.'}
+                : 'No connectors configured. Add one from the Connectors view.'}
             </div>
           )}
-          {items.map((cap, i) => (
-            <Row
-              key={cap.name}
-              index={i}
-              label={cap.title || cap.name}
-              hint={cap.description?.slice(0, 60)}
-              tail={busy === cap.kind + cap.name ? '…' : <Toggle on={cap.enabled} />}
-              onClick={() => toggleCap(cap)}
-            />
-          ))}
+          {items.map((cap, i) => {
+            const working = busy === cap.kind + cap.name
+            const state = panel === 'connectors' ? connectorState(cap, working) : null
+            return (
+              <Row
+                key={cap.name}
+                index={i}
+                label={cap.title || cap.name}
+                hint={
+                  state
+                    ? state.detail
+                      ? `${state.detail.slice(0, 64)} — switch on to retry`
+                      : state.label
+                    : cap.description?.slice(0, 58)
+                }
+                tail={
+                  <>
+                    {state && <span className={`led led--${state.dot}${working ? ' led--pulse' : ''}`} />}
+                    {working ? <span className="plus-count">…</span> : <Toggle on={cap.enabled} />}
+                  </>
+                }
+                onClick={() => toggleCap(cap)}
+                disabled={working}
+              />
+            )
+          })}
         </div>
         {panel === 'connectors' && (
           <>
@@ -152,19 +176,17 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
           </button>
           workspace root
         </div>
-        <div style={{ padding: '4px 11px 12px', display: 'grid', gap: 9 }}>
+        <div style={{ padding: '4px 10px 11px', display: 'grid', gap: 9 }}>
           <div className="field">
             <input
               autoFocus
               value={draftWorkspace}
               placeholder="~/notes"
               onChange={(e) => setDraftWorkspace(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') { onWorkspace(draftWorkspace.trim()); onClose() }
-              }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { onWorkspace(draftWorkspace.trim()); onClose() } }}
             />
             <span className="hint">
-              File and shell tools are scoped here. Empty means the directory the API was started in.
+              File and shell tools are confined here. Empty means the directory the API started in.
             </span>
           </div>
           <button
@@ -179,20 +201,33 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
     )
   }
 
+  const failed = caps.connectors.filter((c) => c.enabled && c.live?.error).length
+
   return (
     <div className="plus-menu" ref={ref}>
       <Row
         index={0}
         icon="book"
         label="Skills"
-        tail={<><span className="plus-count">{counts.skills}/{caps.skills.length}</span><Icon name="chevron" size={13} /></>}
+        hint={`${counts.skills} of ${caps.skills.length} available`}
+        tail={<Icon name="chevron" size={13} />}
         onClick={() => setPanel('skills')}
       />
       <Row
         index={1}
         icon="plug"
         label="Connectors"
-        tail={<><span className="plus-count">{counts.connectors}/{caps.connectors.length}</span><Icon name="chevron" size={13} /></>}
+        hint={
+          failed
+            ? `${counts.connectors} running · ${failed} failed to start`
+            : `${counts.connectors} running of ${caps.connectors.length}`
+        }
+        tail={
+          <>
+            {failed > 0 && <span className="led led--bad" />}
+            <Icon name="chevron" size={13} />
+          </>
+        }
         onClick={() => setPanel('connectors')}
       />
       <Row
@@ -202,7 +237,7 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
         hint={memory ? `${memory.facts.length} fact${memory.facts.length === 1 ? '' : 's'} recalled each turn` : null}
         tail={busy === 'memory' ? '…' : <Toggle on={Boolean(memory?.enabled)} />}
         onClick={toggleMemory}
-        disabled={!memory}
+        disabled={!memory || busy === 'memory'}
       />
       <div className="plus-sep" />
       <Row
@@ -221,8 +256,8 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
         onClick={() => { onNavigate('logs'); onClose() }}
       />
       <div className="plus-sep" />
-      <div className="plus-empty" style={{ paddingTop: 2, paddingBottom: 8 }}>
-        Changes apply to {scopeLabel}. Type <span className="mono" style={{ color: 'var(--clay)' }}>/name</span> to
+      <div className="plus-empty" style={{ paddingTop: 0, paddingBottom: 7 }}>
+        Applies to {scopeLabel}. Type <span className="mono" style={{ color: 'var(--text-dim)' }}>/name</span> to
         engage a skill directly.
       </div>
     </div>

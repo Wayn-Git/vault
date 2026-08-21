@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api, fmtTime, prettyJSON } from '../api.js'
 
 export default function Logs() {
@@ -106,10 +106,7 @@ export default function Logs() {
                 {filtered.map((l) => (
                   <tr key={l.id}>
                     <td style={{ whiteSpace: 'nowrap', color: 'var(--text-faint)' }}>{fmtTime(l.created_at)}</td>
-                    <td>
-                      <span style={{ color: 'var(--clay)' }}>{l.tool_name}</span>
-                      {l.tool_source === 'mcp' && <span className="badge" style={{ marginLeft: 6 }}>mcp</span>}
-                    </td>
+                    <td className="log-tool" title={l.tool_name}>{l.tool_name}</td>
                     <td style={{ color: 'var(--text-faint)' }}>{l.tool_source}</td>
                     <td>
                       <span className={`badge badge--${l.risk_level === 'high' ? 'bad' : l.risk_level === 'medium' ? 'amber' : 'info'}`}>

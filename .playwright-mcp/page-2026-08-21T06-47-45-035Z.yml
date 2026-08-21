@@ -1,0 +1,78 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [active] [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: 72 tools
+  - main [ref=e147]:
+    - generic [ref=e149]:
+      - generic [ref=e150]:
+        - generic [ref=e151]:
+          - generic [ref=e152]: status
+          - heading "Everything, on one machine" [level=1] [ref=e154]
+          - generic [ref=e155]: One agent over your files, shell, tasks, calendar and connected services. Your data stays in a SQLite file here; your secrets stay in the keychain.
+        - button "Refresh" [ref=e157] [cursor=pointer]
+      - generic [ref=e161]:
+        - generic [ref=e163]:
+          - generic [ref=e164]:
+            - text: system
+            - generic [ref=e166]: live
+          - generic [ref=e167]:
+            - generic [ref=e168]: boot PSOK v0.1.0 — personal operating system
+            - generic [ref=e169]: "ok kernel: sqlite3 + FTS5 · keychain secrets"
+            - generic [ref=e170]: "ok providers: nvidia, ollama"
+            - generic [ref=e171]: ok 72 tools registered · 1 skills · 0 skill errors
+            - generic [ref=e172]: agent loop online · guards armed (12 iterations, 40 tool calls)
+            - generic [ref=e173]: mcp 54 connector tools live · switch servers on in MCP
+            - generic [ref=e174]: mem memory on · 0 facts held
+            - generic [ref=e175]: "ok status: nominal"
+        - generic [ref=e176]:
+          - generic [ref=e177]:
+            - generic [ref=e178]: "2"
+            - generic [ref=e179]: providers
+            - generic [ref=e180]: configured in providers.yaml
+          - generic [ref=e181]:
+            - generic [ref=e182]: "72"
+            - generic [ref=e183]: tools
+            - generic [ref=e184]: 54 from connectors
+          - generic [ref=e185]:
+            - generic [ref=e186]: "1"
+            - generic [ref=e187]: skills
+            - generic [ref=e188]: markdown, discovered
+          - generic [ref=e189]:
+            - generic [ref=e190]: "0"
+            - generic [ref=e191]: memories
+            - generic [ref=e192]: recalled every turn
+      - generic [ref=e194]:
+        - button "Agent chat Streaming turns, tool calls, permission prompts reason → act → observe" [ref=e195] [cursor=pointer]:
+          - generic [ref=e199]:
+            - generic [ref=e200]: Agent chat
+            - generic [ref=e201]: Streaming turns, tool calls, permission prompts
+          - generic [ref=e202]: reason → act → observe
+        - button "MCP servers Catalogue, custom servers, OAuth logins flat tool namespace" [ref=e203] [cursor=pointer]:
+          - generic [ref=e207]:
+            - generic [ref=e208]: MCP servers
+            - generic [ref=e209]: Catalogue, custom servers, OAuth logins
+          - generic [ref=e210]: flat tool namespace
+        - button "Skills Markdown skill discovery progressive disclosure" [ref=e211] [cursor=pointer]:
+          - generic [ref=e216]:
+            - generic [ref=e217]: Skills
+            - generic [ref=e218]: Markdown skill discovery
+          - generic [ref=e219]: progressive disclosure
+        - button "Memory Standing facts recalled across conversations extracted after a turn" [ref=e220] [cursor=pointer]:
+          - generic [ref=e224]:
+            - generic [ref=e225]: Memory
+            - generic [ref=e226]: Standing facts recalled across conversations
+          - generic [ref=e227]: extracted after a turn
+        - button "Audit log Every tool call, with the decision that allowed it redacted, immutable trail" [ref=e228] [cursor=pointer]:
+          - generic [ref=e235]:
+            - generic [ref=e236]: Audit log
+            - generic [ref=e237]: Every tool call, with the decision that allowed it
+          - generic [ref=e238]: redacted, immutable trail

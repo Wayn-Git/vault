@@ -1,27 +1,10 @@
 import { useState } from 'react'
-import gsap from 'gsap'
-import { useGSAP } from '@gsap/react'
 import Icon from './Icon.jsx'
 import { api, prettyJSON } from '../api.js'
 
 export default function ConfirmModal({ pending, onDecide }) {
   const [remember, setRemember] = useState(false)
   const [busy, setBusy] = useState(null)
-
-  useGSAP(
-    () => {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-      const modal = document.querySelector('.confirm-modal')
-      const overlay = document.querySelector('.confirm-overlay')
-      if (modal) {
-        gsap.fromTo(modal, { autoAlpha: 0, y: 14, scale: 0.98 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.28, ease: 'power2.out' })
-      }
-      if (overlay) {
-        gsap.fromTo(overlay, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.18 })
-      }
-    },
-    { dependencies: [pending.length] },
-  )
 
   if (!pending.length) return null
 

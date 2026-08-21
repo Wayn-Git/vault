@@ -1,0 +1,94 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK personal os" [ref=e5] [cursor=pointer]:
+      - generic [ref=e11]: PSOK
+      - generic [ref=e12]: personal os
+    - navigation [ref=e13]:
+      - button "Chat" [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [active] [ref=e19] [cursor=pointer]
+    - generic [ref=e20]: 72 tools
+  - main [ref=e147]:
+    - generic [ref=e149]:
+      - generic [ref=e150]:
+        - generic [ref=e151]:
+          - generic [ref=e152]: status
+          - heading "Everything, on one machine" [level=1] [ref=e154]
+          - generic [ref=e155]: One agent over your files, shell, tasks, calendar and connected services. Your data stays in a SQLite file here; your secrets stay in the keychain.
+        - button "Refresh" [ref=e157] [cursor=pointer]
+      - generic [ref=e161]:
+        - generic [ref=e163]:
+          - generic [ref=e164]:
+            - text: system
+            - generic [ref=e166]: live
+          - generic [ref=e167]:
+            - generic [ref=e168]:
+              - generic [ref=e169]: "[00:00.000]"
+              - text: boot PSOK v0.1.0 — personal operating system
+            - generic [ref=e170]:
+              - generic [ref=e171]: "[01:00.000]"
+              - text: "ok kernel: sqlite3 + FTS5 · keychain secrets"
+            - generic [ref=e172]:
+              - generic [ref=e173]: "[02:00.000]"
+              - text: "ok providers: nvidia, ollama"
+            - generic [ref=e174]:
+              - generic [ref=e175]: "[03:00.000]"
+              - text: ok 72 tools registered · 1 skills · 0 skill errors
+            - generic [ref=e176]:
+              - generic [ref=e177]: "[04:00.000]"
+              - text: agent loop online · guards armed (12 iterations, 40 tool calls)
+            - generic [ref=e178]:
+              - generic [ref=e179]: "[05:00.000]"
+              - text: mcp 54 connector tools live · switch servers on in MCP
+            - generic [ref=e180]:
+              - generic [ref=e181]: "[06:00.000]"
+              - text: mem memory on · 0 facts held
+            - generic [ref=e182]:
+              - generic [ref=e183]: "[07:00.000]"
+              - text: "ok status: nominal"
+        - generic [ref=e185]:
+          - generic [ref=e186]:
+            - generic [ref=e187]: "2"
+            - generic [ref=e188]: providers
+            - generic [ref=e189]: configured in providers.yaml
+          - generic [ref=e191]:
+            - generic [ref=e192]: "72"
+            - generic [ref=e193]: tools
+            - generic [ref=e194]: 54 from connectors
+          - generic [ref=e196]:
+            - generic [ref=e197]: "1"
+            - generic [ref=e198]: skills
+            - generic [ref=e199]: markdown, discovered
+          - generic [ref=e201]:
+            - generic [ref=e202]: "0"
+            - generic [ref=e203]: memories
+            - generic [ref=e204]: recalled every turn
+      - generic [ref=e206]:
+        - button "Agent chat Streaming turns, tool calls, permission prompts reason → act → observe" [ref=e207] [cursor=pointer]:
+          - generic [ref=e211]:
+            - generic [ref=e212]: Agent chat
+            - generic [ref=e213]: Streaming turns, tool calls, permission prompts
+          - generic [ref=e214]: reason → act → observe
+        - button "MCP servers Catalogue, custom servers, OAuth logins flat tool namespace" [ref=e215] [cursor=pointer]:
+          - generic [ref=e219]:
+            - generic [ref=e220]: MCP servers
+            - generic [ref=e221]: Catalogue, custom servers, OAuth logins
+          - generic [ref=e222]: flat tool namespace
+        - button "Skills Markdown skill discovery progressive disclosure" [ref=e223] [cursor=pointer]:
+          - generic [ref=e228]:
+            - generic [ref=e229]: Skills
+            - generic [ref=e230]: Markdown skill discovery
+          - generic [ref=e231]: progressive disclosure
+        - button "Memory Standing facts recalled across conversations extracted after a turn" [ref=e232] [cursor=pointer]:
+          - generic [ref=e236]:
+            - generic [ref=e237]: Memory
+            - generic [ref=e238]: Standing facts recalled across conversations
+          - generic [ref=e239]: extracted after a turn
+        - button "Audit log Every tool call, with the decision that allowed it redacted, immutable trail" [ref=e240] [cursor=pointer]:
+          - generic [ref=e247]:
+            - generic [ref=e248]: Audit log
+            - generic [ref=e249]: Every tool call, with the decision that allowed it
+          - generic [ref=e250]: redacted, immutable trail

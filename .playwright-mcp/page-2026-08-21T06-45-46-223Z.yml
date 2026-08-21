@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - button "PSOK" [ref=e1200] [cursor=pointer]
+    - navigation [ref=e13]:
+      - button "Chat" [active] [ref=e14] [cursor=pointer]
+      - button "Connectors" [ref=e15] [cursor=pointer]
+      - button "Skills" [ref=e16] [cursor=pointer]
+      - button "Memory" [ref=e17] [cursor=pointer]
+      - button "Activity" [ref=e18] [cursor=pointer]
+      - button "Status" [ref=e19] [cursor=pointer]
+  - main [ref=e1201]:
+    - generic [ref=e1205]:
+      - generic [ref=e1206]:
+        - heading "What needs doing?" [level=1] [ref=e1207]
+        - paragraph [ref=e1208]: Files, shell, tasks, calendar, your notes and whatever you have connected, reachable from one line. Anything that writes or runs asks you first.
+        - generic [ref=e1209]:
+          - button "What am I meant to be doing tomorrow?" [ref=e1210] [cursor=pointer]
+          - button "Find where I wrote about the deploy error" [ref=e1211] [cursor=pointer]
+          - button "Summarise what changed in this folder today" [ref=e1212] [cursor=pointer]
+      - generic [ref=e1213]:
+        - generic [ref=e1215]:
+          - textbox "Ask for anything on this machine" [ref=e1216]
+          - generic [ref=e1217]:
+            - button "Skills, connectors, memory, workspace" [ref=e1218] [cursor=pointer]
+            - button "nemotron-3-ultra-550b-a55b" [ref=e1221] [cursor=pointer]
+            - button "Send" [disabled] [ref=e1225]
+        - generic [ref=e1228]:
+          - generic [ref=e1229]: reach
+          - button "chrome-devtools 29" [ref=e1230] [cursor=pointer]:
+            - text: chrome-devtools
+            - generic [ref=e1232]: "29"
+          - button "fetch 1" [ref=e1233] [cursor=pointer]:
+            - text: fetch
+            - generic [ref=e1235]: "1"
+          - button "playwright 24" [ref=e1236] [cursor=pointer]:
+            - text: playwright
+            - generic [ref=e1238]: "24"
