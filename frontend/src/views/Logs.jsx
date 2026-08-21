@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api, fmtTime, prettyJSON } from '../api.js'
 
 export default function Logs() {
@@ -11,12 +11,18 @@ export default function Logs() {
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(100)
   const [busy, setBusy] = useState(false)
+  const [live, setLive] = useState(false)
+  // What no longer asks. A "don't ask again" the user cannot see is a grant
+  // they cannot take back.
+  const [standing, setStanding] = useState([])
   useViewEntrance(rootRef)
 
   const load = useCallback(async (n = limit) => {
     setBusy(true)
     try {
-      setLogs(await api.logs(n))
+      const [rows, approvals] = await Promise.all([api.logs(n), api.standingApprovals()])
+      setLogs(rows)
+      setStanding(approvals)
     } catch (err) {
       toast(err.message, 'bad')
     } finally {
@@ -25,6 +31,24 @@ export default function Logs() {
   }, [limit, toast])
 
   useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Watching a turn happen is the reason to have this view open at all, and a
+  // trail you have to keep reloading by hand is not a trail you watch.
+  useEffect(() => {
+    if (!live) return undefined
+    const tick = setInterval(() => load(), 4000)
+    return () => clearInterval(tick)
+  }, [live, load])
+
+  const revoke = useCallback(async (key) => {
+    try {
+      await api.revokeApproval(key)
+      toast(`${key} will ask again`, 'ok')
+      load()
+    } catch (err) {
+      toast(err.message, 'bad')
+    }
+  }, [load, toast])
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -50,11 +74,56 @@ export default function Logs() {
             </div>
           </div>
           <div className="vheader-actions">
+            <button
+              type="button"
+              className={`btn btn--small${live ? ' btn--primary' : ' btn--ghost'}`}
+              onClick={() => setLive((l) => !l)}
+              title="Reload every few seconds while a turn runs"
+            >
+              <span className={`led led--${live ? 'ok' : 'faint'}${live ? ' led--pulse' : ''}`} />
+              {live ? 'Following' : 'Follow'}
+            </button>
             <button type="button" className="btn btn--ghost" onClick={() => load()} disabled={busy}>
               <Icon name="refresh" size={15} /> {busy ? 'Loading…' : 'Reload'}
             </button>
           </div>
         </header>
+
+        <div className="card card-pad" style={{ marginBottom: 18 }} data-enter>
+          <div className="card-title">
+            <span className={`led led--${standing.length ? 'amber' : 'faint'}`} /> runs without asking · {standing.length}
+          </div>
+          {standing.length === 0 ? (
+            <p className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: 0 }}>
+              Nothing is approved in advance. Every gated call asks.
+            </p>
+          ) : (
+            <>
+              <p className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: '0 0 10px' }}>
+                Kept by operation key, not tool name — approving a read-only shell command
+                never approved a destructive one.
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {standing.map((s) => (
+                  <span key={s.operation_key} className="badge" style={{ gap: 7 }}>
+                    <span className={`led led--${s.decision === 'allow' ? 'ok' : 'bad'}`} />
+                    <span className="mono">{s.operation_key}</span>
+                    <span style={{ color: 'var(--text-faint)' }}>{s.risk_level}</span>
+                    <button
+                      type="button"
+                      onClick={() => revoke(s.operation_key)}
+                      title={`Make ${s.operation_key} ask again`}
+                      aria-label={`Revoke ${s.operation_key}`}
+                      style={{ color: 'var(--text-faint)', lineHeight: 0 }}
+                    >
+                      <Icon name="x" size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
         <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }} data-enter>
           <input
@@ -106,10 +175,7 @@ export default function Logs() {
                 {filtered.map((l) => (
                   <tr key={l.id}>
                     <td style={{ whiteSpace: 'nowrap', color: 'var(--text-faint)' }}>{fmtTime(l.created_at)}</td>
-                    <td>
-                      <span style={{ color: 'var(--clay)' }}>{l.tool_name}</span>
-                      {l.tool_source === 'mcp' && <span className="badge" style={{ marginLeft: 6 }}>mcp</span>}
-                    </td>
+                    <td className="log-tool" title={l.tool_name}>{l.tool_name}</td>
                     <td style={{ color: 'var(--text-faint)' }}>{l.tool_source}</td>
                     <td>
                       <span className={`badge badge--${l.risk_level === 'high' ? 'bad' : l.risk_level === 'medium' ? 'amber' : 'info'}`}>

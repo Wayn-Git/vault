@@ -176,6 +176,24 @@ class MCPManager:
                 results[name] = str(exc)
         return results
 
+    def state(self) -> dict[str, dict[str, Any]]:
+        """What is actually running, per server.
+
+        An interface that reports the capability row alone is reporting an
+        intention: the row says "on" whether the process started, died, or was
+        never asked to start. This is the fact to render instead.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for name in set(load_servers()) | set(self.connections) | set(self.errors):
+            connection = self.connections.get(name)
+            connected = bool(connection and connection.connected)
+            out[name] = {
+                "connected": connected,
+                "tools": len(connection.tools) if connected and connection else 0,
+                "error": self.errors.get(name),
+            }
+        return out
+
     async def reconcile(self) -> dict[str, int | str]:
         """Bring live connections in line with what is currently switched on.
 
@@ -193,8 +211,12 @@ class MCPManager:
         configured = load_servers()
         results: dict[str, int | str] = {}
 
-        for name in [n for n in list(self.connections) if n not in configured]:
-            await self.disconnect_server(name)  # removed from mcp.yaml
+        for name in [n for n in set(self.connections) | set(self.errors) if n not in configured]:
+            # Removed from mcp.yaml. Its failure has to go with it, or health
+            # stays degraded forever over a connector that no longer exists.
+            await self.disconnect_server(name)
+            self.errors.pop(name, None)
+            results[name] = 0
 
         for name, config in configured.items():
             connection = self.connections.get(name)

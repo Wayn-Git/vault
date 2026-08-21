@@ -1,8 +1,26 @@
 # PSOK
 
-A personal operating system: one AI interface to your files, shell, tasks, calendar, and
-connected services. Single-user, local-first — your data stays in a SQLite file on your
-machine and your secrets stay in the OS keychain.
+**A personal operating system: one AI agent over your files, shell, tasks, calendar, notes and connected services.** Single-user and local-first — your data stays in a SQLite file on your machine, your secrets stay in the OS keychain, and nothing is sent anywhere except to the model provider you choose.
+
+> **Archived.** This repository is no longer maintained. It is left public as a finished, working snapshot: everything described below ran on real hardware against a real model, and the verification commands at the bottom reproduce it. Nothing here is aspirational.
+
+![The PSOK interface](docs/images/interface.png)
+
+---
+
+## What it does
+
+Ask for something in one line. PSOK decides which of its tools to use, asks permission before anything that writes or runs, and shows you exactly what it did.
+
+![A multi-step turn](docs/images/turn.png)
+
+That turn is three tool calls — a web search, then two fetches — resolved without being nudged. The agent loop treats an empty or truncated reply as unfinished work and continues rather than ending the turn on a blank bubble.
+
+**Everything that writes or runs asks first**, and the prompt names the *operation*, not just the tool, so approving a read-only shell command never approves a destructive one.
+
+![The permission gate](docs/images/permission.png)
+
+---
 
 ## Quick start
 
@@ -10,17 +28,16 @@ machine and your secrets stay in the OS keychain.
 uv venv
 uv pip install -e '.[dev]'
 
-psok init      # create ~/.psok, the database, and default config
-psok doctor    # report component health
+psok init                              # ~/.psok, the database, default config
+psok doctor                            # what is configured and what is missing
+
+cd frontend && npm install && npm run build
+psok serve --open                      # http://127.0.0.1:8000
 ```
 
-Configure a model provider in `~/.psok/config/providers.yaml`. Ollama is preconfigured;
-for a cloud provider, store the key in the keychain rather than the file:
+`psok serve` is the whole product in one process: the API under `/api`, the built interface everywhere else. There is no second port and no cross-origin request to configure.
 
-```python
-from psok.secrets import set_secret
-set_secret("psok/anthropic", "sk-ant-...")
-```
+Point it at a model in `~/.psok/config/providers.yaml`. Ollama is preconfigured; a cloud provider keeps its key in the keychain, never in the file:
 
 ```yaml
 providers:
@@ -29,149 +46,115 @@ providers:
     default_model: claude-sonnet-4-20250514
 ```
 
-Then:
+```python
+from psok.secrets import set_secret
+set_secret("psok/anthropic", "sk-ant-...")
+```
+
+Any OpenAI-compatible endpoint — vLLM, LM Studio, NVIDIA NIM, Groq, OpenRouter — works with a `base_url` entry and no code change.
+
+Prefer the terminal:
 
 ```bash
 psok chat --provider anthropic --workspace ~/notes
 psok logs                              # every tool call, with the decision that allowed it
-uvicorn psok.api.main:app --reload     # HTTP + SSE API for the frontend
 ```
 
-The API accepts browser requests from Vite's dev origin (`http://localhost:5173`)
-out of the box. Serving the frontend from anywhere else means setting
-`PSOK_CORS_ORIGINS` to a comma-separated list of origins — deliberately not a
-wildcard, since this API can run shell commands on the machine.
+---
 
-Any OpenAI-compatible endpoint — vLLM, LM Studio, NVIDIA NIM, Groq, OpenRouter — works
-with a `base_url` entry and no code change.
+## What works
 
-## Searching your notes
+Each of these was exercised end to end, not just wired up.
 
-```bash
-psok index ~/notes          # chunk, embed and index a folder
-psok index --status
-psok search "that error code"
-```
+**The agent loop.** Reason → act → observe, with guards on iterations, wall-clock time, repeated calls and continuations. Streaming, retry on transient provider failures, and a stop that interrupts the loop on the server rather than just closing the browser's read.
 
-Indexing is incremental: re-running it on an unchanged vault does no embedding
-work, and editing one file re-embeds only the chunks that changed. Search fuses
-semantic similarity with a real BM25 keyword index, so both paraphrases and exact
-terms like error codes work. Embeddings run locally through Ollama by default.
+**Multi-provider runtime.** One initialize-function contract per provider, a registry, and a fallback where any unrecognised provider name resolves to a generic OpenAI-compatible adapter driven by config. Provider quirks stay inside their adapter.
 
-## What PSOK remembers
+**20 builtin tools** across filesystem, shell, desktop, tasks, calendar, document search and the open web — plus every tool any connected MCP server exposes, in the same flat namespace. The model cannot tell them apart; you can.
 
-```bash
-psok memory                 # the standing facts, with the ids to forget them by
-psok memory --forget 3      # retire one; the row survives, recall stops
-psok memory --off           # globally, or --off --conversation <id> for one
-```
+**A permission gate with real sandboxing.** Every tool declares a static risk floor the model can raise but never lower. Shell commands run under Bubblewrap on Linux and Seatbelt on macOS. Paths under `~/.ssh`, `~/.aws` and similar always confirm, and no stored preference can silence them.
 
-Facts are extracted after a turn by a small model and recalled in later conversations.
-Name a cheap local model for the job in `providers.yaml`, or let it use the
-conversation's own:
+**MCP connectivity** with OAuth 2.1 + PKCE, a curated catalogue, SSRF protection on URL transports, per-server circuit breaking and a one-time trust confirmation per server.
 
-```yaml
-memory:
-  provider: ollama
-  model: qwen2.5:3b
-```
+![Connectors](docs/images/connectors.png)
 
-## Connecting apps over MCP
+**Hybrid retrieval** over a notes vault: semantic search fused with a real BM25 index (SQLite FTS5 + sqlite-vec), content-hash incremental indexing, so re-syncing an unchanged folder costs nothing.
 
-```bash
-psok mcp catalogue          # browse what you can connect
-psok mcp add playwright     # browser control, works immediately
-psok mcp add github         # prints the one-time OAuth setup steps
-psok mcp login github       # opens GitHub's real login page in your browser
-psok mcp status
-```
+**Long-term memory.** Standing facts extracted by a second model call after a turn and recalled in later conversations, updated by a create/supersede diff rather than an ever-growing transcript. Switchable off, globally or per conversation.
 
-A server that takes its credentials through the environment keeps them in the
-keychain too — `mcp.yaml` stores only the reference:
+**Markdown skills**, installable from any URL and browsable in a directory that reads its sources live.
 
-```bash
-psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_ID=1234.apps.googleusercontent.com
-psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_SECRET=... --secret
-```
+![The directory](docs/images/directory.png)
 
-Custom servers work the same way:
+**A web interface** over the same API: streamed answers rendered as markdown, inline permission prompts, a command palette, file attachments, connector setup — catalogue, OAuth, credentials — and a keyboard layer where `?` lists every binding.
 
-```bash
-psok mcp add my-server --url https://mcp.example.com/mcp --oauth
-psok mcp add local-tool --command npx --args -y some-mcp-server
-```
+**A CLI** that does all of it: `chat`, `serve`, `skills`, `mcp`, `memory`, `permissions`, `index`, `search`, `logs`, `capabilities`, `doctor`.
 
-Connected tools join the same flat namespace as builtins, so the model uses them
-without knowing they are remote. Tokens go to the OS keychain; `mcp.yaml` holds only
-references. See [docs/architecture/mcp-oauth.md](docs/architecture/mcp-oauth.md).
+---
 
-## What works today
+## Three ideas carry the design
 
-Multi-provider AI runtime (OpenAI-compatible, Anthropic, Google, Ollama, and any
-OpenAI-compatible endpoint) with runtime model switching and retry on transient
-provider failures · the agent loop with iteration, time, and repetition guards ·
-streaming responses · 18 builtin tools across filesystem, shell, desktop, tasks,
-calendar and document search · hybrid retrieval over your notes (semantic + BM25,
-incremental indexing) · MCP connectivity with OAuth 2.1, PKCE, and a curated server
-catalogue · a permission gate with OS-level sandboxing on macOS and Linux ·
-deterministic natural-language scheduling · markdown skills · a CLI and an HTTP API.
+**Above the dispatcher, everything is a tool.** A builtin function and a JSON-RPC call to an external MCP process are indistinguishable to the model. New capability does not touch the core.
 
-Long-term memory across conversations: PSOK extracts standing facts after a turn and
-recalls them in later ones, with a create/supersede diff rather than an ever-growing
-transcript.
+**Permission is a floor the model can raise but never lower.** A model's self-assessment of an opaque operation can only escalate its risk, never reduce it — which is the failure mode of trusting self-reported risk alone.
 
-Skills, connectors and memory can each be switched on or off, globally or per
-conversation, and `/skill-name` engages a skill directly.
+**Interpretation is the model's job; computation is not.** The model extracts *"tomorrow"*; a deterministic engine resolves it against the clock, checks the calendar, and reports conflicts back rather than guessing.
 
-Not built: first-party service integrations.
-Those are described in the [roadmap](docs/roadmap/implementation-plan.md) as future work,
-not in the architecture docs as if they exist.
+---
 
 ## How it is put together
 
 ```
-Interface (CLI · HTTP/SSE API · React later)
+Interface (CLI · HTTP/SSE API · React app served by the same process)
         │
    Agent Loop ── the single owner of reason → act → observe
         ├── AI Runtime ......... provider adapters behind one contract
         ├── Tool Registry ...... one flat namespace; permission gate on every dispatch
-        │     ├── builtin ...... filesystem, shell, desktop, tasks, calendar
+        │     ├── builtin ...... filesystem, shell, desktop, tasks, calendar, web
         │     └── MCP .......... browser, GitHub, Google, or any server you add
         └── Retrieval .......... hybrid search over your notes
                 │
         SQLite (+vec, +FTS5) · filesystem for documents · OS keychain for secrets
 ```
 
-Three ideas carry most of the design:
-
-**Above the dispatcher, everything is a tool.** A builtin function and a JSON-RPC call to
-an external MCP process are indistinguishable to the model. New capability does not touch
-the core.
-
-**Permission is a floor the model can raise but never lower.** Every tool declares a static
-risk level. A model's self-assessment of an opaque operation can only escalate it. Paths
-under `~/.ssh`, `~/.aws`, and similar always confirm, and no stored preference can silence
-that.
-
-**Interpretation is the model's job; computation is not.** The model extracts *"tomorrow"*;
-a deterministic engine resolves it against the clock, checks the calendar, and reports
-conflicts back rather than guessing.
-
-## Documentation
-
 - [Architecture overview](docs/architecture/overview.md) — the layer model and a worked request
-- [Components](docs/architecture/components.md) — Tool vs Skill vs MCP Tool vs Agent
-- [Data model](docs/architecture/data-model.md) · [AI runtime](docs/architecture/ai-runtime.md) · [Security](docs/architecture/security.md)
-- [Decision records](docs/architecture/decisions/) — ADRs with alternatives and trade-offs
+- [The web interface](docs/interface.md) — how the React app is built, and every keyboard binding
+- [AI runtime](docs/architecture/ai-runtime.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
+- [Decision records](docs/architecture/decisions/) — ADRs with the alternatives and what they cost
+- [API contract](docs/NEXT-SESSION.md) — the 36 endpoints the interface is built against
 
-## Development
+---
+
+## What was never built
+
+Stated plainly, because half-built features are worse than absent ones and this repository deliberately contains none:
+
+- **First-party service integrations.** Gmail, Calendar and GitHub are reachable as MCP connectors instead.
+- **Recurring tasks and background jobs.** Scheduling resolves and stores; nothing wakes up on its own.
+- **Deleting a conversation.** No endpoint — nothing in the architecture called for one.
+- **Projects, artifacts, plugins, voice input.** No backing anywhere in the system.
+- **Anything multi-user.** Out of scope by design ([ADR-0001](docs/architecture/decisions/)).
+
+Provider adapters for Anthropic and OpenAI were only ever run against mocks — no key was available on the development machine — so their wire-format translation is unverified against the real APIs. NVIDIA NIM and the OpenAI-compatible path were exercised for real.
+
+---
+
+## Verifying it yourself
 
 ```bash
-pytest              # 216 unit tests
-pytest -m live      # 5 more against real MCP servers (spawns processes, uses network)
+pytest                    # 259 unit tests
+pytest -m live            # 5 more against real MCP servers (spawns processes, uses network)
 ruff check psok tests
+
+cd frontend
+npm run lint && npm run build
+npm run smoke             # 34 checks in a real browser against a running `psok serve`
 ```
 
-Sandbox containment is tested against the real OS and skips where unavailable
-(Windows, or Linux without `bubblewrap`). The live suite exists because a transport
-that only works against a mock is not evidence that MCP works.
+The smoke suite is the one that matters: it drives Chromium against a live model and asserts what a person would see — a turn streaming, markdown rendering once and not twice, a shell call suspending the turn and the prompt answering to the keyboard, a skill installing from the directory and uninstalling again, the audit trail carrying the call.
+
+Sandbox containment is tested against the real OS and skips where unavailable (Windows, or Linux without `bubblewrap`). The live MCP suite exists because a transport that only works against a mock is not evidence that MCP works.
+
+---
+
+Built with Python 3.11+, FastAPI, SQLite, React and Vite. No licence file was ever added, so all rights are reserved by default; treat it as reference material rather than something to redistribute.

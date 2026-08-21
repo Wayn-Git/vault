@@ -185,3 +185,8 @@ psd
 thumb
 sketch
 
+
+# Agent tooling scratch, not part of the project
+.claude/
+.skills/
+.playwright-mcp/

@@ -12,6 +12,7 @@ dependencies = [
     "keyring>=25.0",
     "httpx>=0.27",
     "python-dateutil>=2.9",
+    "python-multipart>=0.0.9",   # file uploads from the browser composer
 ]
 
 [project.optional-dependencies]

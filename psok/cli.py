@@ -397,6 +397,22 @@ def cmd_mcp_auth(args: argparse.Namespace) -> int:
 def cmd_mcp_env(args: argparse.Namespace) -> int:
     from psok.mcp import commands as mcp
 
+    if args.unset:
+        try:
+            removed = mcp.unset_env(args.name, args.unset)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        if not removed:
+            print(f"'{args.name}' has no {args.unset}", file=sys.stderr)
+            return 1
+        print(f"unset {args.unset} for '{args.name}'")
+        return 0
+
+    if not args.assignment:
+        print("expected KEY=VALUE, or --unset KEY", file=sys.stderr)
+        return 1
+
     key, _, value = args.assignment.partition("=")
     if not key or not value:
         print("expected KEY=VALUE", file=sys.stderr)
@@ -486,7 +502,8 @@ def _add_mcp_commands(sub) -> None:
 
     env = mcp_sub.add_parser("env", help="set an environment variable for a stdio server")
     env.add_argument("name")
-    env.add_argument("assignment", metavar="KEY=VALUE")
+    env.add_argument("assignment", metavar="KEY=VALUE", nargs="?")
+    env.add_argument("--unset", metavar="KEY", help="forget a variable, and its keychain entry")
     env.add_argument(
         "--secret",
         action="store_true",
@@ -501,6 +518,114 @@ def _add_mcp_commands(sub) -> None:
     connect = mcp_sub.add_parser("connect", help="connect servers and list their tools")
     connect.add_argument("name", nargs="?", help="omit to connect every enabled server")
     connect.set_defaults(func=cmd_mcp_connect)
+
+
+# -------------------------------------------------------------------- skills
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """List installed skills, or install one from a URL."""
+    import asyncio
+
+    from psok.skills.install import SkillInstallError, install_from_url, remove
+    from psok.skills.loader import scan
+
+    if args.install:
+        try:
+            skill = asyncio.run(install_from_url(args.install, overwrite=args.force))
+        except SkillInstallError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"could not install: {exc}", file=sys.stderr)
+            return 1
+        print(f"installed /{skill.name} -> {skill.path}")
+        print(f"  {skill.description}")
+        return 0
+
+    if args.remove:
+        try:
+            removed = remove(args.remove)
+        except SkillInstallError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        if not removed:
+            print(f"no skill named '{args.remove}'", file=sys.stderr)
+            return 1
+        print(f"removed /{args.remove}")
+        return 0
+
+    skills, errors = scan()
+    if not skills and not errors:
+        print("no skills installed; add one with  psok skills --install <url>")
+        return 0
+    for skill in skills:
+        version = f" v{skill.version}" if skill.version else ""
+        print(f"  /{skill.name}{version}")
+        print(f"      {skill.description}")
+    for error in errors:
+        print(f"  ! {error.path}: {error.error}", file=sys.stderr)
+    return 0
+
+
+# -------------------------------------------------------------- permissions
+
+
+def cmd_permissions(args: argparse.Namespace) -> int:
+    """Show, or take back, the standing 'don't ask again' decisions."""
+    from psok.db.repositories import ConfirmationPreferenceRepository
+
+    repo = ConfirmationPreferenceRepository()
+
+    if args.revoke:
+        if repo.get(args.revoke) is None:
+            print(f"no standing decision for '{args.revoke}'", file=sys.stderr)
+            return 1
+        repo.clear(args.revoke)
+        print(f"revoked {args.revoke} -- it will ask again")
+        return 0
+
+    rows = repo.list()
+    if not rows:
+        print("nothing is approved in advance; every gated call asks")
+        return 0
+    for row in rows:
+        print(
+            f"  {row['decision']:<6} {row['operation_key']:<40}"
+            f" {row['risk_level']:<7} since {row['created_at']}"
+        )
+    print("\ntake one back with:  psok permissions --revoke <operation-key>")
+    return 0
+
+
+# -------------------------------------------------------------------- serve
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the HTTP API, and the built interface with it if one exists."""
+    import uvicorn
+
+    from psok.api.main import _DIST
+
+    url = f"http://{args.host}:{args.port}"
+    if (_DIST / "index.html").is_file():
+        print(f"PSOK is at {url}")
+    else:
+        print(f"API at {url}/api — no built interface found at {_DIST}")
+        print("build it with:  cd frontend && npm install && npm run build")
+        print(f"or run the dev server:  npm run dev  (it proxies /api to {url})")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(url)
+    uvicorn.run(
+        "psok.api.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        log_level=args.log_level,
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -555,6 +680,26 @@ def main(argv: list[str] | None = None) -> int:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=6)
     search.set_defaults(func=cmd_search)
+
+    skills = sub.add_parser("skills", help="list, install or remove markdown skills")
+    skills.add_argument("--install", metavar="URL", help="install from a URL (GitHub links work)")
+    skills.add_argument("--force", action="store_true", help="overwrite one already installed")
+    skills.add_argument("--remove", metavar="NAME", help="delete an installed skill")
+    skills.set_defaults(func=cmd_skills)
+
+    permissions = sub.add_parser(
+        "permissions", help="show or revoke standing 'don't ask again' decisions"
+    )
+    permissions.add_argument("--revoke", metavar="OPERATION_KEY", help="make it ask again")
+    permissions.set_defaults(func=cmd_permissions)
+
+    serve = sub.add_parser("serve", help="run the web interface and API")
+    serve.add_argument("--host", default="127.0.0.1", help="bind address (default: loopback only)")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--reload", action="store_true", help="restart on source changes")
+    serve.add_argument("--open", action="store_true", help="open a browser once it is up")
+    serve.add_argument("--log-level", default="info")
+    serve.set_defaults(func=cmd_serve)
 
     _add_mcp_commands(sub)
 

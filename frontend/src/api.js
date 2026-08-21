@@ -68,6 +68,10 @@ export const api = {
   decideConfirmation: (id, { allow, remember }) =>
     j(`/confirmations/${id}`, json('POST', { allow, remember })),
 
+  standingApprovals: () => j('/confirmations/preferences'),
+  revokeApproval: (operationKey) =>
+    j(`/confirmations/preferences/${encodeURIComponent(operationKey)}`, json('DELETE')),
+
   logs: (limit = 100) => j(`/logs?limit=${limit}`),
 
   memory: (conversationId) =>
@@ -77,6 +81,27 @@ export const api = {
   forgetMemory: (id) => j(`/memory/${id}`, json('DELETE')),
 
   skills: () => j('/skills'),
+  skillCatalogue: (refresh = false) => j(`/skills/catalogue${refresh ? '?refresh=true' : ''}`),
+  installSkill: (url, overwrite = false) => j('/skills/install', json('POST', { url, overwrite })),
+  removeSkill: (name) => j(`/skills/${encodeURIComponent(name)}`, json('DELETE')),
+
+  tools: () => j('/tools'),
+  tasks: (includeDone = false) => j(`/tasks?include_done=${includeDone ? 'true' : 'false'}`),
+  calendar: (days = 14) => j(`/calendar?days=${days}`),
+
+  // A browser cannot hand the agent a path, so the file is uploaded first and
+  // the message carries where it landed.
+  upload: async (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`${BASE}/attachments`, { method: 'POST', body: form })
+    if (!res.ok) {
+      let detail = res.statusText
+      try { detail = (await res.json()).detail || detail } catch { /* keep statusText */ }
+      throw new Error(`${res.status}: ${detail}`)
+    }
+    return res.json()
+  },
   skillSearch: (q, conversationId) =>
     j(`/skills/search?q=${encodeURIComponent(q)}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ''}`),
 
@@ -93,6 +118,9 @@ export const api = {
   mcpRemove: (name) => j(`/mcp/servers/${encodeURIComponent(name)}`, json('DELETE')),
   mcpOauthClient: (name, body) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/oauth-client`, json('POST', body)),
+  mcpSetEnv: (name, body) => j(`/mcp/servers/${encodeURIComponent(name)}/env`, json('POST', body)),
+  mcpUnsetEnv: (name, key) =>
+    j(`/mcp/servers/${encodeURIComponent(name)}/env/${encodeURIComponent(key)}`, json('DELETE')),
   mcpLogin: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/login`, json('POST', {})),
   mcpAuthorizations: () => j('/mcp/authorizations'),
   mcpConnect: (name) =>
@@ -116,5 +144,37 @@ export function prettyJSON(value) {
     return JSON.stringify(typeof value === 'string' ? JSON.parse(value) : value, null, 2)
   } catch {
     return typeof value === 'string' ? value : JSON.stringify(value)
+  }
+}
+
+/** Copy text, falling back when the Clipboard API is unavailable.
+ *
+ *  `navigator.clipboard` exists only in a secure context. Loopback counts, but
+ *  the moment someone serves this to another machine over plain http it is
+ *  gone -- and a copy button that silently does nothing is worse than one that
+ *  says it failed. Resolves to whether the text actually made it.
+ */
+export async function copyText(text) {
+  if (!text) return false
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    /* denied, or no permission: fall through to the old mechanism */
+  }
+  try {
+    const holder = document.createElement('textarea')
+    holder.value = text
+    holder.setAttribute('readonly', '')
+    holder.style.cssText = 'position:fixed;top:-1000px;opacity:0'
+    document.body.appendChild(holder)
+    holder.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(holder)
+    return ok
+  } catch {
+    return false
   }
 }

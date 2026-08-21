@@ -16,7 +16,7 @@ from psok.mcp.config import (
 )
 from psok.mcp.manager import MCPManager
 from psok.mcp.oauth import REDIRECT_URI, forget, has_tokens
-from psok.secrets import set_secret
+from psok.secrets import delete_secret, set_secret
 from psok.security.confirmation import ConfirmationService, auto_approve
 from psok.tools.registry import ToolRegistry
 
@@ -151,6 +151,26 @@ def set_env(name: str, key: str, value: str, *, secret: bool = False) -> ServerC
     return config
 
 
+def unset_env(name: str, key: str) -> bool:
+    """Forget one environment variable, and its keychain entry if it had one.
+
+    Setting a variable is not enough on its own: a value typed into the wrong
+    key leaves a stdio server being handed something it does not understand,
+    with no way back except editing mcp.yaml by hand.
+    """
+    servers = load_servers()
+    config = servers.get(name)
+    if config is None:
+        raise ValueError(f"no server named '{name}' in mcp.yaml")
+    value = config.env.pop(key, None)
+    if value is None:
+        return False
+    if isinstance(value, str) and value.startswith(KEYCHAIN_PREFIX):
+        delete_secret(value[len(KEYCHAIN_PREFIX):])
+    add_server(config)
+    return True
+
+
 async def connect_and_report(name: str | None = None, *, open_browser: bool = True) -> dict:
     """Connect one server or all of them, returning tool counts or error strings."""
     manager = _manager(open_browser)
@@ -205,6 +225,13 @@ def status() -> list[dict]:
                 "authorized": has_tokens(name) if config.oauth else None,
                 "source": str(config.source),
                 "target": config.url or f"{config.command} {' '.join(config.args)}".strip(),
+                # Key names and whether each is held in the keychain. Values
+                # never leave the machine's config -- a token pasted into the
+                # wrong field must not come back out over HTTP.
+                "env": {
+                    key: str(value).startswith(KEYCHAIN_PREFIX)
+                    for key, value in config.env.items()
+                },
             }
         )
     return out

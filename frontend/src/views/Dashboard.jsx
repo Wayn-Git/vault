@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useGSAP } from '@gsap/react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
-import { animateCounter, useViewEntrance } from '../gsapFx.js'
+import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
 
 const MODULES = [
@@ -13,11 +12,10 @@ const MODULES = [
   { id: 'logs', icon: 'logs', name: 'Audit log', desc: 'Every tool call, with the decision that allowed it', meta: 'redacted, immutable trail' },
 ]
 
-function BootLine({ time, tag, tagClass = 't-tag', text, typing = false }) {
+function Line({ tag, tagClass = 't-tag', text }) {
   return (
-    <div className="tele-line" data-enter>
-      <span className="t-time">[{time}]</span> <span className={tagClass}>{tag}</span> {text}
-      {typing && <span className="tele-cursor" />}
+    <div className="tele-line">
+      <span className={tagClass}>{tag.padEnd(5, '\u00a0')}</span> {text}
     </div>
   )
 }
@@ -25,7 +23,6 @@ function BootLine({ time, tag, tagClass = 't-tag', text, typing = false }) {
 export default function Dashboard() {
   const rootRef = useRef(null)
   const { health, healthError, refreshHealth, setView } = useApp()
-  const numRefs = useRef({})
   const [memory, setMemory] = useState(null)
   useViewEntrance(rootRef)
 
@@ -34,20 +31,6 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => { loadMemory() }, [loadMemory])
-
-  useGSAP(
-    () => {
-      const counters = Object.entries(numRefs.current)
-      if (!counters.length || !health) return
-      // memory arrives on its own request, so the count has to re-animate when
-      // it lands rather than staying at the zero it rendered with.
-      counters.forEach(([, el]) => {
-        const target = Number(el.dataset.count || 0)
-        animateCounter(el, target, 0.9)
-      })
-    },
-    { scope: rootRef, dependencies: [health, memory] },
-  )
 
   const lines = health
     ? [
@@ -81,7 +64,7 @@ export default function Dashboard() {
         { tag: 'boot', text: 'PSOK v0.1.0 — personal operating system' },
         healthError
           ? { tag: 'err', tagClass: 't-tag-bad', text: `api unreachable: ${healthError}` }
-          : { tag: 'wait', text: 'awaiting backend…', typing: true },
+          : { tag: 'wait', text: 'awaiting backend…' },
       ]
 
   const counters = [
@@ -125,9 +108,7 @@ export default function Dashboard() {
                 <span style={{ marginLeft: 'auto' }}>live</span>
               </div>
               <div className="tele-body">
-                {lines.map((l, i) => (
-                  <BootLine key={i} time={String(i).padStart(2, '0') + ':00.000'} {...l} />
-                ))}
+                {lines.map((l, i) => <Line key={i} {...l} />)}
               </div>
             </div>
           </div>
@@ -135,12 +116,10 @@ export default function Dashboard() {
           <div className="stat-grid" data-enter>
             {counters.map((s) => (
               <div className="stat" key={s.key}>
-                <div className="stat-num" ref={(el) => { numRefs.current[s.key] = el }} data-count={s.count}>
-                  0
-                </div>
+                <div className="stat-num">{s.count}</div>
                 <div className="stat-label">{s.label}</div>
                 <div className="stat-sub">
-                  <span className={`led led--${s.bad ? 'faint' : 'ok'}`} />
+                  {s.key === 'memory' && <span className={`led led--${s.bad ? 'faint' : 'ok'}`} />}
                   {s.sub}
                 </div>
               </div>
