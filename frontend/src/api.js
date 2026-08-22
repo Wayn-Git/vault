@@ -6,6 +6,17 @@ async function j(url, opts) {
     ...opts,
   })
   if (!res.ok) {
+    // A 405 on a path this interface knows about means the endpoint is not in
+    // the running server, which in practice means one thing: `psok serve` has
+    // been up since before the bundle it is serving was built. "405: Method
+    // Not Allowed" sends someone looking for a bug in their own request; this
+    // says what to actually do about it.
+    if (res.status === 405) {
+      throw new Error(
+        `This server does not have ${opts?.method || 'that'} ${url} — it is running an older`
+        + ' build than the interface it is serving. Restart psok serve.',
+      )
+    }
     let detail = res.statusText
     try {
       const body = await res.json()
@@ -25,7 +36,10 @@ export const api = {
   createConversation: (provider, model, title) =>
     j('/conversations', json('POST', { provider, model, title })),
   updateConversation: (id, patch) => j(`/conversations/${id}`, json('PATCH', patch)),
+  deleteConversation: (id) => j(`/conversations/${id}`, json('DELETE')),
   messages: (id) => j(`/conversations/${id}/messages`),
+  pinMessage: (id, messageId, pinned) =>
+    j(`/conversations/${id}/messages/${messageId}/pin`, json('POST', { pinned })),
 
   turn: async ({ conversationId, message, workspace, onEvent, signal }) => {
     const res = await fetch(`${BASE}/conversations/${conversationId}/turn`, {
@@ -72,6 +86,13 @@ export const api = {
   revokeApproval: (operationKey) =>
     j(`/confirmations/preferences/${encodeURIComponent(operationKey)}`, json('DELETE')),
 
+  // Automations — beta. A turn that runs without anyone typing.
+  automations: () => j('/automations'),
+  createAutomation: (body) => j('/automations', json('POST', body)),
+  updateAutomation: (id, patch) => j(`/automations/${id}`, json('PATCH', patch)),
+  deleteAutomation: (id) => j(`/automations/${id}`, json('DELETE')),
+  runAutomation: (id) => j(`/automations/${id}/run`, json('POST', {})),
+
   logs: (limit = 100) => j(`/logs?limit=${limit}`),
 
   memory: (conversationId) =>
@@ -83,6 +104,8 @@ export const api = {
   skills: () => j('/skills'),
   skillCatalogue: (refresh = false) => j(`/skills/catalogue${refresh ? '?refresh=true' : ''}`),
   installSkill: (url, overwrite = false) => j('/skills/install', json('POST', { url, overwrite })),
+  createSkill: ({ name, description, instruction, overwrite = false }) =>
+    j('/skills/create', json('POST', { name, description, instruction, overwrite })),
   removeSkill: (name) => j(`/skills/${encodeURIComponent(name)}`, json('DELETE')),
 
   tools: () => j('/tools'),
@@ -123,6 +146,8 @@ export const api = {
     j(`/mcp/servers/${encodeURIComponent(name)}/env/${encodeURIComponent(key)}`, json('DELETE')),
   mcpLogin: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/login`, json('POST', {})),
   mcpAuthorizations: () => j('/mcp/authorizations'),
+  // Start every switched-on connector now, the way the first turn would.
+  mcpReconcile: () => j('/mcp/reconcile', json('POST', {})),
   mcpConnect: (name) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/connect`, json('POST', {})),
 }

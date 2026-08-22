@@ -12,17 +12,12 @@ export default function Logs() {
   const [limit, setLimit] = useState(100)
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState(false)
-  // What no longer asks. A "don't ask again" the user cannot see is a grant
-  // they cannot take back.
-  const [standing, setStanding] = useState([])
   useViewEntrance(rootRef)
 
   const load = useCallback(async (n = limit) => {
     setBusy(true)
     try {
-      const [rows, approvals] = await Promise.all([api.logs(n), api.standingApprovals()])
-      setLogs(rows)
-      setStanding(approvals)
+      setLogs(await api.logs(n))
     } catch (err) {
       toast(err.message, 'bad')
     } finally {
@@ -39,16 +34,6 @@ export default function Logs() {
     const tick = setInterval(() => load(), 4000)
     return () => clearInterval(tick)
   }, [live, load])
-
-  const revoke = useCallback(async (key) => {
-    try {
-      await api.revokeApproval(key)
-      toast(`${key} will ask again`, 'ok')
-      load()
-    } catch (err) {
-      toast(err.message, 'bad')
-    }
-  }, [load, toast])
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -67,7 +52,8 @@ export default function Logs() {
             <h1>Execution log</h1>
             <div className="vheader-sub">
               Every tool call from every source, with the decision that allowed it.
-              Arguments are redacted before they reach this table.
+              Arguments are redacted before they reach this table. What runs
+              without asking is listed under Settings → Permissions.
             </div>
           </div>
           <div className="vheader-actions">
@@ -77,7 +63,6 @@ export default function Logs() {
               onClick={() => setLive((l) => !l)}
               title="Reload every few seconds while a turn runs"
             >
-              <span className={`led led--${live ? 'ok' : 'faint'}${live ? ' led--pulse' : ''}`} />
               {live ? 'Following' : 'Follow'}
             </button>
             <button type="button" className="btn btn--ghost" onClick={() => load()} disabled={busy}>
@@ -85,42 +70,6 @@ export default function Logs() {
             </button>
           </div>
         </header>
-
-        <div className="card card-pad" style={{ marginBottom: 18 }} data-enter>
-          <div className="card-title">
-            <span className={`led led--${standing.length ? 'amber' : 'faint'}`} /> runs without asking · {standing.length}
-          </div>
-          {standing.length === 0 ? (
-            <p className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: 0 }}>
-              Nothing is approved in advance. Every gated call asks.
-            </p>
-          ) : (
-            <>
-              <p className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)', margin: '0 0 10px' }}>
-                Kept by operation key, not tool name — approving a read-only shell command
-                never approved a destructive one.
-              </p>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {standing.map((s) => (
-                  <span key={s.operation_key} className="badge" style={{ gap: 7 }}>
-                    <span className={`led led--${s.decision === 'allow' ? 'ok' : 'bad'}`} />
-                    <span className="mono">{s.operation_key}</span>
-                    <span style={{ color: 'var(--text-faint)' }}>{s.risk_level}</span>
-                    <button
-                      type="button"
-                      onClick={() => revoke(s.operation_key)}
-                      title={`Make ${s.operation_key} ask again`}
-                      aria-label={`Revoke ${s.operation_key}`}
-                      style={{ color: 'var(--text-faint)', lineHeight: 0 }}
-                    >
-                      <Icon name="x" size={11} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
 
         <div style={{ display: 'flex', gap: 10, marginBottom: 14, flexWrap: 'wrap' }} data-enter>
           <input

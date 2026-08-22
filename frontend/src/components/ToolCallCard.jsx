@@ -8,7 +8,7 @@ export default function ToolCallCard({ call, running }) {
   const status = call.status === 'error'
     ? <span className="badge badge--bad">error</span>
     : running
-      ? <span className="badge badge--amber"><span className="led led--amber led--pulse" />running</span>
+      ? <span className="badge badge--amber">running<span className="ellipsis"><i /><i /><i /></span></span>
       : <span className="badge badge--ok">done</span>
 
   return (
@@ -38,7 +38,7 @@ export default function ToolCallCard({ call, running }) {
             )}
             {running && (
               <span className="tool-block-label" style={{ color: 'var(--clay)' }}>
-                <span className="led led--amber led--pulse" /> awaiting completion…
+                awaiting completion…
               </span>
             )}
           </div>

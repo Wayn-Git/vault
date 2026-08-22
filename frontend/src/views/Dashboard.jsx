@@ -6,8 +6,7 @@ import { api } from '../api.js'
 
 const MODULES = [
   { id: 'chat', icon: 'chat', name: 'Agent chat', desc: 'Streaming turns, tool calls, permission prompts', meta: 'reason → act → observe' },
-  { id: 'mcp', icon: 'plug', name: 'MCP servers', desc: 'Catalogue, custom servers, OAuth logins', meta: 'flat tool namespace' },
-  { id: 'skills', icon: 'book', name: 'Skills', desc: 'Markdown skill discovery', meta: 'progressive disclosure' },
+  { id: 'capabilities', icon: 'grid', name: 'Skills and connectors', desc: 'Catalogue, custom servers, OAuth logins, markdown skills', meta: 'flat tool namespace' },
   { id: 'memory', icon: 'spark', name: 'Memory', desc: 'Standing facts recalled across conversations', meta: 'extracted after a turn' },
   { id: 'logs', icon: 'logs', name: 'Audit log', desc: 'Every tool call, with the decision that allowed it', meta: 'redacted, immutable trail' },
 ]
@@ -100,7 +99,6 @@ export default function Dashboard() {
           <div data-enter>
             <div className="tele">
               <div className="tele-bar">
-                <span className="led led--amber led--pulse" />
                 system
                 <span style={{ marginLeft: 'auto' }}>live</span>
               </div>
@@ -116,7 +114,6 @@ export default function Dashboard() {
                 <div className="stat-num">{s.count}</div>
                 <div className="stat-label">{s.label}</div>
                 <div className="stat-sub">
-                  {s.key === 'memory' && <span className={`led led--${s.bad ? 'faint' : 'ok'}`} />}
                   {s.sub}
                 </div>
               </div>

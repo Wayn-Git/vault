@@ -62,7 +62,7 @@ export default function Tasks() {
         </header>
 
         <div className="card card-pad" style={{ marginBottom: 22 }} data-enter>
-          <div className="card-title"><span className="led led--amber" /> tasks · {tasks.length}</div>
+          <div className="card-title">tasks · {tasks.length}</div>
           {tasks.length === 0 && (
             <div className="empty-state" style={{ padding: 18 }}>
               <Icon name="check" size={20} />
@@ -71,7 +71,6 @@ export default function Tasks() {
           )}
           {tasks.map((task) => (
             <div className="server-row" key={task.id}>
-              <span className={`led led--${task.status === 'done' ? 'faint' : task.priority === 'high' ? 'bad' : 'ok'}`} />
               <div style={{ minWidth: 0 }}>
                 <div className="server-name" style={{ whiteSpace: 'normal' }}>{task.title}</div>
                 <div className="server-target">
@@ -89,7 +88,7 @@ export default function Tasks() {
         </div>
 
         <div className="card card-pad" data-enter>
-          <div className="card-title"><span className="led led--ok" /> next three weeks · {events.length}</div>
+          <div className="card-title">next three weeks · {events.length}</div>
           {events.length === 0 && (
             <div className="empty-state" style={{ padding: 18 }}>
               <Icon name="clock" size={20} />
@@ -98,7 +97,6 @@ export default function Tasks() {
           )}
           {events.map((event) => (
             <div className="server-row" key={event.id}>
-              <span className="led led--ok" />
               <div style={{ minWidth: 0 }}>
                 <div className="server-name" style={{ whiteSpace: 'normal' }}>{event.title}</div>
                 <div className="server-target">

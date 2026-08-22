@@ -58,9 +58,7 @@ export default function ConfirmModal({ pending, onDecide }) {
       <div className="modal confirm-modal" role="dialog" aria-modal="true" aria-label="Permission required">
         <div className="modal-head">
           <div>
-            <div className="vheader-eyebrow">
-              <span className="led led--amber led--pulse" /> permission gate
-            </div>
+            <div className="vheader-eyebrow">permission gate</div>
             <div className="modal-title">Approve tool call?</div>
           </div>
         </div>

@@ -2,24 +2,39 @@ import { useCallback, useEffect, useState } from 'react'
 import Icon from './Icon.jsx'
 import { api } from '../api.js'
 import { useApp } from '../store.jsx'
-import { connectorState } from './PlusMenu.jsx'
 
-/* One place for everything that is a setting rather than a conversation.
+/* Settings, and only settings.
 
-   The full views still exist and do more; these panels are the short version,
-   reachable without leaving the chat you are in. */
+   This used to carry a second, shorter Skills page, a second Connectors page
+   and a second Memory page alongside the ones in the rail. Two implementations
+   of one thing is two things to keep in step and one more place to look, and
+   the short version was always the one missing whatever you had come for --
+   the Connectors panel here could not finish an OAuth sign-in, so the answer
+   to half of what it showed you was "open the full view".
+
+   What is left is what has nowhere else to live. The pages themselves are
+   listed below the settings, and picking one goes there rather than drawing a
+   worse copy of it inside a dialog. */
 
 const SECTIONS = [
-  { id: 'general', label: 'General', icon: 'sliders', group: 'Settings' },
-  { id: 'models', label: 'Models', icon: 'cpu', group: 'Settings' },
-  { id: 'permissions', label: 'Permissions', icon: 'key', group: 'Settings' },
-  { id: 'skills', label: 'Skills', icon: 'book', group: 'Customise' },
-  { id: 'connectors', label: 'Connectors', icon: 'plug', group: 'Customise' },
-  { id: 'memory', label: 'Memory', icon: 'spark', group: 'Customise' },
+  { id: 'general', label: 'General', icon: 'sliders' },
+  { id: 'models', label: 'Models', icon: 'cpu' },
+  { id: 'permissions', label: 'Permissions', icon: 'key' },
+]
+
+// Every one of these is a full view in the rail. The nav links to them so that
+// looking for skills in the settings finds them, rather than finding a smaller
+// second copy.
+const PAGES = [
+  { id: 'capabilities', label: 'Skills & connectors', icon: 'grid' },
+  { id: 'automations', label: 'Automations', icon: 'clock' },
+  { id: 'memory', label: 'Memory', icon: 'spark' },
+  { id: 'tasks', label: 'Tasks', icon: 'check' },
+  { id: 'logs', label: 'Activity', icon: 'logs' },
 ]
 
 function General() {
-  const { health, healthError, workspace, setWorkspace, setView, setOverlay } = useApp()
+  const { health, healthError, workspace, setWorkspace } = useApp()
   const [draft, setDraft] = useState(workspace || '')
 
   return (
@@ -55,15 +70,6 @@ function General() {
         </button>
       </div>
 
-      <h3>Elsewhere</h3>
-      <div className="set-links">
-        <button type="button" className="btn btn--ghost btn--small" onClick={() => { setView('logs'); setOverlay(null) }}>
-          <Icon name="logs" size={13} /> Activity log
-        </button>
-        <button type="button" className="btn btn--ghost btn--small" onClick={() => { setView('tasks'); setOverlay(null) }}>
-          <Icon name="check" size={13} /> Tasks and calendar
-        </button>
-      </div>
     </div>
   )
 }
@@ -168,175 +174,14 @@ function Permissions() {
   )
 }
 
-function Skills() {
-  const { caps, setCapEnabled, busyCap, setOverlay, setView } = useApp()
-  const skills = caps.skills ?? []
-  return (
-    <div className="set-panel">
-      <h3>Skills</h3>
-      <p className="set-note">
-        An engaged skill is offered to the agent every turn; <span className="mono">/name</span> engages
-        one for a single message.
-      </p>
-      <div className="set-rows">
-        {skills.length === 0 && <div className="set-empty">Nothing installed.</div>}
-        {skills.map((skill) => (
-          <div className="set-row" key={skill.name}>
-            <span>
-              /{skill.name}
-              <span className="set-sub">{skill.description}</span>
-            </span>
-            <button
-              type="button"
-              className={`btn btn--small${skill.enabled ? ' btn--primary' : ' btn--ghost'}`}
-              disabled={busyCap === `skill:${skill.name}`}
-              onClick={() => setCapEnabled(skill, !skill.enabled)}
-            >
-              {skill.enabled ? 'On' : 'Off'}
-            </button>
-          </div>
-        ))}
-      </div>
-      <div className="set-links">
-        <button type="button" className="btn btn--small" onClick={() => setOverlay('directory:skills')}>
-          <Icon name="plus" size={13} /> Browse and install
-        </button>
-        <button type="button" className="btn btn--ghost btn--small" onClick={() => { setView('skills'); setOverlay(null) }}>
-          Open the full view
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function Connectors() {
-  const { caps, setCapEnabled, busyCap, setOverlay, setView, toast } = useApp()
-  const [servers, setServers] = useState([])
-
-  const load = useCallback(async () => {
-    try { setServers(await api.mcpServers()) } catch (err) { toast(err.message, 'bad') }
-  }, [toast])
-
-  useEffect(() => { load() }, [load])
-
-  const connectors = caps.connectors ?? []
-
-  return (
-    <div className="set-panel">
-      <h3>Connectors</h3>
-      <table className="set-table">
-        <thead>
-          <tr><th>Connector</th><th>Type</th><th>Status</th><th /></tr>
-        </thead>
-        <tbody>
-          {servers.length === 0 && (
-            <tr><td colSpan={4} className="set-empty">Nothing configured yet.</td></tr>
-          )}
-          {servers.map((server) => {
-            const cap = connectors.find((c) => c.name === server.name)
-            const state = cap ? connectorState(cap, busyCap === `connector:${server.name}`) : null
-            return (
-              <tr key={server.name}>
-                <td>{server.name}</td>
-                <td className="mono">{server.transport}</td>
-                <td>
-                  <span className={`led led--${state?.dot ?? 'faint'}`} />
-                  {server.oauth && server.authorized === false ? 'needs sign-in' : state?.label ?? 'off'}
-                </td>
-                <td className="set-table-actions"><div className="set-table-actions-inner">
-                  {server.oauth && server.authorized === false && (
-                    <button
-                      type="button"
-                      className="btn btn--small"
-                      onClick={() => { setView('mcp'); setOverlay(null) }}
-                    >
-                      Sign in
-                    </button>
-                  )}
-                  {cap && (
-                    <button
-                      type="button"
-                      className={`btn btn--small${cap.enabled ? ' btn--primary' : ' btn--ghost'}`}
-                      disabled={busyCap === `connector:${server.name}`}
-                      onClick={() => setCapEnabled(cap, !cap.enabled)}
-                    >
-                      {cap.enabled ? 'Disconnect' : 'Connect'}
-                    </button>
-                  )}
-                </div></td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-      <div className="set-links">
-        <button type="button" className="btn btn--small" onClick={() => setOverlay('directory:connectors')}>
-          <Icon name="plus" size={13} /> Add connector
-        </button>
-        <button type="button" className="btn btn--ghost btn--small" onClick={() => { setView('mcp'); setOverlay(null) }}>
-          Open the full view
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function Memory() {
-  const { toast, setView, setOverlay } = useApp()
-  const [state, setState] = useState(null)
-
-  const load = useCallback(async () => {
-    try { setState(await api.memory()) } catch (err) { toast(err.message, 'bad') }
-  }, [toast])
-
-  useEffect(() => { load() }, [load])
-
-  return (
-    <div className="set-panel">
-      <h3>Memory</h3>
-      <p className="set-note">
-        Standing facts, extracted after a turn and recalled in later conversations. Forgetting one
-        retires it: what PSOK believed, and when that changed, stays answerable.
-      </p>
-      <div className="set-inline">
-        <button
-          type="button"
-          className={`btn btn--small${state?.enabled ? ' btn--primary' : ' btn--ghost'}`}
-          disabled={!state}
-          onClick={async () => {
-            const next = await api.toggleMemory(!state.enabled)
-            setState((s) => ({ ...s, enabled: next.enabled }))
-          }}
-        >
-          {state?.enabled ? 'Remembering' : 'Not remembering'}
-        </button>
-        <span className="set-note" style={{ margin: 0 }}>{state?.facts?.length ?? 0} facts held</span>
-      </div>
-      <div className="set-rows">
-        {(state?.facts ?? []).slice(0, 6).map((fact) => (
-          <div className="set-row" key={fact.id}><span>{fact.fact}</span></div>
-        ))}
-      </div>
-      <div className="set-links">
-        <button type="button" className="btn btn--ghost btn--small" onClick={() => { setView('memory'); setOverlay(null) }}>
-          Open the full view
-        </button>
-      </div>
-    </div>
-  )
-}
-
 const PANELS = {
   general: General,
   models: Models,
   permissions: Permissions,
-  skills: Skills,
-  connectors: Connectors,
-  memory: Memory,
 }
 
 export default function Settings() {
-  const { overlay, setOverlay } = useApp()
+  const { overlay, setOverlay, setView } = useApp()
   const [section, setSection] = useState('general')
   const open = overlay === 'settings'
 
@@ -349,28 +194,33 @@ export default function Settings() {
 
   if (!open) return null
   const Panel = PANELS[section] || General
-  let lastGroup = null
 
   return (
     <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setOverlay(null) }}>
       <div className="settings" role="dialog" aria-modal="true" aria-label="Settings">
         <nav className="set-nav">
-          {SECTIONS.map((item) => {
-            const header = item.group !== lastGroup ? item.group : null
-            lastGroup = item.group
-            return (
-              <div key={item.id}>
-                {header && <div className="set-nav-group">{header}</div>}
-                <button
-                  type="button"
-                  className={`set-nav-item${section === item.id ? ' active' : ''}`}
-                  onClick={() => setSection(item.id)}
-                >
-                  <Icon name={item.icon} size={15} /> {item.label}
-                </button>
-              </div>
-            )
-          })}
+          {SECTIONS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`set-nav-item${section === item.id ? ' active' : ''}`}
+              onClick={() => setSection(item.id)}
+            >
+              <Icon name={item.icon} size={15} /> {item.label}
+            </button>
+          ))}
+          <div className="set-nav-group">Pages</div>
+          {PAGES.map((page) => (
+            <button
+              key={page.id}
+              type="button"
+              className="set-nav-item set-nav-item--away"
+              onClick={() => { setView(page.id); setOverlay(null) }}
+            >
+              <Icon name={page.icon} size={15} /> {page.label}
+              <Icon name="chevron" size={12} className="set-nav-away" />
+            </button>
+          ))}
         </nav>
         <div className="set-content">
           <div className="set-head">

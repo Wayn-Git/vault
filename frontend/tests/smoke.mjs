@@ -156,45 +156,107 @@ try {
   await page.keyboard.press('Escape')
   await page.waitForTimeout(150)
 
+  // Settings used to carry a second, shorter Connectors page of its own. There
+  // is one Skills & connectors page now, and the settings nav goes to it.
   await page.keyboard.press('Control+,')
   await page.waitForSelector('.settings', { timeout: 3000 })
-  await page.locator('.set-nav-item', { hasText: 'Connectors' }).click()
-  await page.waitForTimeout(400)
-  check('settings lists the connectors', (await page.locator('.set-table tbody tr').count()) > 0)
-  await page.keyboard.press('Escape')
+  check('settings does not draw a second connectors page',
+    (await page.locator('.set-table').count()) === 0)
+  await page.locator('.set-nav-item', { hasText: 'Skills & connectors' }).click()
+  await page.waitForSelector('.cap-tabs', { timeout: 6000 })
+  check('the settings nav goes to the one capabilities page',
+    (await page.locator('.settings').count()) === 0
+      && (await page.locator('.rail-place.active').innerText()).trim() === 'Skills & connectors')
 
-  // The connectors view: popular row, tabs, table, and the set-up panel.
-  await page.keyboard.press('Control+4')
-  await page.waitForSelector('.conn-table', { timeout: 6000 })
-  await page.waitForTimeout(600)
-  check('the connectors view lists what is configured',
+  // Skills and connectors are one page with two tabs, and each tab carries both
+  // what is added and what could be. The directory overlay is gone.
+  await page.keyboard.press('Control+3')
+  await page.waitForSelector('.cap-tabs', { timeout: 6000 })
+  await page.locator('.cap-tab', { hasText: 'Connectors' }).click()
+  await page.waitForSelector('.conn-table', { timeout: 8000 })
+  await page.waitForTimeout(700)
+  check('the connectors tab lists what is configured',
     (await page.locator('.conn-table tbody tr').count()) > 0)
-  await page.locator('.conn-tab').nth(1).click()   // Connected
-  await page.waitForTimeout(250)
-  check('its tabs filter by what is actually running', true)
-  await page.locator('.conn-tab').nth(0).click()   // All
-  await page.waitForTimeout(250)
+
+  // A connector that has never once worked must not sit among the ones serving
+  // tools right now under a heading saying they are the same thing.
+  const heads = await page.locator('.cap-section-head').allInnerTexts()
+  check('working and not-working connectors are kept apart',
+    heads.some((h) => /connected/i.test(h)) || heads.some((h) => /not running|not started/i.test(h)),
+    heads.map((h) => h.split('\n')[0]).join(' | '))
+  check('a connected row reports live tools, not just a switch',
+    !heads.some((h) => /^connected/i.test(h))
+      || /tools? live/.test(await page.locator('.conn-table').first().innerText()))
+
+  // Adding happens on this page: the catalogue opens underneath.
+  await page.locator('.cap-head .btn').click()
+  await page.waitForTimeout(900)
+  const added = (await page.locator('body').innerText()).includes('already added')
+  check('adding a connector happens on the same page',
+    added || (await page.locator('.cat-row').count()) > 0,
+    added ? 'everything in the catalogue is already added' : `${await page.locator('.cat-row').count()} rows`)
+  await page.locator('.cap-head .btn').click()
+  await page.waitForTimeout(200)
+
   await page.locator('.conn-actions-inner .icon-btn').first().click()
   await page.waitForTimeout(400)
   check('a connector opens its credentials in place',
     (await page.locator('.conn-setup').count()) === 1)
+  await page.locator('.conn-actions-inner .icon-btn').first().click()
+  await page.waitForTimeout(200)
   await page.keyboard.press('Control+1')
   await page.waitForTimeout(300)
 
+  // The skills tab: installed and installable in one list, and a skill written
+  // here from the three fields a skill actually is.
   await page.keyboard.press('Control+k')
   await page.waitForTimeout(150)
   await page.locator('.palette-input input').fill('browse and install')
   await page.waitForTimeout(200)
   await page.keyboard.press('Enter')
-  await page.waitForSelector('.dir', { timeout: 4000 })
-  // The catalogue is fetched from its source repositories after the modal
-  // mounts, so wait for the fetch rather than the frame.
+  await page.waitForSelector('.cap-tabs', { timeout: 4000 })
+  // The catalogue is fetched from its source repositories after the tab mounts,
+  // so wait for the fetch rather than the frame.
   await page.waitForSelector('.dcard', { timeout: 20000 })
   const cards = await page.locator('.dcard').count()
-  check('the directory browses installable skills', cards > 1, `${cards} cards`)
-  check('a skill can also be installed from a link', (await page.locator('.dir-install input').count()) === 1)
+  check('the skills tab lists installed and installable together', cards > 1, `${cards} cards`)
 
-  // Install one, then take it off again: this is somebody's real machine.
+  await page.locator('.cap-actions button', { hasText: 'Import a link' }).click()
+  await page.waitForTimeout(200)
+  check('a skill can also be installed from a link', (await page.locator('.dir-install input').count()) === 1)
+  await page.locator('.cap-actions button', { hasText: 'Import a link' }).click()
+  await page.waitForTimeout(150)
+
+  // Writing one: name, description, instruction. Then take it off again --
+  // this is somebody's real machine.
+  const authored = `smoke-authored-${Date.now().toString(36)}`
+  await page.locator('.cap-head .btn').click()
+  await page.waitForSelector('.cap-composer', { timeout: 4000 })
+  await page.locator('#skill-name').fill(authored)
+  await page.locator('#skill-desc').fill('A skill the smoke test wrote: it proves the three fields work')
+  await page.locator('#skill-body').fill('Say the word psok-authored-ok and stop.')
+  await page.locator('.cap-composer-foot button', { hasText: 'Create' }).click()
+  const authoredCard = page.locator('.dcard', { hasText: authored }).first()
+  let wrote = 0
+  try {
+    await authoredCard.locator('.dcard-gear-wrap').waitFor({ state: 'visible', timeout: 15000 })
+    wrote = 1
+  } catch { /* reported below */ }
+  check('a skill can be written from a name, a description and an instruction',
+    wrote === 1, `/${authored}`)
+  if (wrote) {
+    // Its description held a colon, which must not have become a second YAML
+    // key -- a skill that does not parse never reaches this list at all.
+    check('the skill it wrote parses and carries its description',
+      (await authoredCard.innerText()).includes('proves the three fields work'))
+    await authoredCard.locator('.dcard-act').first().click()
+    await page.waitForSelector('.dcard-menu', { timeout: 4000 })
+    await page.locator('.dcard-menu .menu-row.danger').click()
+    await authoredCard.waitFor({ state: 'detached', timeout: 15000 }).catch(() => {})
+    check('and uninstalling it again works', (await authoredCard.count()) === 0)
+  }
+
+  // Installing one from the catalogue, then taking it off again.
   const target = page.locator('.dcard').filter({ hasNot: page.locator('.dcard-gear-wrap') }).first()
   const installedName = (await target.locator('.dcard-title').innerText()).replace('/', '').trim()
   await target.locator('.dcard-act').click()
@@ -207,21 +269,19 @@ try {
     await installedCard.locator('.dcard-gear-wrap').waitFor({ state: 'visible', timeout: 20000 })
     nowInstalled = 1
   } catch { /* reported below */ }
-  check('installing a skill from the directory works', nowInstalled === 1, `/${installedName}`)
+  check('installing a skill from the catalogue works', nowInstalled === 1, `/${installedName}`)
   if (nowInstalled) {
     await installedCard.locator('.dcard-act').first().click()
     await page.waitForSelector('.dcard-menu', { timeout: 4000 })
     await page.locator('.dcard-menu .menu-row.danger').click()
     await installedCard.locator('.dcard-gear-wrap').waitFor({ state: 'detached', timeout: 20000 }).catch(() => {})
-    check('and uninstalling it again works',
+    check('and uninstalling that one works too',
       (await installedCard.locator('.dcard-gear-wrap').count()) === 0)
   }
 
-  await page.locator('.dir-nav-item', { hasText: 'Connectors' }).click()
-  await page.waitForTimeout(600)
-  check('the directory browses connectors', (await page.locator('.dcard').count()) > 0)
-  await page.keyboard.press('Escape')
-  await page.waitForTimeout(150)
+  check('the browse-everything overlay is gone', (await page.locator('.dir').count()) === 0)
+  await page.keyboard.press('Control+1')
+  await page.waitForTimeout(200)
 
   // A file dropped into the composer becomes a path the tools can read.
   const scratch = join(tmpdir(), `psok-smoke-${Date.now()}.txt`)
@@ -240,8 +300,37 @@ try {
     + ' then a python fenced code block that prints hello. No other text.',
   )
   await page.keyboard.press('Enter')
+  await started()
+
+  // The message that was typed has to still be there. Sending the first message
+  // of a new conversation sets the conversation id, which used to fire a
+  // transcript fetch that raced the stream and replaced it.
+  check('the typed message survives the turn opening',
+    (await page.locator('.msg-user').last().innerText()).includes('markdown heading'))
+
+  // Reasoning, if the model exposes any, is watched while it happens rather
+  // than hidden behind a collapsed block that says "thinking".
+  const sawLiveThinking = await page
+    .waitForSelector('.reasoning.live .reasoning-body.is-live', { timeout: 20000 })
+    .then(() => true).catch(() => false)
+
   await page.waitForSelector('.msg-assistant .md', { timeout: TURN_TIMEOUT })
   await idle()
+
+  // The composer comes back on `done`, not when the stream closes -- memory
+  // extraction is a second model call that runs after it -- so nothing may
+  // still claim to be thinking once the answer is on screen.
+  await page.waitForTimeout(700)
+  check('nothing is still thinking once the answer has landed',
+    (await page.locator('.thinking').count()) === 0
+      && (await page.locator('.reasoning.live').count()) === 0)
+
+  if (sawLiveThinking) {
+    check('the thinking is still there after the turn, folded up',
+      (await page.locator('.reasoning').count()) > 0)
+  } else {
+    skip('the thinking is still there after the turn', 'this model streamed no reasoning')
+  }
 
   check('the answer arrives', (await page.locator('.msg-assistant').last().innerText()).length > 0)
   check('markdown headings render', (await page.locator('.msg-assistant .md-h').count()) > 0)
@@ -266,6 +355,32 @@ try {
   await page.waitForSelector('.msg-user', { timeout: 15000 })
   check('the open conversation survives a reload', (await page.locator('.msg-user').count()) > 0)
 
+  // ------------------------------------------------------------------ pins
+  //
+  // A pin is a bookmark in a transcript that scrolls: it survives a reload,
+  // because a mark that only exists in this tab is not a mark on anything.
+  await page.locator('.msg-assistant').last().hover()
+  await page.locator('.msg-assistant').last().locator('.msg-pin').click()
+  await page.waitForSelector('.pin-strip', { timeout: 5000 })
+  check('an answer can be pinned', (await page.locator('.pin-chip').count()) === 1)
+
+  await page.reload({ waitUntil: 'networkidle' })
+  await page.waitForSelector('.msg-user', { timeout: 15000 })
+  const survived = await page
+    .waitForSelector('.pin-strip .pin-chip', { timeout: 8000 })
+    .then(() => true).catch(() => false)
+  check('the pin survives a reload', survived)
+
+  if (survived) {
+    await page.locator('.pin-chip').first().click()
+    await page.waitForTimeout(700)
+    check('a pinned message can be jumped to',
+      (await page.locator('.msg.is-pinned').count()) > 0)
+    await page.locator('.pin-chip-off').first().click()
+    await page.waitForTimeout(700)
+    check('and unpinned again from the strip', (await page.locator('.pin-chip').count()) === 0)
+  }
+
   await page.keyboard.press('F2')
   const rename = page.locator('.rail-rename')
   if (await rename.count()) {
@@ -280,10 +395,15 @@ try {
     check('F2 renames the conversation', false, 'no rename field appeared')
   }
 
-  for (const [combo, label] of [['Control+2', 'Tasks'], ['Control+4', 'Connectors'], ['Control+6', 'Activity']]) {
+  for (const [combo, label] of [
+    ['Control+2', 'Tasks'], ['Control+3', 'Skills & connectors'],
+    ['Control+4', 'Automations'], ['Control+6', 'Activity'],
+  ]) {
     await page.keyboard.press(combo)
     await page.waitForTimeout(300)
-    check(`${combo} switches view`, (await page.locator('.rail-place.active').innerText()).trim() === label)
+    // A rail row can carry a badge on a second line ("Automations" / "beta").
+    const active = (await page.locator('.rail-place.active').innerText()).split('\n')[0].trim()
+    check(`${combo} switches view`, active === label, active)
   }
   await page.keyboard.press('Control+1')
   await page.waitForTimeout(200)
@@ -341,10 +461,97 @@ try {
     await page.waitForTimeout(1200)
     const activity = await page.locator('body').innerText()
     check('the audit trail shows it', /run_shell_command/.test(activity))
-    check('standing approvals are listed where they can be taken back',
-      /runs without asking/i.test(activity))
+    check('the trail is only the trail, not a second permissions page',
+      (await page.locator('.card-title', { hasText: /runs without asking/i }).count()) === 0)
     await shot('activity')
+
+    // What runs without asking is one page now, and it is in the settings.
+    await page.keyboard.press('Control+,')
+    await page.waitForSelector('.settings', { timeout: 3000 })
+    await page.locator('.set-nav-item', { hasText: 'Permissions' }).click()
+    await page.waitForTimeout(400)
+    check('standing approvals are listed where they can be taken back',
+      /runs without asking/i.test(await page.locator('.settings').innerText()))
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(200)
   }
+
+  // ------------------------------------------------------- automations (beta)
+  //
+  // Created and deleted, not run: a scheduled turn costs a real model call, and
+  // the gate it runs behind is covered by the unit tests.
+  await page.keyboard.press('Control+4')
+  await page.waitForSelector('.cap-head', { timeout: 6000 })
+  check('automations are marked beta where they appear',
+    (await page.locator('.rail-place .beta').count()) > 0
+      && (await page.locator('.cap-head .beta').count()) > 0)
+  // Chat stays mounted behind every view, so `.view` alone matches two.
+  const autoText = await page.locator('.view:not(.view--flush)').innerText()
+  check('the page says what it does and does not do',
+    /while PSOK is open/i.test(autoText) && /blocked/i.test(autoText))
+
+  const autoName = `smoke ${Date.now().toString(36)}`
+  await page.locator('.cap-head .btn').click()
+  await page.waitForSelector('#auto-name', { timeout: 4000 })
+  await page.locator('#auto-name').fill(autoName)
+  await page.locator('#auto-prompt').fill('Say the word psok-automation-ok and stop.')
+  await page.locator('.cap-composer-foot button', { hasText: 'Create' }).click()
+  const madeRow = page.locator('.auto-row', { hasText: autoName })
+  let madeAuto = 0
+  try {
+    await madeRow.waitFor({ state: 'visible', timeout: 8000 })
+    madeAuto = 1
+  } catch { /* reported below */ }
+  check('an automation can be created', madeAuto === 1, autoName)
+
+  if (madeAuto) {
+    const meta = await madeRow.locator('.auto-meta').innerText()
+    check('it is scheduled forward rather than fired on creation', /next in/.test(meta), meta)
+    await madeRow.locator('button', { hasText: 'Pause' }).click()
+    await page.waitForTimeout(600)
+    check('and it can be paused', /paused/i.test(await madeRow.innerText()))
+    page.once('dialog', (d) => d.accept())
+    await madeRow.locator('.icon-btn').click()
+    await madeRow.waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
+    check('and deleted', (await madeRow.count()) === 0)
+  }
+
+  // ------------------------------------------------------------- discarding
+  //
+  // Last, and on a conversation this run created: it is somebody's real
+  // machine, and the rest of the suite still needs something to talk in.
+  await page.keyboard.press('Control+1')
+  await page.waitForTimeout(250)
+  // Deleting one: the row menu, a confirming second click, and the row is gone.
+  //
+  // Asserted against the id rather than the row count. The rail lists the fifty
+  // most recent conversations, so on a machine that has more than fifty,
+  // deleting one pulls the fifty-first into view and the count never moves.
+  const doomedId = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('psok.ui.v1') || '{}').activeId,
+  )
+  if (!doomedId) throw new Error('no conversation is open to delete')
+  const doomed = page.locator('.rail-conv.active').first()
+  const doomedTitle = await doomed.locator('.rail-conv-title').innerText()
+  await doomed.locator('.rail-conv-more').click({ force: true })
+  await page.waitForSelector('.rail-conv-menu', { timeout: 3000 })
+  await page.locator('.rail-conv-menu .danger').click()
+  await page.waitForTimeout(200)
+  check('deleting asks for a second click first',
+    (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 200)
+  await page.locator('.rail-conv-menu .danger').click()
+  await page.waitForTimeout(900)
+  check('a conversation can be deleted from the rail',
+    (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 404,
+    doomedTitle,
+  )
+  // Deleting the open one has to leave the interface somewhere valid rather
+  // than pointed at a row the API will now refuse.
+  check('the interface lands somewhere valid afterwards',
+    (await page.evaluate(
+      () => JSON.parse(localStorage.getItem('psok.ui.v1') || '{}').activeId,
+    )) !== doomedId && consoleErrors.length === 0)
+
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '))
 } finally {

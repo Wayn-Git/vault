@@ -68,6 +68,7 @@ export const SHORTCUTS = [
   { group: 'Conversations', binding: 'mod+arrowup', label: 'Previous conversation' },
   { group: 'Conversations', binding: 'mod+arrowdown', label: 'Next conversation' },
   { group: 'Conversations', binding: 'f2', label: 'Rename the open conversation' },
+  { group: 'Conversations', binding: 'mod+p', label: 'Pin or unpin the last answer' },
 
   { group: 'Permission prompt', binding: 'enter', label: 'Allow' },
   { group: 'Permission prompt', binding: 'escape', label: 'Deny' },

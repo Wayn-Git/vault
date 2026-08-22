@@ -50,6 +50,9 @@ export function AppProvider({ children }) {
   // the row and the keyboard layer starts the edit.
   const [renaming, setRenaming] = useState(null)
   const [sidebar, setSidebarRaw] = useState(prefs.sidebar !== false)
+  // Which half of Skills & connectors is open. In the store because the + menu
+  // and the palette both send you to one side or the other.
+  const [capabilitiesTab, setCapabilitiesTabRaw] = useState(prefs.capabilitiesTab || 'skills')
 
   // Chat owns the turn, so the palette and the keyboard layer reach it through
   // callbacks it registers rather than through a copy of its state.
@@ -68,6 +71,11 @@ export function AppProvider({ children }) {
   const setWorkspace = useCallback((next) => {
     setWorkspaceRaw(next)
     savePrefs({ workspace: next })
+  }, [])
+
+  const setCapabilitiesTab = useCallback((next) => {
+    setCapabilitiesTabRaw(next)
+    savePrefs({ capabilitiesTab: next })
   }, [])
 
   const setSidebar = useCallback((next) => {
@@ -118,6 +126,24 @@ export function AppProvider({ children }) {
       toast(err.message, 'bad')
     }
   }, [refreshConvs, toast])
+
+  /** Delete a conversation, and leave the interface somewhere valid.
+   *
+   *  The open conversation is the one most likely to be deleted, so this has to
+   *  answer "what is on screen now" itself rather than leaving Chat pointed at
+   *  a row the API will 404 on. */
+  const deleteConversation = useCallback(async (id) => {
+    try {
+      await api.deleteConversation(id)
+    } catch (err) {
+      toast(err.message, 'bad')
+      return false
+    }
+    const rows = await refreshConvs()
+    if (id === activeId) setActiveId(rows.find((c) => c.id !== id)?.id ?? null)
+    toast('Conversation deleted', 'info')
+    return true
+  }, [activeId, refreshConvs, setActiveId, toast])
 
   const refreshCaps = useCallback(async (scope = activeId) => {
     try {
@@ -181,17 +207,19 @@ export function AppProvider({ children }) {
     overlay, setOverlay,
     conversations, refreshConvs,
     activeId, setActiveId,
-    renaming, setRenaming, renameConversation,
+    renaming, setRenaming, renameConversation, deleteConversation,
     caps, refreshCaps, setCapEnabled, busyCap,
     workspace, setWorkspace,
     sidebar, setSidebar,
+    capabilitiesTab, setCapabilitiesTab,
     chat: chatRef.current,
     registerChat: (actions) => Object.assign(chatRef.current, actions),
   }), [
     view, setView, health, healthError, refreshHealth, toasts, toast, overlay,
     conversations, refreshConvs, activeId, setActiveId, caps, refreshCaps,
     setCapEnabled, busyCap, workspace, setWorkspace, sidebar, setSidebar,
-    renaming, renameConversation,
+    capabilitiesTab, setCapabilitiesTab,
+    renaming, renameConversation, deleteConversation,
   ])
 
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>

@@ -114,10 +114,9 @@ export default function Memory() {
 
         {facts.length > 0 && (
           <div className="card card-pad" data-enter>
-            <div className="card-title"><span className="led led--ok" /> live facts</div>
+            <div className="card-title">live facts</div>
             {facts.map((f) => (
               <div className="server-row" key={f.id}>
-                <span className="led led--ok" />
                 <div style={{ minWidth: 0 }}>
                   <div className="server-name" style={{ whiteSpace: 'normal' }}>{f.fact}</div>
                   <div className="server-target">

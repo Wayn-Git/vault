@@ -46,7 +46,7 @@ function Row({ icon, label, hint, tail, onClick, disabled, danger, submenu, acti
 const Toggle = ({ on }) => <span className={`switch${on ? ' on' : ''}`}><span /></span>
 
 export default function PlusMenu({ conversationId, workspace, onWorkspace, onClose, onNavigate, onAttach, placement = 'up' }) {
-  const { caps, refreshCaps, setCapEnabled, busyCap, setOverlay, toast } = useApp()
+  const { caps, refreshCaps, setCapEnabled, busyCap, setCapabilitiesTab, toast } = useApp()
   const [panel, setPanel] = useState(null)      // which submenu is open
   const [tools_open, setToolsOpen] = useState(false)
   const [memory, setMemory] = useState(null)
@@ -199,8 +199,11 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
             ))}
           </div>
           <div className="menu-sep" />
-          <Row icon="sliders" label="Manage skills" onClick={() => { onNavigate('skills'); onClose() }} />
-          <Row icon="plus" label="Browse skills" onClick={() => { setOverlay('directory:skills'); onClose() }} />
+          <Row
+            icon="sliders"
+            label="Manage and install skills"
+            onClick={() => { setCapabilitiesTab('skills'); onNavigate('capabilities'); onClose() }}
+          />
         </>
       ))}
 
@@ -214,8 +217,11 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
       />
       {panel === 'connectors' && submenu('switching one on starts it now', (
         <>
-          <Row icon="plus" label="Add connector" onClick={() => { setOverlay('directory:connectors'); onClose() }} />
-          <Row icon="sliders" label="Manage connectors" onClick={() => { onNavigate('mcp'); onClose() }} />
+          <Row
+            icon="sliders"
+            label="Manage and add connectors"
+            onClick={() => { setCapabilitiesTab('connectors'); onNavigate('capabilities'); onClose() }}
+          />
           <div className="menu-sep" />
           <div className="menu-scroll">
             {connectors.length === 0 && <div className="menu-empty">None configured.</div>}
@@ -251,8 +257,8 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
                     <div className="menu-group">{server === 'builtin' ? 'builtin' : server}</div>
                     {group.map((tool) => (
                       <div key={tool.name} className="menu-tool" title={tool.description}>
-                        <span className={`led led--${tool.risk === 'high' ? 'bad' : tool.risk === 'medium' ? 'amber' : 'ok'}`} />
                         <span className="mono">{tool.name}</span>
+                        <span className={`state state--risk-${tool.risk}`}>{tool.risk}</span>
                       </div>
                     ))}
                   </div>

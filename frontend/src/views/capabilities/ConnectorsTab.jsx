@@ -1,23 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import Icon from '../components/Icon.jsx'
-import ServiceIcon from '../components/ServiceIcon.jsx'
-import { connectorState } from '../components/PlusMenu.jsx'
-import { useApp } from '../store.jsx'
-import { useViewEntrance } from '../motion.js'
-import { api, copyText } from '../api.js'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import Icon from '../../components/Icon.jsx'
+import ServiceIcon from '../../components/ServiceIcon.jsx'
+import { useApp } from '../../store.jsx'
+import { api, copyText } from '../../api.js'
 
 /* Connectors: what is added, what is running, and what each one still needs.
 
    Two facts per server, and they are not the same fact: switched on, and
    actually running. A row that reported only the first is what made connectors
    look enabled while the agent had none of their tools, so every control here
-   waits for the real outcome and shows what came back. */
+   waits for the real outcome and shows what came back.
 
-const TABS = [
-  { id: 'all', label: 'All' },
-  { id: 'connected', label: 'Connected' },
-  { id: 'idle', label: 'Not connected' },
-]
+   The catalogue used to live in a separate overlay, so adding a connector and
+   managing one were two different places that showed the same services -- and
+   the overlay's answer to anything beyond "add it" was to send you here. They
+   are one surface now: what is configured, and beneath it everything that
+   could be, grouped the way the catalogue groups it. */
 
 function OauthClientForm({ server, onDone }) {
   const { toast } = useApp()
@@ -186,8 +184,7 @@ function SetupPanel({ server, onChanged }) {
   )
 }
 
-function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand }) {
-  const state = cap ? connectorState(cap, busy === 'switch') : null
+function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand, reason }) {
   const needsLogin = server.oauth && server.authorized === false
 
   return (
@@ -202,17 +199,11 @@ function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand }) {
             </span>
           </div>
         </td>
-        <td className="mono conn-type">{server.transport}</td>
         <td>
-          <span className="conn-status">
-            <span className={`led led--${state?.dot ?? 'faint'}${busy === 'switch' ? ' led--pulse' : ''}`} />
-            {live?.error
-              ? 'failed to start'
-              : live?.connected
-                ? `${live.tools} tool${live.tools === 1 ? '' : 's'} live`
-                : needsLogin
-                  ? 'needs sign-in'
-                  : cap?.enabled ? 'on, not running' : 'off'}
+          <span className={`conn-status conn-status--${live?.error ? 'error' : live?.connected ? 'live' : 'off'}`}>
+            {live?.connected
+              ? `${live.tools} tool${live.tools === 1 ? '' : 's'} live`
+              : reason ?? 'off'}
           </span>
           {live?.error && <span className="conn-error">{String(live.error).slice(0, 120)}</span>}
         </td>
@@ -255,25 +246,50 @@ function ConnectorRow({ server, cap, live, busy, onAct, expanded, onExpand }) {
       </tr>
       {expanded && (
         <tr className="conn-setup-row">
-          <td colSpan={4}><SetupPanel server={server} onChanged={onExpand} /></td>
+          <td colSpan={3}><SetupPanel server={server} onChanged={onExpand} /></td>
         </tr>
       )}
     </>
   )
 }
 
-export default function Mcp() {
-  const rootRef = useRef(null)
-  const { toast, setOverlay, caps, refreshCaps, setCapEnabled, refreshHealth } = useApp()
+/* One thing you could connect: an icon and a name.
+
+   The tiles here used to carry a description, a transport, an auth badge and a
+   collapsible setup note each -- four lines of explanation per service, for a
+   list whose only question is "which one". What a service is is not in doubt;
+   what it needs is a question for after you pick it, and the row that manages
+   it answers that. */
+function CatalogueRow({ entry, busy, onAdd }) {
+  return (
+    <button
+      type="button"
+      className="cat-row"
+      disabled={busy}
+      title={entry.description}
+      onClick={onAdd}
+    >
+      <ServiceIcon name={entry.id} size={26} />
+      <span className="cat-row-name">{entry.title}</span>
+      {entry.auth !== 'none' && <span className="state">{entry.auth}</span>}
+      <Icon name={busy ? 'refresh' : 'plus'} size={15} className="cat-row-add" />
+    </button>
+  )
+}
+
+
+const FEATURED = 8
+
+export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
+  const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health } = useApp()
   const [servers, setServers] = useState([])
   const [catalogue, setCatalogue] = useState([])
   const [live, setLive] = useState({})
   const [auths, setAuths] = useState([])
-  const [tab, setTab] = useState('all')
   const [busy, setBusy] = useState({})
   const [expanded, setExpanded] = useState(null)
   const [help, setHelp] = useState(null)
-  useViewEntrance(rootRef)
+  const [starting, setStarting] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -339,143 +355,224 @@ export default function Mcp() {
     }
   }, [refresh, toast])
 
-  const configured = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
-  const popular = useMemo(
-    () => catalogue.filter((entry) => !configured.has(entry.id)).slice(0, 3),
-    [catalogue, configured],
-  )
+  const q = query.trim().toLowerCase()
+  const matches = (server) =>
+    !q || server.name.toLowerCase().includes(q) || (server.target || '').toLowerCase().includes(q)
 
-  const rows = useMemo(() => servers.filter((server) => {
+  /* Running, and everything else.
+
+     One table of everything "added" put a connector that has never once worked
+     next to four that are serving tools right now, under a heading that said
+     they were the same thing. They are not: the first list is what the agent
+     can reach this second, and the second is a list of things waiting on you.
+     A permanently-failing connector sitting among the working ones is worse
+     than an absent one, because it makes the working ones look uncertain. */
+  const [running, waiting] = useMemo(() => {
+    const on = []
+    const off = []
+    for (const server of servers.filter(matches)) {
+      (live[server.name]?.connected ? on : off).push(server)
+    }
+    return [on, off]
+  }, [servers, live, q]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const configured = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
+  const available = useMemo(() => catalogue.filter((entry) => {
+    if (configured.has(entry.id)) return false
+    return !q
+      || entry.title.toLowerCase().includes(q)
+      || entry.description.toLowerCase().includes(q)
+      || entry.category.toLowerCase().includes(q)
+  }), [catalogue, configured, q])
+
+  // A search is itself a request to look through everything there is.
+  const showAll = newOpen || Boolean(q)
+  const featured = showAll ? available : available.slice(0, FEATURED)
+
+  // Connectors reconcile at the start of a turn, so before one has happened
+  // every switched-on connector is truthfully idle. Saying "not running" there
+  // reads as six failures when the real answer is that nothing has asked yet.
+  const started = health?.mcp_reconciled !== false
+
+  const why = (server) => {
     const state = live[server.name] || {}
-    if (tab === 'connected') return Boolean(state.connected)
-    if (tab === 'idle') return !state.connected
-    return true
-  }), [servers, live, tab])
+    if (state.error) return 'failed to start'
+    if (server.oauth && server.authorized === false) return 'needs sign-in'
+    if (!state.enabled) return 'off'
+    return started ? 'not running' : 'not started yet'
+  }
+
+  const startAll = useCallback(async () => {
+    setStarting(true)
+    try {
+      const result = await api.mcpReconcile()
+      const failed = Object.keys(result.errors || {}).length
+      toast(
+        `${result.connected} connected · ${result.tools} tools`
+          + (failed ? ` · ${failed} could not start` : ''),
+        failed ? 'amber' : 'ok',
+      )
+      await refresh()
+      refreshHealth()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setStarting(false)
+    }
+  }, [refresh, refreshHealth, toast])
 
   return (
-    <div className="view" ref={rootRef}>
-      <div className="view-inner view-inner--wide">
-        <header className="vheader" data-enter>
-          <div>
-            <h1>Connectors</h1>
-            <div className="vheader-sub">
-              External apps over MCP. Their tools join the same flat namespace as the builtins, so
-              the agent cannot tell them apart — but you can.
-            </div>
-          </div>
-          <div className="vheader-actions">
-            <button type="button" className="btn btn--primary btn--small" onClick={() => setOverlay('directory:connectors')}>
-              <Icon name="plus" size={14} /> Add
-            </button>
-            <button type="button" className="btn btn--ghost btn--small" onClick={refresh}>
-              <Icon name="refresh" size={14} /> Refresh
-            </button>
-          </div>
-        </header>
+    <>
+      {auths.length > 0 && (
+        <div className="auth-banner" data-enter>
+          <span>{auths.length} sign-in{auths.length > 1 ? 's' : ''} waiting:</span>
+          {auths.map((a) => (
+            <span key={a.server} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <button type="button" className="btn btn--small" onClick={() => window.open(a.authorization_url, '_blank', 'noopener')}>
+                <Icon name="link" size={13} /> open {a.server}
+              </button>
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                title="Copy the sign-in link"
+                onClick={async () => toast(
+                  await copyText(a.authorization_url) ? 'Sign-in link copied' : 'Could not copy — open it instead',
+                  'info',
+                )}
+              >
+                <Icon name="copy" size={13} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
-        {auths.length > 0 && (
-          <div className="auth-banner" data-enter>
-            <span className="led led--amber led--pulse" />
-            <span>{auths.length} sign-in{auths.length > 1 ? 's' : ''} waiting:</span>
-            {auths.map((a) => (
-              <span key={a.server} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                <button type="button" className="btn btn--small" onClick={() => window.open(a.authorization_url, '_blank', 'noopener')}>
-                  <Icon name="link" size={13} /> open {a.server}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--small"
-                  title="Copy the sign-in link"
-                  onClick={async () => toast(
-                    await copyText(a.authorization_url) ? 'Sign-in link copied' : 'Could not copy — open it instead',
-                    'info',
-                  )}
-                >
-                  <Icon name="copy" size={13} />
-                </button>
-              </span>
+      {help && (
+        <div className="msg-note msg-note--guard" style={{ marginBottom: 16, whiteSpace: 'pre-wrap' }} data-enter>
+          <Icon name="key" size={15} />
+          <span>{help.text}</span>
+          <button type="button" className="icon-btn" style={{ marginLeft: 'auto' }} onClick={() => setHelp(null)} aria-label="Dismiss">
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
+
+      {running.length > 0 && (
+        <section data-enter>
+          <div className="cap-section-head">
+            <span>Connected</span>
+            <span>{running.reduce((n, s) => n + (live[s.name]?.tools ?? 0), 0)} tools</span>
+          </div>
+          <div className="card">
+            <table className="conn-table">
+              <tbody>
+                {running.map((server) => (
+                  <ConnectorRow
+                    key={server.name}
+                    server={server}
+                    cap={(caps.connectors ?? []).find((c) => c.name === server.name)}
+                    live={live[server.name]}
+                    busy={busy[server.name]}
+                    expanded={expanded === server.name}
+                    onExpand={() => setExpanded(expanded === server.name ? null : server.name)}
+                    onAct={(action) => act(server, action)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {waiting.length > 0 && (
+        <section data-enter className="cap-cat">
+          <div className="cap-section-head">
+            <span>{started ? 'Added, not running' : 'Added, not started yet'}</span>
+            {!started && (
+              <button
+                type="button"
+                className="btn btn--small btn--primary"
+                disabled={starting}
+                onClick={startAll}
+              >
+                {starting ? 'Starting…' : 'Start them'}
+              </button>
+            )}
+            <span>{waiting.length}</span>
+          </div>
+          <p className="cap-note">
+            {started
+              ? 'Configured on this machine but contributing nothing to the agent right now. Each'
+                + ' says what it is waiting for; removing one forgets its credentials too.'
+              : 'Connectors start with the first turn of a conversation, and none has run yet in'
+                + ' this server. Start them now to see what actually comes up.'}
+          </p>
+          <div className="card">
+            <table className="conn-table">
+              <tbody>
+                {waiting.map((server) => (
+                  <ConnectorRow
+                    key={server.name}
+                    server={server}
+                    cap={(caps.connectors ?? []).find((c) => c.name === server.name)}
+                    live={live[server.name]}
+                    busy={busy[server.name]}
+                    expanded={expanded === server.name}
+                    onExpand={() => setExpanded(expanded === server.name ? null : server.name)}
+                    onAct={(action) => act(server, action)}
+                    reason={why(server)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {available.length > 0 && (
+        <section data-enter className="cap-cat">
+          <div className="cap-section-head">
+            <span>{showAll ? 'Everything available' : 'Featured'}</span>
+            <span>{available.length}</span>
+          </div>
+          <div className="cat-grid">
+            {featured.map((entry) => (
+              <CatalogueRow
+                key={entry.id}
+                entry={entry}
+                busy={busy[entry.id] === 'add'}
+                onAdd={() => addFromCatalogue(entry)}
+              />
             ))}
           </div>
-        )}
-
-        {help && (
-          <div className="msg-note msg-note--guard" style={{ marginBottom: 16, whiteSpace: 'pre-wrap' }} data-enter>
-            <Icon name="key" size={15} />
-            <span>{help.text}</span>
-            <button type="button" className="icon-btn" style={{ marginLeft: 'auto' }} onClick={() => setHelp(null)} aria-label="Dismiss">
-              <Icon name="x" size={14} />
+          {!showAll && available.length > FEATURED && (
+            <button type="button" className="cat-more" onClick={() => setNewOpen(true)}>
+              See more
             </button>
-          </div>
-        )}
+          )}
+        </section>
+      )}
 
-        {popular.length > 0 && (
-          <section className="conn-popular" data-enter>
-            <div className="conn-section-title">Popular</div>
-            <div className="conn-popular-grid">
-              {popular.map((entry) => (
-                <div className="conn-pop" key={entry.id}>
-                  <ServiceIcon name={entry.id} size={30} />
-                  <span className="conn-pop-name">{entry.title}</span>
-                  <button
-                    type="button"
-                    className="btn btn--small"
-                    disabled={busy[entry.id] === 'add'}
-                    onClick={() => addFromCatalogue(entry)}
-                  >
-                    {busy[entry.id] === 'add' ? 'Adding…' : 'Add'}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+      {available.length === 0 && newOpen && (
+        <section data-enter className="cap-cat">
+          <div className="cap-section-head"><span>Everything available</span><span>0</span></div>
+          <p className="cap-note">
+            {q
+              ? 'No connector in the catalogue matches that.'
+              : 'Every connector in the bundled catalogue is already added. Anything else is a'
+                + ' server of your own: add it to ~/.psok/config/mcp.yaml and it appears here.'}
+          </p>
+        </section>
+      )}
 
-        <div className="conn-tabs" data-enter>
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`conn-tab${tab === item.id ? ' active' : ''}`}
-              onClick={() => setTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-          <span className="conn-count">{rows.length} of {servers.length}</span>
-        </div>
+      {servers.length === 0 && available.length === 0 && !newOpen && (
+        <div className="dir-empty" data-enter>No connector matches that.</div>
+      )}
 
-        <div className="card" data-enter>
-          <table className="conn-table">
-            <thead>
-              <tr><th>Connector</th><th>Type</th><th>Status</th><th /></tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
-                <tr><td colSpan={4} className="conn-empty">
-                  {servers.length ? 'Nothing in this tab.' : 'Nothing configured yet — Add one above.'}
-                </td></tr>
-              )}
-              {rows.map((server) => (
-                <ConnectorRow
-                  key={server.name}
-                  server={server}
-                  cap={(caps.connectors ?? []).find((c) => c.name === server.name)}
-                  live={live[server.name]}
-                  busy={busy[server.name]}
-                  expanded={expanded === server.name}
-                  onExpand={() => setExpanded(expanded === server.name ? null : server.name)}
-                  onAct={(action) => act(server, action)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <p className="conn-foot" data-enter>
-          Adding a connector never starts anything on its own. Connecting one starts its process
-          now and reports what came back, and every server asks for trust once on first use.
-        </p>
-      </div>
-    </div>
+      <p className="conn-foot" data-enter>
+        Adding a connector never starts anything on its own. Connecting one starts its process
+        now and reports what came back, and every server asks for trust once on first use.
+      </p>
+    </>
   )
 }

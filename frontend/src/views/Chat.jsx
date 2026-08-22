@@ -3,7 +3,7 @@ import Icon from '../components/Icon.jsx'
 import Markdown from '../components/Markdown.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
 import ConfirmModal from '../components/ConfirmModal.jsx'
-import PlusMenu, { connectorState } from '../components/PlusMenu.jsx'
+import PlusMenu from '../components/PlusMenu.jsx'
 import ModelMenu from '../components/ModelMenu.jsx'
 import { useApp } from '../store.jsx'
 import { api, copyText } from '../api.js'
@@ -56,12 +56,19 @@ function buildRendered(items) {
 
 function historyToItems(rows) {
   return rows.map((m) => {
-    if (m.role === 'user') return { id: nextId(), kind: 'user', text: m.content }
+    // `rowId` is the database id, which is what a pin is written against.
+    // Streamed items have none until the transcript is read back, which is why
+    // pinning is offered on stored messages and not on one still arriving.
+    if (m.role === 'user') {
+      return { id: nextId(), rowId: m.id, kind: 'user', text: m.content, pinned: Boolean(m.pinned) }
+    }
     if (m.role === 'assistant') {
       return {
         id: nextId(),
+        rowId: m.id,
         kind: 'assistant',
         text: m.content ?? '',
+        pinned: Boolean(m.pinned),
         callsRaw: Array.isArray(m.tool_calls) ? m.tool_calls : [],
       }
     }
@@ -99,24 +106,67 @@ function CopyButton({ text, label = 'Copy' }) {
 }
 
 /* The chain of thought is not the answer, and rendering it as one would be a
-   lie about what the model committed to. It gets its own collapsed block. */
-function Reasoning({ text, live }) {
-  const [open, setOpen] = useState(false)
+   lie about what the model committed to.
+
+   It streams in its own panel while it is happening, because watching it arrive
+   is the whole value of having it -- a collapsed block that says "thinking" for
+   forty seconds tells you nothing about whether the model is on the right track
+   -- and it folds itself away the moment the answer starts, where it stays one
+   click from being read again. Opening or closing it by hand wins from then on:
+   someone reading the thinking does not want it shutting on them. */
+function Reasoning({ text, live, ms }) {
+  const [manual, setManual] = useState(null)
+  const bodyRef = useRef(null)
+  const open = manual === null ? Boolean(live) : manual
+
+  useEffect(() => {
+    const el = bodyRef.current
+    if (live && el) el.scrollTop = el.scrollHeight
+  }, [text, live, open])
+
   if (!text) return null
+
+  const label = live
+    ? 'Thinking'
+    : ms
+      ? `Thought for ${Math.max(1, Math.round(ms / 1000))}s`
+      : 'Thought for a moment'
+
   return (
-    <div className={`reasoning${open ? ' open' : ''}`}>
-      <button type="button" className="reasoning-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <Icon name="spark" size={12} />
-        <span>{live ? 'thinking' : 'thought for a moment'}</span>
-        {live && <span className="led led--amber led--pulse" />}
-        <Icon name="chevron" size={12} style={{ transform: open ? 'rotate(90deg)' : 'none' }} />
+    <div className={`reasoning${open ? ' open' : ''}${live ? ' live' : ''}`}>
+      <button
+        type="button"
+        className="reasoning-head"
+        onClick={() => setManual(!open)}
+        aria-expanded={open}
+      >
+        <Icon name="chevron" size={11} className="reasoning-caret" />
+        <span>{label}</span>
       </button>
-      {open && <div className="reasoning-body">{text}</div>}
+      {open && (
+        <div className={`reasoning-body${live ? ' is-live' : ''}`} ref={bodyRef}>{text}</div>
+      )}
     </div>
   )
 }
 
-function Msg({ item }) {
+function PinButton({ item, onPin }) {
+  if (!item.rowId) return null
+  return (
+    <button
+      type="button"
+      className={`msg-pin${item.pinned ? ' is-pinned' : ''}`}
+      title={item.pinned ? 'Unpin' : 'Pin this message'}
+      aria-label={item.pinned ? `Unpin ${item.kind} message` : `Pin ${item.kind} message`}
+      aria-pressed={item.pinned}
+      onClick={() => onPin(item, !item.pinned)}
+    >
+      <Icon name="pin" size={13} weight={item.pinned ? 'fill' : 'regular'} />
+    </button>
+  )
+}
+
+function Msg({ item, onPin }) {
   const role = item.kind
 
   if (role === 'note') {
@@ -125,7 +175,7 @@ function Msg({ item }) {
       : item.tone === 'error' ? 'msg-note--error' : 'msg-note--warning'
     return (
       <div className={`msg-note ${cls}`}>
-        <span className={`led led--${item.tone === 'guard' ? 'amber' : item.tone === 'error' ? 'bad' : 'info'}`} />
+        <Icon name={item.tone === 'error' ? 'x' : 'info'} size={14} />
         <span>{item.text}</span>
       </div>
     )
@@ -138,7 +188,7 @@ function Msg({ item }) {
       </div>
     )
   }
-  if (role === 'reasoning') return <Reasoning text={item.text} />
+  if (role === 'reasoning') return <Reasoning text={item.text} ms={item.ms} />
   if (role === 'tool') {
     return (
       <ToolCallCard
@@ -160,10 +210,11 @@ function Msg({ item }) {
       return <>{item.toolCalls.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}</>
     }
     return (
-      <div className="msg msg-assistant">
+      <div className={`msg msg-assistant${item.pinned ? ' is-pinned' : ''}`}>
         <div className="msg-role">
-          <span className="led led--faint" /> psok
+          psok
           <CopyButton text={item.text} label="Copy this answer" />
+          <PinButton item={item} onPin={onPin} />
         </div>
         {item.text && <div className="msg-body"><Markdown text={item.text} /></div>}
         {item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
@@ -171,8 +222,12 @@ function Msg({ item }) {
     )
   }
   return (
-    <div className="msg msg-user">
-      <div className="msg-role">you<CopyButton text={item.text} label="Copy" /></div>
+    <div className={`msg msg-user${item.pinned ? ' is-pinned' : ''}`}>
+      <div className="msg-role">
+        you
+        <CopyButton text={item.text} label="Copy" />
+        <PinButton item={item} onPin={onPin} />
+      </div>
       <div className="msg-body msg-body--plain">{item.text}</div>
     </div>
   )
@@ -182,7 +237,7 @@ export default function Chat() {
   const {
     health, refreshHealth, setView, toast, registerChat,
     conversations, refreshConvs, activeId, setActiveId, setRenaming,
-    caps, refreshCaps, setCapEnabled, busyCap,
+    refreshCaps,
     workspace, setWorkspace,
   } = useApp()
 
@@ -206,13 +261,20 @@ export default function Chat() {
   const [plan, setPlan] = useState(false)
   const [atBottom, setAtBottom] = useState(true)
   const [lastSent, setLastSent] = useState('')
+  const [pinsOpen, setPinsOpen] = useState(true)
 
   const abortRef = useRef(null)
   const scrollRef = useRef(null)
   const textareaRef = useRef(null)
   const fileRef = useRef(null)
   const acTimerRef = useRef(null)
-  const liveRef = useRef({ buffer: '', reasoning: '', tool: null })
+  const liveRef = useRef({ buffer: '', reasoning: '', reasoningStart: 0, tool: null })
+  // One counter per turn. The stream outlives the answer -- memory extraction
+  // runs after `done` -- so a turn that has already been superseded must not be
+  // allowed to reset the composer when its stream finally closes.
+  const turnTokenRef = useRef(0)
+  const runningRef = useRef(null)
+  const settledRef = useRef(true)
 
   const providers = health?.providers ?? []
   const defaults = health?.provider_defaults ?? {}
@@ -241,7 +303,15 @@ export default function Chat() {
 
   // A reload lands here with a conversation id from the last session, so the
   // transcript has to be fetched before anything is typed.
-  useEffect(() => { loadMessages(activeId) }, [activeId, loadMessages])
+  //
+  // Never underneath a running turn, though. Sending the first message of a new
+  // conversation sets the id, which fires this, which used to race the stream
+  // and replace the message that had just been typed with whatever the database
+  // had a moment ago -- the "sometimes the prompt does nothing" case.
+  useEffect(() => {
+    if (runningRef.current) return
+    loadMessages(activeId)
+  }, [activeId, loadMessages])
 
   const selectConversation = useCallback((cid) => {
     if (turnState !== 'idle') { toast('Finish or stop this turn first', 'amber'); return }
@@ -257,10 +327,12 @@ export default function Chat() {
   }, [turnState, setActiveId, toast])
 
   const pushAssistant = useCallback(() => {
-    const { buffer, reasoning } = liveRef.current
+    const { buffer, reasoning, reasoningStart } = liveRef.current
     if (reasoning) {
-      setItems((prev) => [...prev, { id: nextId(), kind: 'reasoning', text: reasoning }])
+      const ms = reasoningStart ? Date.now() - reasoningStart : 0
+      setItems((prev) => [...prev, { id: nextId(), kind: 'reasoning', text: reasoning, ms }])
       setReasoning('')
+      liveRef.current.reasoningStart = 0
     }
     if (buffer) {
       setItems((prev) => [...prev, { id: nextId(), kind: 'assistant', text: buffer, callsRaw: [] }])
@@ -273,21 +345,42 @@ export default function Chat() {
     setItems((prev) => [...prev, { id: nextId(), kind: 'note', tone, text: text ?? '' }])
   }, [pushAssistant])
 
-  const finish = useCallback(async (cid) => {
+  /* The stream is closed. Everything it said is already on screen.
+
+     This deliberately does not refetch the transcript. It used to, and the
+     refetch is what made every finished turn flicker and then lose its own
+     thinking: reasoning, warnings and the memory note are stream-only events
+     that were never written to the database, so replacing the local transcript
+     with the stored one silently deleted them a second after they appeared. */
+  const finish = useCallback(() => {
+    settledRef.current = true
+    pushAssistant()
     setTurnState('idle')
     setStopping(false)
-    setBuffer('')
-    setReasoning('')
     setTool(null)
     setPending([])
     setElsewhere([])
-    await loadMessages(cid)
     refreshConvs()
     // A turn is when connectors reconcile, so the tool count and any connector
     // failure only become knowable once one has run.
     refreshHealth()
     refreshCaps()
-  }, [loadMessages, refreshConvs, refreshHealth, refreshCaps, setBuffer, setReasoning, setTool])
+  }, [pushAssistant, refreshConvs, refreshHealth, refreshCaps, setTool])
+
+  /* `done`, `guard` and `error` end the turn as far as anyone typing is
+     concerned, even though the stream stays open behind them: memory extraction
+     is a second model call that runs after `done`. Waiting for the stream to
+     close before releasing the composer is what put a second "thinking" line
+     under a finished answer and left the field disabled for seconds after the
+     reply had arrived. */
+  const settle = useCallback(() => {
+    settledRef.current = true
+    pushAssistant()
+    setTool(null)
+    setTurnState('idle')
+    setStopping(false)
+    refreshConvs()
+  }, [pushAssistant, setTool, refreshConvs])
 
   const onEvent = useCallback((evt) => {
     switch (evt.type) {
@@ -296,6 +389,7 @@ export default function Chat() {
         setBuffer(liveRef.current.buffer)
         break
       case 'reasoning_delta':
+        if (!liveRef.current.reasoningStart) liveRef.current.reasoningStart = Date.now()
         liveRef.current.reasoning += evt.text ?? ''
         setReasoning(liveRef.current.reasoning)
         break
@@ -341,15 +435,20 @@ export default function Chat() {
         setItems((prev) => [...prev, { id: nextId(), kind: 'memory', text: parts.join(' — ') }])
         break
       }
-      case 'done': pushAssistant(); break
-      case 'guard': pushNote('guard', evt.reason); break
-      case 'error': pushNote('error', evt.message); break
+      case 'done': settle(); break
+      case 'guard': pushNote('guard', evt.reason); settle(); break
+      case 'error': pushNote('error', evt.message); settle(); break
+      // Not terminal: the loop is continuing a turn that came back empty or
+      // truncated, and the composer stays disabled while it does.
       case 'warning': pushNote('warning', evt.message); break
       default: break
     }
-  }, [pushAssistant, pushNote, setBuffer, setReasoning, setTool])
+  }, [pushAssistant, pushNote, settle, setBuffer, setReasoning, setTool])
 
   const openTurn = useCallback(async (cid, message) => {
+    const token = ++turnTokenRef.current
+    runningRef.current = cid
+    settledRef.current = false
     setItems((prev) => [...prev, { id: nextId(), kind: 'user', text: message }])
     setTurnState('running')
     setAtBottom(true)
@@ -364,10 +463,15 @@ export default function Chat() {
         signal: controller.signal,
       })
     } catch (err) {
-      if (err.name === 'AbortError') pushNote('warning', 'Stopped.')
+      // An abort after the answer landed is this interface letting go of a
+      // stream it no longer needs, not a turn someone interrupted.
+      if (err.name === 'AbortError') { if (!settledRef.current) pushNote('warning', 'Stopped.') }
       else pushNote('error', err.message)
     } finally {
-      finish(cid)
+      if (turnTokenRef.current === token) {
+        runningRef.current = null
+        finish()
+      }
     }
   }, [workspace, onEvent, finish, pushNote])
 
@@ -414,6 +518,10 @@ export default function Chat() {
         setActiveId(id)
         refreshConvs()
       }
+      // A finished turn's stream can still be open on the memory frame it emits
+      // after `done`. Let go of it before opening the next one on the same
+      // conversation, so two readers are never live at once.
+      abortRef.current?.abort()
       await openTurn(cid, message)
     } catch (err) {
       toast(err.message, 'bad')
@@ -465,6 +573,39 @@ export default function Chat() {
     if (seed) setInput((v) => (v.endsWith(seed) ? v : v + seed))
   }, [])
 
+  /* A pin is a bookmark in a transcript that scrolls. It changes nothing about
+     the turn — not what is sent, not what is recalled — which is why it is
+     written straight through rather than folded into the turn's state. */
+  const onPin = useCallback(async (item, pinned) => {
+    if (!activeId || !item.rowId) return
+    // Optimistic: the write is one boolean and the row is on screen, so waiting
+    // for the round trip only makes the button feel broken.
+    setItems((prev) => prev.map((i) => (i.rowId === item.rowId ? { ...i, pinned } : i)))
+    try {
+      await api.pinMessage(activeId, item.rowId, pinned)
+    } catch (err) {
+      setItems((prev) => prev.map((i) => (i.rowId === item.rowId ? { ...i, pinned: !pinned } : i)))
+      toast(err.message, 'bad')
+    }
+  }, [activeId, toast])
+
+  const jumpToItem = useCallback((id) => {
+    const el = scrollRef.current?.querySelector(`[data-item="${id}"]`)
+    if (!el) return
+    setAtBottom(false)
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('is-flash')
+    setTimeout(() => el.classList.remove('is-flash'), 1200)
+  }, [])
+
+  // `⌘P` acts on the newest answer, which is what "pin that" almost always
+  // means the moment after reading one.
+  const togglePin = useCallback(() => {
+    const last = [...items].reverse().find((i) => i.rowId && (i.kind === 'assistant' || i.kind === 'user'))
+    if (!last) { toast('Nothing to pin yet', 'info'); return }
+    onPin(last, !last.pinned)
+    toast(last.pinned ? 'Unpinned' : 'Pinned', 'info')
+  }, [items, onPin, toast])
   // What the keyboard layer and the palette drive. Registered as callbacks so
   // neither needs a copy of the turn's state to act on it.
   useEffect(() => {
@@ -474,12 +615,13 @@ export default function Chat() {
       selectConversation,
       focusComposer,
       toggleMemory,
+      togglePin,
       openPlus: () => setPlusOpen(true),
       attach: () => fileRef.current?.click(),
       beginRename: (cid) => setRenaming(cid),
       turnRunning: turnState === 'running',
     })
-  }, [registerChat, stop, startFresh, selectConversation, focusComposer, toggleMemory, turnState, setRenaming])
+  }, [registerChat, stop, startFresh, selectConversation, focusComposer, toggleMemory, togglePin, turnState, setRenaming])
 
   // Prompts arrive on the stream; this fetch recovers anything a reload left
   // suspended, since the turn survives the page and the stream does not.
@@ -528,8 +670,9 @@ export default function Chat() {
   const onDecide = useCallback((id) => setPending((p) => p.filter((x) => x.id !== id)), [])
 
   const rendered = useMemo(() => buildRendered(items), [items])
-  const streamingAssistant = turnState === 'running' && !liveTool && (liveBuffer || liveReasoning)
-  const isEmpty = rendered.length === 0 && !streamingAssistant && turnState === 'idle'
+  const pins = useMemo(() => rendered.filter((i) => i.pinned && i.text), [rendered])
+
+  const isEmpty = rendered.length === 0 && turnState === 'idle'
   const connectorErrors = Object.entries(health?.connector_errors ?? {})
   const shownModel = (active?.model ?? draftModel ?? '').split('/').pop() || 'no model'
   // Follow the stream, but never yank the view away from someone reading back.
@@ -543,7 +686,7 @@ export default function Chat() {
     const el = scrollRef.current
     if (!el || !atBottom) return
     el.scrollTo({ top: el.scrollHeight, behavior: turnState === 'running' ? 'auto' : 'smooth' })
-  }, [rendered.length, turnState, liveTool, liveBuffer, atBottom])
+  }, [rendered.length, turnState, liveTool, liveBuffer, liveReasoning, atBottom])
 
   const composer = (
     <div className={`composer-wrap${isEmpty ? ' composer-wrap--hero' : ''}`}>
@@ -712,43 +855,16 @@ export default function Chat() {
         </div>
       </div>
 
-      {caps.connectors.length > 0 && (
-        <div className="armed">
-          <span className="armed-label">reach</span>
-          {caps.connectors.map((cap) => {
-            const state = connectorState(cap, busyCap === `connector:${cap.name}`)
-            return (
-              <button
-                key={cap.name}
-                type="button"
-                className={`armed-chip${state.tone === 'live' ? ' is-live' : ''}${state.tone === 'error' ? ' is-error' : ''}${state.tone === 'busy' ? ' is-busy' : ''}`}
-                onClick={() => setCapEnabled(cap, !cap.enabled)}
-                disabled={busyCap === `connector:${cap.name}`}
-                title={
-                  state.detail
-                    ? `${cap.name}: ${state.detail}`
-                    : state.tone === 'live'
-                      ? `${cap.name} is running with ${cap.live.tools} tools — click to stop it`
-                      : `${cap.name} is ${state.label} — click to start it`
-                }
-              >
-                <span className={`led led--${state.dot}${state.tone === 'busy' ? ' led--pulse' : ''}`} />
-                <span>{cap.name}</span>
-                {state.tone === 'live' && <span className="armed-count">{cap.live.tools}</span>}
-                {state.tone === 'error' && <span className="armed-count">failed</span>}
-                {state.tone === 'off' && <span className="armed-count">off</span>}
-              </button>
-            )
-          })}
+      {/* The connector strip that used to sit here reported the same thing the
+          + menu does, in a row of coloured lamps under the field you type in.
+          Two readings of one fact, and the louder one was below the composer. */}
+
+      {isEmpty && (
+        <div className="composer-hint">
+          <span><kbd className="kbd">/</kbd> engages a skill</span>
+          <span><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd> for everything else</span>
         </div>
       )}
-
-      <div className="composer-hint">
-        <span>enter sends</span>
-        <span>shift + enter for a new line</span>
-        <span>/name engages a skill</span>
-        <span><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd> for everything else</span>
-      </div>
     </div>
   )
 
@@ -814,27 +930,72 @@ export default function Chat() {
           </div>
         ) : (
           <>
+            {pins.length > 0 && (
+              <div className={`pin-strip${pinsOpen ? ' open' : ''}`}>
+                <button
+                  type="button"
+                  className="pin-strip-head"
+                  onClick={() => setPinsOpen((o) => !o)}
+                  aria-expanded={pinsOpen}
+                >
+                  <Icon name="pin" size={12} weight="fill" />
+                  <span>{pins.length} pinned</span>
+                  <Icon name="chevron" size={11} className="pin-strip-caret" />
+                </button>
+                {pinsOpen && (
+                  <div className="pin-strip-list">
+                    {pins.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="pin-chip"
+                        onClick={() => jumpToItem(item.id)}
+                        title={item.text}
+                      >
+                        <span className="pin-chip-who">{item.kind === 'user' ? 'you' : 'psok'}</span>
+                        <span className="pin-chip-text">{item.text.replace(/\s+/g, ' ').slice(0, 90)}</span>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          className="pin-chip-off"
+                          aria-label="Unpin"
+                          onClick={(e) => { e.stopPropagation(); onPin(item, false) }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onPin(item, false) } }}
+                        >
+                          <Icon name="x" size={11} />
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
               <div className="chat-stream">
-                {rendered.map((item) => <Msg key={item.id} item={item} />)}
-                {streamingAssistant && (
+                {rendered.map((item) => (
+                  <div key={item.id} data-item={item.id} className="stream-item">
+                    <Msg item={item} onPin={onPin} />
+                  </div>
+                ))}
+                {turnState === 'running' && !liveTool && (
                   <div className="msg msg-assistant">
-                    <div className="msg-role"><span className="led led--faint led--pulse" /> psok</div>
-                    {liveReasoning && <Reasoning text={liveReasoning} live />}
-                    {liveBuffer && (
+                    <div className="msg-role">psok</div>
+                    {liveReasoning && <Reasoning text={liveReasoning} live={!liveBuffer} />}
+                    {liveBuffer ? (
                       <div className="msg-body">
                         <Markdown text={liveBuffer} />
                         <span className="tele-cursor" />
+                      </div>
+                    ) : !liveReasoning && (
+                      // A model that does not expose its reasoning gives the
+                      // interface nothing to show but the fact that it is going.
+                      <div className="thinking">
+                        Thinking<span className="thinking-dots"><i /><i /><i /></span>
                       </div>
                     )}
                   </div>
                 )}
                 {turnState === 'running' && liveTool && <ToolCallCard call={liveTool} running />}
-                {turnState === 'running' && !liveTool && !streamingAssistant && (
-                  <div className="msg-note msg-note--guard">
-                    <span className="led led--amber led--pulse" /> thinking
-                  </div>
-                )}
               </div>
             </div>
             {!atBottom && (

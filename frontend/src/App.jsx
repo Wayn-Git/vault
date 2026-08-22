@@ -3,15 +3,14 @@ import Icon from './components/Icon.jsx'
 import ErrorBoundary from './components/ErrorBoundary.jsx'
 import CommandPalette from './components/CommandPalette.jsx'
 import Shortcuts from './components/Shortcuts.jsx'
-import Directory from './components/Directory.jsx'
 import Settings from './components/Settings.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import { useApp } from './store.jsx'
 import { chord, isTyping, MOD_LABEL } from './keys.js'
 import Dashboard from './views/Dashboard.jsx'
 import Chat from './views/Chat.jsx'
-import Mcp from './views/Mcp.jsx'
-import Skills from './views/Skills.jsx'
+import Capabilities from './views/Capabilities.jsx'
+import Automations from './views/Automations.jsx'
 import Memory from './views/Memory.jsx'
 import Logs from './views/Logs.jsx'
 import Tasks from './views/Tasks.jsx'
@@ -19,15 +18,15 @@ import Tasks from './views/Tasks.jsx'
 const VIEWS = {
   chat: Chat,
   tasks: Tasks,
-  skills: Skills,
-  mcp: Mcp,
+  capabilities: Capabilities,
+  automations: Automations,
   memory: Memory,
   logs: Logs,
   dash: Dashboard,
 }
 
 // What ⌘1…6 reaches, in the order the rail lists them.
-const ORDER = ['chat', 'tasks', 'skills', 'mcp', 'memory', 'logs']
+const ORDER = ['chat', 'tasks', 'capabilities', 'automations', 'memory', 'logs']
 
 /* Every binding in one listener.
 
@@ -73,6 +72,7 @@ function useGlobalKeys() {
       if (combo === 'mod+arrowup') { e.preventDefault(); cycleConversation(-1); return }
       if (combo === 'mod+arrowdown') { e.preventDefault(); cycleConversation(1); return }
       if (combo === 'mod+m') { e.preventDefault(); chat.toggleMemory?.(); return }
+      if (combo === 'mod+p') { e.preventDefault(); setView('chat'); chat.togglePin?.(); return }
       if (combo === 'f2' && activeId) { e.preventDefault(); setView('chat'); chat.beginRename?.(activeId); return }
 
       const digit = /^mod\+([1-6])$/.exec(combo)
@@ -117,7 +117,6 @@ function StageTop() {
             onClick={() => setView('dash')}
             title={healthError || 'A connector failed to start'}
           >
-            <span className={`led led--${healthError ? 'bad' : 'amber'} led--pulse`} />
             {healthError ? 'API offline' : 'degraded'}
           </button>
         )}
@@ -159,7 +158,6 @@ function Toasts() {
     <div className="toast-wrap">
       {toasts.map((t) => (
         <div key={t.id} className={`toast toast--${t.tone}`}>
-          <span className={`led led--${t.tone === 'bad' ? 'bad' : t.tone === 'ok' ? 'ok' : 'amber'}`} />
           <span>{t.message}</span>
         </div>
       ))}
@@ -194,7 +192,6 @@ export default function App() {
       </div>
       <CommandPalette />
       <Shortcuts />
-      <Directory />
       <Settings />
       <Toasts />
     </div>

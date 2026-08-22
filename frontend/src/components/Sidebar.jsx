@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useApp } from '../store.jsx'
 import { fmtDate } from '../api.js'
@@ -12,16 +12,88 @@ import { MOD_LABEL } from '../keys.js'
 
 const PLACES = [
   { id: 'tasks', label: 'Tasks', icon: 'check' },
-  { id: 'skills', label: 'Skills', icon: 'book' },
-  { id: 'mcp', label: 'Connectors', icon: 'plug' },
+  // Skills and connectors are one place: they are the same kind of thing, and
+  // splitting them meant a third surface existed to browse both.
+  { id: 'capabilities', label: 'Skills & connectors', icon: 'grid' },
+  { id: 'automations', label: 'Automations', icon: 'clock', beta: true },
   { id: 'memory', label: 'Memory', icon: 'spark' },
   { id: 'logs', label: 'Activity', icon: 'logs' },
 ]
+
+/* One row, and the two things you can do to it that are not opening it.
+
+   Delete is behind a second click rather than a modal: a modal for every
+   discarded conversation is friction on the common case, and an undo this
+   interface cannot honour -- the rows are gone -- would be a lie. */
+function ConvRow({ conv, active, onOpen, onRename, onDelete }) {
+  const [menu, setMenu] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!menu) return undefined
+    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setMenu(false) }
+    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setMenu(false) } }
+    document.addEventListener('mousedown', away)
+    document.addEventListener('keydown', key, true)
+    return () => {
+      document.removeEventListener('mousedown', away)
+      document.removeEventListener('keydown', key, true)
+    }
+  }, [menu])
+
+  useEffect(() => { if (!menu) setConfirming(false) }, [menu])
+
+  return (
+    <div className={`rail-conv${active ? ' active' : ''}${menu ? ' menu-open' : ''}`} ref={ref}>
+      <button
+        type="button"
+        className="rail-conv-open"
+        onClick={onOpen}
+        onDoubleClick={onRename}
+        title={`${conv.provider} · ${conv.model}`}
+      >
+        <span className="rail-conv-title">{conv.title || 'untitled'}</span>
+      </button>
+      <span className="rail-conv-when">{fmtDate(conv.updated_at)}</span>
+      <button
+        type="button"
+        className="rail-conv-more"
+        onClick={() => setMenu((m) => !m)}
+        title="Rename or delete"
+        aria-label={`Actions for ${conv.title || 'conversation'}`}
+        aria-expanded={menu}
+      >
+        <Icon name="dots" size={14} />
+      </button>
+      {menu && (
+        <div className="rail-conv-menu" role="menu">
+          <button type="button" onClick={() => { setMenu(false); onRename() }}>
+            <Icon name="edit" size={13} /> Rename
+            <kbd className="kbd">F2</kbd>
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => {
+              if (!confirming) { setConfirming(true); return }
+              setMenu(false)
+              onDelete()
+            }}
+          >
+            <Icon name="trash" size={13} /> {confirming ? 'Click again to delete' : 'Delete'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Sidebar() {
   const {
     view, setView, conversations, activeId, chat, health, healthError,
     setOverlay, sidebar, setSidebar, renaming, setRenaming, renameConversation,
+    deleteConversation,
   } = useApp()
   const [filter, setFilter] = useState('')
   const [searching, setSearching] = useState(false)
@@ -90,11 +162,9 @@ export default function Sidebar() {
             onClick={() => setView(place.id)}
           >
             <Icon name={place.icon} size={15} /> {place.label}
+            {place.beta && <span className="beta">beta</span>}
           </button>
         ))}
-        <button type="button" className="rail-place" onClick={() => setOverlay('settings')}>
-          <Icon name="sliders" size={15} /> Customise
-        </button>
       </nav>
 
       <div className="rail-section">
@@ -141,28 +211,14 @@ export default function Sidebar() {
               }}
             />
           ) : (
-            <div key={c.id} className={`rail-conv${c.id === activeId && view === 'chat' ? ' active' : ''}`}>
-              <button
-                type="button"
-                className="rail-conv-open"
-                onClick={() => { setView('chat'); chat.selectConversation?.(c.id) }}
-                onDoubleClick={() => setRenaming(c.id)}
-                title={`${c.provider} · ${c.model}`}
-              >
-                <span className="rail-conv-dot" />
-                <span className="rail-conv-title">{c.title || 'untitled'}</span>
-              </button>
-              <button
-                type="button"
-                className="rail-conv-edit"
-                onClick={() => setRenaming(c.id)}
-                title="Rename — F2"
-                aria-label={`Rename ${c.title || 'conversation'}`}
-              >
-                <Icon name="edit" size={12} />
-              </button>
-              <span className="rail-conv-when">{fmtDate(c.updated_at)}</span>
-            </div>
+            <ConvRow
+              key={c.id}
+              conv={c}
+              active={c.id === activeId && view === 'chat'}
+              onOpen={() => { setView('chat'); chat.selectConversation?.(c.id) }}
+              onRename={() => setRenaming(c.id)}
+              onDelete={() => deleteConversation(c.id)}
+            />
           )
         ))}
       </div>
@@ -171,16 +227,16 @@ export default function Sidebar() {
         type="button"
         className="rail-foot"
         onClick={() => setOverlay('settings')}
-        title="Providers, capabilities, permissions"
+        title="Providers, permissions, working directory"
       >
         <span className="rail-avatar"><Icon name="cpu" size={14} /></span>
         <span className="rail-foot-text">
-          <span className="rail-foot-name">this machine</span>
+          <span className="rail-foot-name">Settings</span>
           <span className="rail-foot-sub">
             {healthError ? 'API offline' : health ? `${health.tools} tools · ${health.skills} skills` : 'connecting…'}
           </span>
         </span>
-        <span className={`led led--${healthError ? 'bad' : health?.status === 'degraded' ? 'amber' : 'ok'}`} />
+        <Icon name="sliders" size={14} />
       </button>
     </aside>
   )

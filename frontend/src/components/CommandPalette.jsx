@@ -15,8 +15,8 @@ import { connectorState } from './PlusMenu.jsx'
 const VIEWS = [
   { id: 'chat', label: 'Chat', icon: 'chat', binding: 'mod+1' },
   { id: 'tasks', label: 'Tasks and calendar', icon: 'check', binding: 'mod+2' },
-  { id: 'skills', label: 'Skills', icon: 'book', binding: 'mod+3' },
-  { id: 'mcp', label: 'Connectors', icon: 'plug', binding: 'mod+4' },
+  { id: 'capabilities', label: 'Skills and connectors', icon: 'grid', binding: 'mod+3' },
+  { id: 'automations', label: 'Automations (beta)', icon: 'clock', binding: 'mod+4' },
   { id: 'memory', label: 'Memory', icon: 'spark', binding: 'mod+5' },
   { id: 'logs', label: 'Activity', icon: 'logs', binding: 'mod+6' },
   { id: 'dash', label: 'Status', icon: 'dash' },
@@ -50,6 +50,7 @@ export default function CommandPalette() {
   const {
     overlay, setOverlay, setView, conversations, activeId, caps,
     setCapEnabled, busyCap, chat, toast, refreshHealth, refreshCaps,
+    setCapabilitiesTab,
   } = app
 
   const [query, setQuery] = useState('')
@@ -136,12 +137,12 @@ export default function CommandPalette() {
       })
     }
     out.push({
-      id: 'directory:skills',
+      id: 'skills:browse',
       group: 'Skills',
       icon: 'plus',
-      label: 'Browse and install skills',
-      hint: 'paste a link to a SKILL.md',
-      run: () => setOverlay('directory:skills'),
+      label: 'New skill, or browse and install one',
+      hint: 'write one from three fields, or paste a link to a SKILL.md',
+      run: () => { setCapabilitiesTab('skills'); setView('capabilities') },
     })
 
     out.push({
@@ -150,7 +151,7 @@ export default function CommandPalette() {
       icon: 'plus',
       label: 'Add a connector',
       hint: 'GitHub, Google Workspace, a browser, or your own server',
-      run: () => setOverlay('directory:connectors'),
+      run: () => { setCapabilitiesTab('connectors'); setView('capabilities') },
     })
 
     if (memory) {
@@ -218,7 +219,7 @@ export default function CommandPalette() {
     return out
   }, [
     caps, conversations, activeId, memory, chat, setView, setCapEnabled,
-    busyCap, setOverlay, toast, refreshHealth, refreshCaps,
+    busyCap, setOverlay, toast, refreshHealth, refreshCaps, setCapabilitiesTab,
   ])
 
   const results = useMemo(() => {
@@ -308,7 +309,9 @@ export default function CommandPalette() {
                     {command.hint && <span className="palette-hint">{command.hint}</span>}
                   </span>
                   {command.state && (
-                    <span className={`led led--${command.state === 'on' ? 'ok' : command.state === 'bad' ? 'bad' : 'faint'}`} />
+                    <span className={`state state--${command.state}`}>
+                      {command.state === 'on' ? 'on' : command.state === 'bad' ? 'failed' : 'off'}
+                    </span>
                   )}
                   {command.binding && (
                     <span className="palette-keys">
