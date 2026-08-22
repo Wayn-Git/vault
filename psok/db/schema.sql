@@ -36,9 +36,15 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_name       TEXT,
     is_error        INTEGER NOT NULL DEFAULT 0,
     token_count     INTEGER,
+    -- A message someone marked worth keeping in reach. On the message rather
+    -- than in a table of its own: a pin has no life of its own, it is one bit
+    -- about one message, and it goes when the message goes.
+    pinned          INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_pinned
+    ON messages(conversation_id, id) WHERE pinned = 1;
 
 CREATE TABLE IF NOT EXISTS documents (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +143,36 @@ CREATE TABLE IF NOT EXISTS capability_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (scope, kind, name)
 );
+
+-- BETA. Automations: a turn that runs without anyone typing.
+--
+-- Deliberately the smallest thing that is honestly a scheduled turn: a prompt,
+-- an interval, and a record of what happened. `next_run_at` is stored rather
+-- than derived so "when does this run" is one read and does not depend on the
+-- evaluator agreeing with the UI about arithmetic.
+--
+-- What this is NOT yet, and must not be claimed to be: cron expressions,
+-- triggers other than time, retries, or anything that can answer a permission
+-- prompt. An unattended turn cannot raise one, so it runs with the gate
+-- denying everything that is not already a standing approval, and records that
+-- it was blocked. See docs/architecture/automation.md before extending this.
+CREATE TABLE IF NOT EXISTS automations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    prompt        TEXT NOT NULL,
+    every_minutes INTEGER NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    provider      TEXT,           -- NULL: whatever the machine's default is
+    model         TEXT,
+    next_run_at   TEXT NOT NULL,
+    last_run_at   TEXT,
+    last_status   TEXT,           -- ok | error | blocked | running
+    last_summary  TEXT,
+    last_conversation_id TEXT,    -- the transcript it wrote; not a foreign key,
+                                  -- the record outlives a deleted conversation
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, next_run_at);
 
 -- Long-term memory: the second tier of the two-tier design (docs/research/khoj.md).
 -- Facts are superseded rather than deleted, so "what did PSOK believe last week,

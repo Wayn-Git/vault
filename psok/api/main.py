@@ -22,6 +22,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from psok.agent.director import Director
+from psok.automation import (
+    AutomationError,
+    AutomationRepository,
+    AutomationRunner,
+)
 from psok.config import load_providers, paths
 from psok.db.connection import get_connection
 from psok.db.repositories import (
@@ -65,11 +70,34 @@ _registry_lock = asyncio.Lock()
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
 
 
+async def _unattended_director(callback):
+    """A director whose tools refuse anything a person has not pre-approved.
+
+    Shares the live registry, so a scheduled turn reaches the same connected
+    MCP tools an interactive one does -- but through its own gate, so swapping
+    the callback here cannot change the rules for a turn someone is watching.
+    """
+    from psok.security.confirmation import ConfirmationService
+
+    registry, root = await _registry_for(None)
+    gated = registry.with_confirmation(ConfirmationService(callback=callback))
+    return Director(gated, workspace_root=root, stream=False)
+
+
+_runner = AutomationRunner(lambda callback: _LazyDirector(callback))
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     paths().ensure()
     get_connection()
+    # Automations run while this process is up, and only while it is up. A
+    # separate daemon would keep them running with nothing able to answer a
+    # permission prompt, which is a worse promise than "they run while PSOK is
+    # open" -- a rule that fits in a sentence and is true.
+    _runner.start()
     yield
+    await _runner.stop()
     if _mcp["manager"] is not None:
         await _mcp["manager"].shutdown()
 
@@ -85,6 +113,11 @@ app.add_middleware(
 
 # Confirmations awaiting a decision from the interface, keyed by request id.
 _pending: dict[str, dict[str, Any]] = {}
+
+# The frames after which a turn is over as far as anything outside the loop is
+# concerned. `done` is followed by the memory frame, which is a second model
+# call and not part of the turn.
+TERMINAL_EVENTS = frozenset({"done", "error", "guard"})
 
 # Turns currently streaming, keyed by conversation. The event is how "stop" gets
 # from a second request into the loop: aborting the browser's read only closes
@@ -186,6 +219,23 @@ async def _registry_for(workspace: str | None):
         return registry, root
 
 
+class _LazyDirector:
+    """Bridge for the runner, which is synchronous about how it gets a director.
+
+    `AutomationRunner` calls `director_for(callback)` and expects something with
+    `.run(...)` straight away; building a real one needs the registry, which is
+    awaited. This defers that to the first frame.
+    """
+
+    def __init__(self, callback):
+        self.callback = callback
+
+    async def run(self, conversation_id: str, message: str):
+        director = await _unattended_director(self.callback)
+        async for event in director.run(conversation_id, message):
+            yield event
+
+
 async def _director(workspace: str | None = None) -> Director:
     registry, root = await _registry_for(workspace)
     return Director(registry, workspace_root=root, stream=True)
@@ -213,6 +263,11 @@ def health() -> dict[str, Any]:
         },
         "tools": len(registry.list()),
         "mcp_tools": len([t for t in registry.list() if t.server_name]),
+        # Whether connectors have been started at all in this process. Without
+        # it "not running" and "nothing has asked it to run yet" are the same
+        # string, and on a server that has not had a turn they all read as
+        # broken when none of them is.
+        "mcp_reconciled": _mcp["manager"] is not None,
         "connector_errors": connector_errors,
         "skills": len(skills),
         "skill_errors": len(errors),
@@ -265,6 +320,21 @@ def update_conversation(conversation_id: str, body: UpdateConversation) -> dict[
     return dict(repo.get(conversation_id))
 
 
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str) -> dict[str, str]:
+    """Delete a conversation and its transcript.
+
+    Refused while a turn is streaming: the loop holds the id, may be suspended
+    on a confirmation, and would go on writing messages into a row that no
+    longer exists. Stop the turn first.
+    """
+    if conversation_id in _active_turns:
+        raise HTTPException(409, "a turn is running in this conversation; stop it first")
+    if not ConversationRepository().delete(conversation_id):
+        raise HTTPException(404, "no such conversation")
+    return {"status": "deleted"}
+
+
 @app.get("/api/conversations/{conversation_id}/messages")
 def get_messages(conversation_id: str) -> list[dict[str, Any]]:
     if ConversationRepository().get(conversation_id) is None:
@@ -277,8 +347,39 @@ def get_messages(conversation_id: str) -> list[dict[str, Any]]:
             "tool_calls": m.tool_calls,
             "tool_name": m.tool_name,
             "is_error": m.is_error,
+            "pinned": m.pinned,
         }
         for m in MessageRepository().history(conversation_id)
+    ]
+
+
+class PinMessage(BaseModel):
+    pinned: bool = True
+
+
+@app.post("/api/conversations/{conversation_id}/messages/{message_id}/pin")
+def pin_message(conversation_id: str, message_id: int, body: PinMessage) -> dict[str, Any]:
+    """Mark one message as worth keeping in reach, or take the mark off.
+
+    A pin changes nothing about the turn: it is not sent to the model, does not
+    affect what is recalled, and does not pin the model's attention. It is a
+    bookmark in a transcript that scrolls, which is the whole of what it claims
+    to be.
+    """
+    if ConversationRepository().get(conversation_id) is None:
+        raise HTTPException(404, "no such conversation")
+    if not MessageRepository().set_pinned(conversation_id, message_id, body.pinned):
+        raise HTTPException(404, "no such message in this conversation")
+    return {"id": message_id, "pinned": body.pinned}
+
+
+@app.get("/api/conversations/{conversation_id}/pins")
+def list_pins(conversation_id: str) -> list[dict[str, Any]]:
+    if ConversationRepository().get(conversation_id) is None:
+        raise HTTPException(404, "no such conversation")
+    return [
+        {"id": m.id, "role": m.role, "content": m.content}
+        for m in MessageRepository().pinned(conversation_id)
     ]
 
 
@@ -296,6 +397,10 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
     cancel = asyncio.Event()
     _active_turns[conversation_id] = cancel
 
+    def release() -> None:
+        if _active_turns.get(conversation_id) is cancel:
+            del _active_turns[conversation_id]
+
     async def stream():
         try:
             async for event in director.run(conversation_id, body.message, cancel):
@@ -303,9 +408,18 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
                 # to a string instead of killing the response mid-stream.
                 payload = json.dumps({"type": event.type, **event.data}, default=str)
                 yield f"data: {payload}\n\n"
+                # The stream outlives the answer: memory extraction is a second
+                # model call the loop makes after `done`, and it is not part of
+                # the turn anyone can stop. Holding the registration open across
+                # it left the conversation looking busy for seconds after the
+                # reply had landed -- long enough that deleting it came back a
+                # 409, and "stop" stayed armed with nothing to interrupt.
+                if event.type in TERMINAL_EVENTS:
+                    release()
         finally:
-            if _active_turns.get(conversation_id) is cancel:
-                del _active_turns[conversation_id]
+            # A backstop for the stream that ends without a terminal frame at
+            # all -- a client that hangs up, or a generator closed early.
+            release()
 
     return StreamingResponse(
         stream(),
@@ -391,6 +505,105 @@ async def decide_confirmation(request_id: str, body: ConfirmationDecision) -> di
         # the waiting turn -- every gated tool call hung forever.
         entry["loop"].call_soon_threadsafe(future.set_result, body.allow)
     return {"status": "recorded"}
+
+
+# ------------------------------------------------------------- automations
+#
+# BETA. A turn that runs without anyone typing: a prompt, an interval, and a
+# record of what happened. Two things are deliberately not here -- cron
+# expressions and any trigger that is not the clock -- and one thing is
+# deliberately refused: an unattended turn cannot answer a permission prompt,
+# so it runs with the gate denying anything the user has not already approved
+# standing, and reports `blocked` naming the operation it wanted.
+
+
+class CreateAutomation(BaseModel):
+    name: str
+    prompt: str
+    every_minutes: int
+    provider: str | None = None
+    model: str | None = None
+    enabled: bool = True
+
+
+class UpdateAutomation(BaseModel):
+    name: str | None = None
+    prompt: str | None = None
+    every_minutes: int | None = None
+    enabled: bool | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+@app.get("/api/automations")
+def list_automations() -> dict[str, Any]:
+    return {
+        "beta": True,
+        "running_while_server_is_up": True,
+        "automations": [a.to_json() for a in AutomationRepository().list()],
+    }
+
+
+@app.post("/api/automations")
+def create_automation(body: CreateAutomation) -> dict[str, Any]:
+    if body.provider is not None and not is_known_provider(body.provider):
+        raise HTTPException(400, f"provider '{body.provider}' is not configured")
+    try:
+        automation = AutomationRepository().create(
+            body.name,
+            body.prompt,
+            body.every_minutes,
+            provider=body.provider,
+            model=body.model,
+            enabled=body.enabled,
+        )
+    except AutomationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return automation.to_json()
+
+
+@app.patch("/api/automations/{automation_id}")
+def update_automation(automation_id: int, body: UpdateAutomation) -> dict[str, Any]:
+    if body.provider is not None and not is_known_provider(body.provider):
+        raise HTTPException(400, f"provider '{body.provider}' is not configured")
+    repo = AutomationRepository()
+    if repo.get(automation_id) is None:
+        raise HTTPException(404, "no such automation")
+    try:
+        # `enabled` is the one field where False is a value, not an omission.
+        updated = repo.update(
+            automation_id,
+            name=body.name,
+            prompt=body.prompt,
+            every_minutes=body.every_minutes,
+            enabled=body.enabled,
+            provider=body.provider,
+            model=body.model,
+        )
+    except AutomationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return updated.to_json()  # type: ignore[union-attr]
+
+
+@app.delete("/api/automations/{automation_id}")
+def delete_automation(automation_id: int) -> dict[str, str]:
+    if not AutomationRepository().delete(automation_id):
+        raise HTTPException(404, "no such automation")
+    return {"status": "deleted"}
+
+
+@app.post("/api/automations/{automation_id}/run")
+async def run_automation(automation_id: int) -> dict[str, Any]:
+    """Run one now, on the same path the scheduler uses.
+
+    The same path deliberately: a "test run" that used a different gate, or a
+    different director, would tell you nothing about whether the scheduled one
+    will work.
+    """
+    automation = AutomationRepository().get(automation_id)
+    if automation is None:
+        raise HTTPException(404, "no such automation")
+    return await _runner.run_now(automation)
 
 
 @app.get("/api/logs")
@@ -606,6 +819,25 @@ def _capability_json(c) -> dict[str, Any]:
     }
 
 
+@app.post("/api/mcp/reconcile")
+async def reconcile_connectors() -> dict[str, Any]:
+    """Start every switched-on connector now, the way the first turn would.
+
+    Connectors reconcile at the start of a turn, so on a freshly started server
+    every one of them is truthfully "not running" until someone says something.
+    That is correct and it is also unreadable: a page listing six connectors as
+    not running, when the real answer is "nothing has asked them to yet", is the
+    same wall of red either way. This is the one button that asks.
+    """
+    await _registry_for(None)
+    live = _mcp["manager"].state() if _mcp["manager"] else {}
+    return {
+        "connected": sum(1 for v in live.values() if v.get("connected")),
+        "tools": sum(v.get("tools", 0) for v in live.values()),
+        "errors": dict(_mcp["errors"]),
+    }
+
+
 @app.get("/api/capabilities")
 def list_capabilities(conversation_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
     from psok.capabilities import CapabilityService, Kind
@@ -795,6 +1027,47 @@ async def install_skill(body: InstallSkill) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"could not fetch {body.url}: {exc}") from exc
+    return {
+        "name": skill.name,
+        "description": skill.description,
+        "path": str(skill.path),
+        "version": skill.version,
+    }
+
+
+class CreateSkill(BaseModel):
+    name: str
+    description: str
+    instruction: str
+    overwrite: bool = False
+
+
+@app.post("/api/skills/create")
+def create_skill(body: CreateSkill) -> dict[str, Any]:
+    """Write a skill from the three things a skill actually is.
+
+    A skill is a directory with a SKILL.md whose frontmatter carries a name and
+    a description, and whose body is the instruction (ADR-0006). That is three
+    fields, so this takes three fields and composes the file rather than asking
+    someone to write YAML by hand -- and then puts it through exactly the same
+    validation as one installed from a URL, so a skill authored here cannot be
+    one the loader will only ever report as broken.
+    """
+    from psok.skills.install import SkillInstallError, install_text
+
+    name = body.name.strip().lower().replace(" ", "-")
+    description = " ".join(body.description.split())
+    instruction = body.instruction.strip()
+    if not instruction:
+        raise HTTPException(400, "a skill with no instruction has nothing to offer")
+    # Quoted and escaped: a description containing a colon is ordinary English
+    # and must not become a second YAML key.
+    quoted = description.replace("\\", "\\\\").replace('"', '\\"')
+    text = f'---\nname: {name}\ndescription: "{quoted}"\n---\n\n{instruction}\n'
+    try:
+        skill = install_text(text, overwrite=body.overwrite)
+    except SkillInstallError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {
         "name": skill.name,
         "description": skill.description,

@@ -33,9 +33,11 @@ class Message:
     tool_call_id: str | None = None
     tool_name: str | None = None
     is_error: bool = False
+    pinned: bool = False
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Message:
+        keys = row.keys()
         return cls(
             id=row["id"],
             role=row["role"],
@@ -44,6 +46,9 @@ class Message:
             tool_call_id=row["tool_call_id"],
             tool_name=row["tool_name"],
             is_error=bool(row["is_error"]),
+            # Read defensively: a row selected before the column existed, or by
+            # a query that does not ask for it, is not a reason to raise.
+            pinned=bool(row["pinned"]) if "pinned" in keys else False,
         )
 
 
@@ -98,6 +103,29 @@ class ConversationRepository:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def delete(self, conversation_id: str) -> bool:
+        """Remove a conversation and everything scoped to it.
+
+        Messages cascade through the foreign key, but two tables key on the
+        conversation id as a plain scope string rather than a reference --
+        capability_state and memory_state -- so a deleted conversation would
+        otherwise leave rows nothing can ever reach again. Extracted memories
+        are deliberately kept: a fact learned in a conversation outlives it,
+        which is why memories.conversation_id is not a foreign key.
+        """
+        cursor = self.conn.execute(
+            "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        if cursor.rowcount:
+            self.conn.execute(
+                "DELETE FROM capability_state WHERE scope = ?", (conversation_id,)
+            )
+            self.conn.execute(
+                "DELETE FROM memory_state WHERE scope = ?", (conversation_id,)
+            )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def touch(self, conversation_id: str) -> None:
         self.conn.execute(
             "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
@@ -138,6 +166,30 @@ class MessageRepository:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def set_pinned(self, conversation_id: str, message_id: int, pinned: bool) -> bool:
+        """Pin or unpin one message.
+
+        Scoped by conversation as well as by id so a pin cannot be applied to a
+        message in a conversation the caller did not name -- message ids are
+        global integers, and an interface that has the wrong one open would
+        otherwise silently pin somebody else's turn.
+        """
+        cursor = self.conn.execute(
+            "UPDATE messages SET pinned = ? WHERE id = ? AND conversation_id = ?",
+            (int(pinned), message_id, conversation_id),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def pinned(self, conversation_id: str) -> list[Message]:
+        return [
+            Message.from_row(r)
+            for r in self.conn.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? AND pinned = 1 ORDER BY id",
+                (conversation_id,),
+            )
+        ]
 
     def history(self, conversation_id: str, limit: int | None = None) -> list[Message]:
         sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id"

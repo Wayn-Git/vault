@@ -594,6 +594,343 @@ def test_a_conversations_model_can_be_switched_after_it_starts(api, db):
         assert client.patch("/api/conversations/missing", json={"title": "x"}).status_code == 404
 
 
+def test_a_conversation_can_be_deleted_and_takes_its_scoped_rows_with_it(api, db):
+    """There was no delete endpoint, so a conversation was permanent. Deleting
+    one has to take the transcript with it (messages cascade) and also the two
+    tables that key on the conversation id as a plain scope string rather than
+    a foreign key -- capability_state and memory_state -- which nothing would
+    ever reach again once the conversation row is gone. Extracted memories are
+    deliberately kept."""
+    from fastapi.testclient import TestClient
+
+    from psok.capabilities import CapabilityService, Kind
+    from psok.db.repositories import MessageRepository
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+
+        MessageRepository(db).append(cid, "user", "hello")
+        CapabilityService(db).set_enabled(Kind.SKILL, "writing", False, conversation_id=cid)
+        db.execute(
+            "INSERT INTO memories (fact, conversation_id) VALUES ('a fact', ?)", (cid,)
+        )
+        db.commit()
+
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+        assert client.delete(f"/api/conversations/{cid}").status_code == 404
+        assert client.get(f"/api/conversations/{cid}/messages").status_code == 404
+
+        def count(sql: str) -> int:
+            return db.execute(sql, (cid,)).fetchone()[0]
+
+        assert count("SELECT count(*) FROM messages WHERE conversation_id = ?") == 0
+        assert count("SELECT count(*) FROM capability_state WHERE scope = ?") == 0
+        assert count("SELECT count(*) FROM memory_state WHERE scope = ?") == 0
+        assert count("SELECT count(*) FROM memories WHERE conversation_id = ?") == 1
+
+
+def test_deleting_a_conversation_is_refused_while_its_turn_is_running(api, db):
+    """The loop holds the conversation id and goes on appending messages to it,
+    possibly while suspended on a confirmation. Deleting the row underneath a
+    running turn leaves the loop writing into nothing."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+
+        api._active_turns[cid] = asyncio.Event()
+        try:
+            assert client.delete(f"/api/conversations/{cid}").status_code == 409
+        finally:
+            del api._active_turns[cid]
+
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+
+
+def test_a_message_can_be_pinned_and_the_pin_is_scoped_to_its_conversation(api, db):
+    """Message ids are global integers. Pinning by id alone lets an interface
+    with the wrong conversation open mark somebody else's turn, so the write is
+    scoped by conversation and a foreign id is a 404 rather than a silent
+    success on another transcript."""
+    from fastapi.testclient import TestClient
+
+    from psok.db.repositories import MessageRepository
+
+    with TestClient(api.app) as client:
+        def make() -> str:
+            return client.post(
+                "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+            ).json()["id"]
+
+        mine, theirs = make(), make()
+        messages = MessageRepository(db)
+        mid = messages.append(mine, "assistant", "worth keeping")
+        other = messages.append(theirs, "assistant", "not yours to pin")
+
+        assert client.post(
+            f"/api/conversations/{mine}/messages/{mid}/pin", json={"pinned": True}
+        ).status_code == 200
+        rows = client.get(f"/api/conversations/{mine}/messages").json()
+        assert [r["pinned"] for r in rows] == [True]
+        assert [p["id"] for p in client.get(f"/api/conversations/{mine}/pins").json()] == [mid]
+
+        # Someone else's message, addressed through this conversation.
+        assert client.post(
+            f"/api/conversations/{mine}/messages/{other}/pin", json={"pinned": True}
+        ).status_code == 404
+        assert messages.pinned(theirs) == []
+
+        assert client.post(
+            f"/api/conversations/{mine}/messages/{mid}/pin", json={"pinned": False}
+        ).status_code == 200
+        assert messages.pinned(mine) == []
+
+
+def test_a_pinned_message_does_not_change_what_the_model_is_sent(db):
+    """A pin is a bookmark in a scrolling transcript and nothing more. If it
+    ever started reordering or re-weighting history, "pin this" would quietly
+    mean "change the conversation"."""
+    from psok.db.repositories import ConversationRepository, MessageRepository
+
+    cid = ConversationRepository(db).create("ollama", "qwen2.5:7b")
+    messages = MessageRepository(db)
+    first = messages.append(cid, "user", "one")
+    messages.append(cid, "assistant", "two")
+    before = messages.history(cid)
+
+    messages.set_pinned(cid, first, True)
+    after = messages.history(cid)
+
+    assert [(m.id, m.role, m.content) for m in before] == [
+        (m.id, m.role, m.content) for m in after
+    ]
+
+
+def test_a_skill_can_be_written_from_a_name_description_and_instruction(api, psok_home):
+    """Authoring a skill used to mean writing YAML frontmatter by hand into a
+    file at a path that had to match the name inside it. Three fields is what a
+    skill is; the endpoint composes the file and validates it exactly as it
+    validates one downloaded from a URL, so nothing authored here can be a skill
+    the loader will only ever report as broken."""
+    from fastapi.testclient import TestClient
+
+    from psok.skills.loader import scan
+
+    with TestClient(api.app) as client:
+        made = client.post(
+            "/api/skills/create",
+            json={
+                "name": "Release Notes",
+                "description": 'Write release notes: terse, one line per change',
+                "instruction": "Read the git log and write one line per user-visible change.",
+            },
+        )
+        assert made.status_code == 200, made.text
+        assert made.json()["name"] == "release-notes"
+
+        skills, errors = scan()
+        written = next(s for s in skills if s.name == "release-notes")
+        assert errors == [], errors
+        # A colon in ordinary English must not have become a second YAML key.
+        assert written.description.startswith("Write release notes:")
+
+        # Installing over an existing skill needs saying so.
+        again = client.post(
+            "/api/skills/create",
+            json={"name": "release-notes", "description": "d", "instruction": "i"},
+        )
+        assert again.status_code == 400
+        assert "already installed" in again.json()["detail"]
+
+        empty = client.post(
+            "/api/skills/create",
+            json={"name": "hollow", "description": "d", "instruction": "   "},
+        )
+        assert empty.status_code == 400
+
+
+def test_a_turn_stops_counting_as_running_at_its_terminal_frame(api, db, monkeypatch):
+    """The stream outlives the answer: memory extraction is a second model call
+    the loop makes after `done`. The conversation was registered as having a
+    turn in flight for the whole of it, so for seconds after the reply had
+    landed `stop` was still armed with nothing to interrupt and deleting the
+    conversation came back a 409."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from psok.agent.director import Event
+
+    seen: list[dict[str, bool]] = []
+
+    class Director:
+        async def run(self, conversation_id, message, cancel):
+            yield Event("assistant_delta", {"text": "hi"})
+            seen.append({"when": "before done", "running": conversation_id in api._active_turns})
+            yield Event("done", {"text": "hi", "iterations": 1})
+            # Standing in for extraction: the stream is open, the turn is over.
+            await asyncio.sleep(0)
+            seen.append({"when": "after done", "running": conversation_id in api._active_turns})
+            yield Event("memory", {"created": [], "superseded": []})
+
+    async def fake_director(workspace):
+        return Director()
+
+    monkeypatch.setattr(api, "_director", fake_director)
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+        with client.stream("POST", f"/api/conversations/{cid}/turn", json={"message": "hi"}) as r:
+            body = "".join(r.iter_text())
+
+        assert '"memory"' in body, "the memory frame must still arrive"
+        assert seen == [
+            {"when": "before done", "running": True},
+            {"when": "after done", "running": False},
+        ], seen
+        assert cid not in api._active_turns
+        # And the conversation is deletable the moment the answer is on screen.
+        assert client.delete(f"/api/conversations/{cid}").status_code == 200
+
+
+def test_an_unattended_automation_is_refused_rather_than_left_hanging(db):
+    """BETA. A scheduled turn has nobody to answer a permission prompt. Waiting
+    on one would hang until the server restarts, and turning the gate off for
+    scheduled work is the same as not having a gate.
+
+    Driven through the real ConfirmationService, not a fake director that
+    raises: the first version of this refused by raising, which read correctly
+    and was wrong, because the loop turns any exception into a failed turn. A
+    real run reported `error` with a stack-trace-shaped string and did none of
+    its other work. A denial is something the loop already handles."""
+    import asyncio
+
+    from psok.automation import AutomationRepository, UnattendedGate, run_once
+    from psok.security.confirmation import ConfirmationService
+    from psok.tools.base import RiskLevel, Tool, ToolSource
+
+    gate = UnattendedGate()
+    service = ConfirmationService(callback=gate)
+    tool = Tool(
+        name="write_file",
+        description="d",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda **_: "written",
+        risk=RiskLevel.MEDIUM,
+        source=ToolSource.BUILTIN,
+    )
+    outcome = asyncio.run(service.check(tool, {"path": "/tmp/x", "content": "y"}))
+    assert outcome.allowed is False, "an unattended medium-risk call must not run"
+    assert outcome.decision == "denied"
+    assert gate.refused == ["write_file"], gate.refused
+
+    # A low-risk call still runs: refusing everything would make automations
+    # useless rather than safe.
+    reader = Tool(
+        name="list_files",
+        description="d",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda **_: "x",
+        risk=RiskLevel.LOW,
+        source=ToolSource.BUILTIN,
+    )
+    assert asyncio.run(service.check(reader, {})).allowed is True
+
+    # And the record says `blocked`, naming what it wanted -- not `ok`, and not
+    # a bare exception string.
+    repo = AutomationRepository(db)
+    automation = repo.create("nightly", "tidy the vault", 60)
+
+    class Refused:
+        """Uses the callback `run_once` handed it, which is the wiring under test:
+        a gate the runner did not actually install proves nothing."""
+
+        def __init__(self, callback):
+            self.service = ConfirmationService(callback=callback)
+
+        async def run(self, conversation_id, message):
+            from psok.agent.director import Event
+
+            await self.service.check(tool, {"path": "/tmp/x"})
+            yield Event("done", {"text": "I could not write the file."})
+
+    asyncio.run(run_once(automation, director_for=Refused, repo=repo))
+    after = repo.get(automation.id)
+    assert after.last_status == "blocked", after.last_status
+    assert "write_file" in after.last_summary
+    # A blocked run reschedules rather than retrying in a tight loop.
+    assert after.next_run_at > after.last_run_at
+
+
+def test_an_automations_gate_is_its_own_and_not_the_shared_one(db):
+    """Swapping the confirmation callback on the shared registry would change
+    the rules for every interactive turn running at that moment. The unattended
+    view shares the tools -- by reference, so a reconnecting connector stays
+    visible -- and nothing else."""
+    from psok.security.confirmation import ConfirmationService
+    from psok.tools.base import Tool
+    from psok.tools.registry import ToolRegistry
+
+    async def never(_request):
+        return False
+
+    shared = ToolRegistry()
+    tool = Tool(
+        name="probe",
+        description="d",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda **_: "x",
+    )
+    shared.register(tool)
+
+    view = shared.with_confirmation(ConfirmationService(callback=never))
+    assert view.get("probe") is tool, "the view must see the same tools"
+    assert view.confirmation is not shared.confirmation
+    assert shared.confirmation.callback is not never, "the shared gate is untouched"
+
+    # Registered later: the view is a reference, not a copy, so a connector that
+    # comes up mid-session is reachable from a scheduled turn too.
+    shared.register(
+        Tool(name="late", description="d", parameters={"type": "object", "properties": {}},
+             handler=lambda **_: "y")
+    )
+    assert view.get("late") is not None
+
+
+def test_an_automation_will_not_run_faster_than_the_floor(db):
+    """"Every minute" is not an automation, it is a busy loop wearing a
+    schedule, and it would have this machine talking to a model 1440 times a
+    day by accident."""
+    from psok.automation import AutomationError, AutomationRepository
+
+    repo = AutomationRepository(db)
+    with pytest.raises(AutomationError):
+        repo.create("too eager", "do it", 1)
+    with pytest.raises(AutomationError):
+        repo.create("too patient", "do it", 60 * 24 * 400)
+    with pytest.raises(AutomationError):
+        repo.create("hollow", "   ", 60)
+
+    made = repo.create("fine", "do it", 60)
+    # Scheduled forward, so creating one never fires it before it is re-read.
+    assert made.next_run_at > _utcnow_iso()
+    assert repo.due() == []
+
+
+def _utcnow_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
 def test_a_non_streaming_provider_prints_its_answer_in_the_cli(db, capsys, monkeypatch):
     """The CLI dropped assistant_text on the floor to avoid the double-render
     the loop used to cause. With a provider that cannot stream -- Google

@@ -42,6 +42,20 @@ class ToolRegistry:
             self._logs = ExecutionLogRepository()
         return self._logs
 
+    def with_confirmation(self, confirmation: ConfirmationService) -> ToolRegistry:
+        """The same tools, gated differently.
+
+        An unattended turn needs a permission callback that refuses rather than
+        one that waits for a person, and it needs the connected MCP tools that
+        the shared registry holds. Swapping the callback on the shared registry
+        would change the rules for every interactive turn running at the same
+        time, so this shares the tool dict -- deliberately by reference, so a
+        connector that reconnects stays visible here too -- and nothing else.
+        """
+        view = ToolRegistry(confirmation=confirmation, logs=self._logs)
+        view._tools = self._tools
+        return view
+
     def register(self, tool: Tool) -> None:
         if tool.name in self._tools:
             raise ValueError(f"tool '{tool.name}' is already registered")
