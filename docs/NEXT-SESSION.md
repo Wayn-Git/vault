@@ -18,17 +18,21 @@ catalogue, SSRF protection, per-server circuit breaking · permission gate with
 OS sandboxing (Bubblewrap on this machine) · hybrid retrieval over a notes
 vault (BM25 + vector, incremental indexing) · long-term memory extracted after
 a turn and recalled in later ones · markdown skills, installable from a URL or
-browsed from a live directory read out of `anthropics/skills` · a full React
+browsed or written from three fields on one Skills & connectors page · a full
+React
 interface served by the same process as the API (`psok serve`) · standing
 permission approvals, listable and revocable, in both the UI and the CLI · a
 CLI covering all of the above.
 
-**Verified, not just wired**: 259 unit tests, `ruff` clean, and a 34-check
+**Verified, not just wired**: 268 unit tests, `ruff` clean, and a 53-check
 Playwright suite (`frontend/tests/smoke.mjs`) that drives a real browser
-against a real running server and a real model — streaming, markdown
-rendering exactly once, the permission gate answering to the keyboard, a
-skill installing from the directory and uninstalling again, the audit trail
-carrying the call.
+against a real running server and a real model — streaming, markdown rendering
+exactly once, the thinking arriving live and folding away when the answer
+starts, the permission gate answering to the keyboard, a skill installed from
+the catalogue and another written from three fields, both uninstalled again, a
+message pinned and surviving a reload, an automation created, paused and
+deleted, the audit trail carrying the call, and a conversation deleted from the
+rail.
 
 ## Environment facts, current as of this session
 
@@ -53,7 +57,7 @@ carrying the call.
   reporting `degraded` by default. Registering one (steps are in
   [architecture/mcp-oauth.md](architecture/mcp-oauth.md)) and switching it back
   on is a five-minute task whenever GitHub access is actually wanted.
-- Tests: `pytest` (259 unit, 1 skipped by design), `pytest -m live` (5, spawns
+- Tests: `pytest` (268 unit, 1 skipped by design), `pytest -m live` (5, spawns
   real MCP servers and uses the network), `ruff check psok tests`. Frontend:
   `npm run lint`, `npm run build`, `npm run smoke` (needs a running
   `psok serve` and a configured provider — see `frontend/tests/smoke.mjs`'s
@@ -95,7 +99,16 @@ right now.
    PSOK to search "my calendar and my notes together" in one query, the
    connector path is sufficient and a first-party layer would be unbuilt
    scope for its own sake.
-6. **Recurring tasks and background jobs** are the two capabilities most
+6. ~~Automation.~~ **Built, as a beta**, and marked beta everywhere it appears.
+   Both open questions were answered rather than deferred — see
+   [architecture/automation.md](architecture/automation.md). *Who decides it is
+   time*: this process, while `psok serve` runs, which makes the rule
+   "automations run while PSOK is open". *What the gate does with nobody
+   watching*: it denies, collects the operation keys it refused, and the run
+   records `blocked` naming them, so the fix is approving one operation rather
+   than exempting scheduled work from the gate. Still missing on purpose: cron
+   expressions, any trigger other than the clock, retries.
+7. **Recurring tasks and background jobs** are the two capabilities most
    often implied by "personal operating system" that this one doesn't have.
    Neither has a design yet. Before writing code: recurring tasks need a
    decision about who evaluates "is it time" — a cron-like process, or a
@@ -103,8 +116,13 @@ right now.
    jobs need the sandbox and permission-gate story extended to something that
    isn't a synchronous tool call inside a turn. Both are real design work, not
    a quick addition.
-7. **A conversation-delete endpoint**, if a real workflow ever asks for one.
-   None has yet, which is why it doesn't exist — see the ground rule below.
+8. ~~A conversation-delete endpoint.~~ **Built.** `DELETE
+   /api/conversations/{id}`, reachable from the `⋯` menu on a rail row. It
+   refuses with a 409 while a turn is streaming in that conversation, and takes
+   the rows that key on the conversation id as a plain scope string —
+   `capability_state`, `memory_state` — with it, since nothing could ever reach
+   those again. Extracted memories are deliberately kept: a fact learned in a
+   conversation outlives it.
 
 None of the above is committed to a timeline. This is a personal project; the
 list is here so the next session (or the one after) doesn't have to
@@ -122,13 +140,15 @@ does not.
 
 ## Endpoints
 
-36 endpoints, all verified against a running server.
+47 endpoints, all verified against a running server.
 
 | Need | Endpoint |
 |---|---|
 | Conversation list / create | `GET,POST /api/conversations` |
 | **Rename, or switch provider/model** | `PATCH /api/conversations/{id}` |
+| **Delete one** | `DELETE /api/conversations/{id}` (409 while its turn runs) |
 | History | `GET /api/conversations/{id}/messages` |
+| **Pin a message, and list what is pinned** | `POST /api/conversations/{id}/messages/{message_id}/pin`, `GET /api/conversations/{id}/pins` |
 | **Streamed turn** | `POST /api/conversations/{id}/turn` → SSE |
 | **Stop a running turn** | `POST /api/conversations/{id}/turn/stop` |
 | **Pending confirmations** | `GET /api/confirmations` |
@@ -139,6 +159,7 @@ does not.
 | `/` autocomplete | `GET /api/skills/search?q=` |
 | Every skill, with load errors | `GET /api/skills` |
 | **Install a skill from a URL, or delete one** | `POST /api/skills/install`, `DELETE /api/skills/{name}` |
+| **Write one from a name, description and instruction** | `POST /api/skills/create` |
 | **Browse installable skills** | `GET /api/skills/catalogue` |
 | **Every tool the agent can reach** | `GET /api/tools` |
 | **A file from the browser, as a path** | `POST /api/attachments` |
@@ -151,6 +172,9 @@ does not.
 | Start OAuth, poll for the login URL | `POST /api/mcp/servers/{name}/login`, `GET /api/mcp/authorizations` |
 | Connect one now | `POST /api/mcp/servers/{name}/connect` |
 | **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}` |
+| **Automations (beta): list, create, retime, delete** | `GET,POST /api/automations`, `PATCH,DELETE /api/automations/{id}` |
+| **Run one now, on the scheduler's path** | `POST /api/automations/{id}/run` |
+| **Start every switched-on connector now** | `POST /api/mcp/reconcile` |
 | Audit trail | `GET /api/logs` |
 | Component health | `GET /api/health` |
 
@@ -174,7 +198,8 @@ Each frame is `data: {json}` with a `type`:
 
 - `assistant_delta` — `{text}`, append to the visible answer
 - `reasoning_delta` — `{text}`, the model's chain of thought; render separately
-  or hide, but **never** as the answer
+  or hide, but **never** as the answer. The interface streams it live into its
+  own panel and folds that panel away when the answer starts.
 - `assistant_text` — `{text}`, the whole answer at once
 - `tool_call` — `{name, arguments}`
 - `confirmation_required` — `{request_id, tool_name, operation_key, risk, reason,
@@ -201,6 +226,13 @@ again, up to `Guards.max_continuations` (2). The interface sees this as a
 `warning` frame, not a premature `done` — it should keep the composer disabled
 and keep listening rather than treating the warning as terminal.
 
+**A turn stops counting as running at its terminal frame.** `_active_turns`
+releases on `done`/`error`/`guard`, not when the stream closes — memory
+extraction runs after `done` and is not part of the turn anyone can stop.
+Holding the registration across it left the conversation looking busy for
+seconds after the reply had landed, long enough that deleting it came back a
+409.
+
 **Stopping is a request, not an abort.** Aborting the browser's read closes the
 response and leaves the loop running — still calling models, still holding a
 confirmation open. `POST /api/conversations/{id}/turn/stop` interrupts it: the
@@ -212,6 +244,12 @@ itself rather than aborting the fetch.
 of the loop any more, so an unconfigured provider or an unreachable model
 produces a frame the interface can display. Treat `error`, `guard` and `done` as
 terminal and re-enable the composer on all three, and on stream close.
+
+**Terminal means terminal, not "when the stream closes".** The stream stays open
+past `done` for the `memory` frame, which is a second model call and can take
+seconds. An interface that waits for the close before releasing the composer
+shows a finished answer with a "thinking" line still under it. Release on the
+terminal frame and keep reading.
 
 ## The confirmation flow, which is the part worth getting right
 
@@ -252,38 +290,59 @@ expect two prompts the first time someone uses a new connector.
 
 ## What the interface does with all of this
 
-1. **Conversations** — create, list, rename (`F2`), filter, switch with
+1. **Conversations** — create, list, rename (`F2` or the row's `⋯` menu),
+   delete (same menu, behind a confirming second click), filter, switch with
    `⌘↑`/`⌘↓`; the open one survives a reload. Listed in the rail alongside
-   Tasks, Skills, Connectors, Memory, Activity and Customise.
+   Tasks, Skills, Connectors, Memory and Activity, with Settings at the foot.
 2. **Streaming** — `assistant_delta` rendered as markdown while it arrives,
-   `reasoning_delta` in a separate collapsed block, `done.text` deliberately not
-   rendered.
+   `reasoning_delta` streamed live into its own panel that folds itself away
+   when the answer starts, `done.text` deliberately not rendered. The transcript
+   is never refetched when a turn ends — reasoning, warnings and the memory note
+   are stream-only and a refetch deletes them.
 3. **Confirmations** — the `confirmation_required` frame raises an inline
    prompt showing the arguments and the operation key, answerable with
    `Enter` / `Escape` / `R`. `GET /api/confirmations` is the reload-recovery
    path only, and a recovered prompt for a different conversation is shown as
    a banner with a link to it rather than a blocking modal.
-4. **Skills and connectors** — from the composer's `+` menu (with a "Tool
-   access" flyout listing every reachable tool by source and risk), the signal
-   strip beneath it, the command palette (`⌘K`), a browsable Directory
-   (`⌘K → browse`) for installing new ones, and their own full views, all
-   reading one store, so a connector reports what is running rather than what
-   was switched on.
+4. **Skills and connectors** — **one page, two tabs** (`⌘3`), because they are
+   the same kind of thing and were three surfaces: a Skills view, a Connectors
+   view, and a Directory overlay that browsed both. Adding is now done where
+   managing is done. The Skills tab lists installed and installable together and
+   offers three ways in — **New skill** (name, description, instruction; the
+   backend composes and validates the `SKILL.md`), a link to any `SKILL.md`, or
+   a catalogue card. The Connectors tab separates **Connected** from **Added,
+   not running**, so a connector that has never once worked is not listed beside
+   four that are serving tools; below both, the catalogue as plain icon-and-name
+   rows. Before the first turn nothing has reconciled, so rather than reporting
+   six connectors as "not running" it says "not started yet" and offers one
+   button (`POST /api/mcp/reconcile`) that starts them. Also reachable from the
+   composer's `+` menu (with a "Tool access" flyout listing every reachable tool
+   by source and risk) and the palette (`⌘K`), all reading one store, so a
+   connector reports what is running rather than what was switched on.
 5. **`/` autocomplete** — backed by `/api/skills/search`; the marker is left in
    the message for the backend to parse and strip.
 6. **Connector setup** — catalogue with each entry's setup steps, OAuth client,
    login with the authorization URL polled and shown as a link, and environment
    credentials for stdio servers, all in a per-row setup panel in the
    Connectors view.
-7. **Audit and memory views** — the trail with an optional follow mode and the
-   list of standing approvals with a revoke button, and the standing facts
-   with a switch and a way to retire one.
+7. **Audit, permissions and memory** — the trail with an optional follow mode;
+   the standing approvals with a revoke button, in Settings → Permissions; and
+   the standing facts with a switch and a way to retire one.
 8. **Attachments** — a file dropped, pasted, or picked (`⌘U`) into the
    composer uploads to `~/.psok/attachments/<id>/<name>` and the message
    carries the path for the ordinary file tools to read.
 9. **Plan mode** — a composer toggle that prepends an instruction asking for
-   the steps before anything is written or run; not a backend concept, a
-   phrasing shortcut kept honest by being exactly that.
+    the steps before anything is written or run; not a backend concept, a
+    phrasing shortcut kept honest by being exactly that.
+10. **Automations (beta)** — `⌘4`. A prompt and an interval, run as an ordinary
+    turn in a conversation of its own, while the server is up. Marked beta in
+    the rail, on the page, and in the API payload. The page states both beta
+    positions rather than burying them.
+11. **Pins** — a message header's pin, or `⌘P` on the newest one, with a strip
+    above the transcript that jumps to any of them. Deliberately inert: not sent
+    to the model, does not change recall, does not reorder history. A column on
+    `messages`, written against the database row id, so a message still
+    streaming cannot be pinned until the transcript is read back.
 
 ## What is deliberately still not built
 
@@ -298,10 +357,14 @@ expect two prompts the first time someone uses a new connector.
   screenshot tool).
 - **Extended-thinking toggles.** Provider-specific thinking budgets are
   absorbed inside each adapter and not exposed as a setting.
-- **Deleting a conversation.** There is no endpoint; nothing in the
-  architecture docs calls for one, and none has come up in real use.
+- **Pins that mean anything to the model.** A pin is a bookmark, full stop.
+  Feeding pinned messages back into the prompt, or weighting recall by them, is
+  a different feature that would need its own design — and shipping it under the
+  same word would make "pin this" silently mean "change the conversation".
 - **Anything multi-user.** Out of scope by design (ADR-0001).
-- **Recurring tasks and background jobs.** See item 6 in the plan above —
+- **Automations that can answer a permission prompt.** They deny instead, and
+  say what they denied. Changing that needs its own design, not a flag.
+- **Recurring tasks and background jobs.** See item 7 in the plan above —
   these are the two most likely to get built next, once designed.
 
 ## Ground rules from previous sessions
