@@ -136,7 +136,9 @@ export const api = {
     j(`/capabilities/${kind}/${encodeURIComponent(name)}?${conversationId ? `conversation_id=${encodeURIComponent(conversationId)}` : ''}`, json('DELETE')),
 
   mcpCatalogue: () => j('/mcp/catalogue'),
-  mcpServers: () => j('/mcp/servers'),
+  // `accounts` asks each connector who it is signed in as, which can cost a
+  // network round trip — so the 3s poll never asks, and the detail panel does.
+  mcpServers: (accounts = false) => j(`/mcp/servers${accounts ? '?accounts=true' : ''}`),
   mcpAdd: (body) => j('/mcp/servers', json('POST', body)),
   mcpRemove: (name) => j(`/mcp/servers/${encodeURIComponent(name)}`, json('DELETE')),
   mcpOauthClient: (name, body) =>
@@ -144,7 +146,12 @@ export const api = {
   mcpSetEnv: (name, body) => j(`/mcp/servers/${encodeURIComponent(name)}/env`, json('POST', body)),
   mcpUnsetEnv: (name, key) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/env/${encodeURIComponent(key)}`, json('DELETE')),
-  mcpLogin: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/login`, json('POST', {})),
+  // `force` signs out first, so the provider shows its account chooser rather
+  // than silently handing back the session it already has.
+  mcpLogin: (name, { force = false, accountHint = null } = {}) =>
+    j(`/mcp/servers/${encodeURIComponent(name)}/login`,
+      json('POST', { force, account_hint: accountHint })),
+  mcpLogout: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/logout`, json('POST', {})),
   mcpAuthorizations: () => j('/mcp/authorizations'),
   // Start every switched-on connector now, the way the first turn would.
   mcpReconcile: () => j('/mcp/reconcile', json('POST', {})),

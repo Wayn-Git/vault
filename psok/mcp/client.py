@@ -17,10 +17,9 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 
 from psok.mcp.config import ServerConfig, Transport
-from psok.mcp.oauth import build_auth_provider, seed_preregistered_client
+from psok.mcp.oauth import build_auth_provider, mcp_http_client_factory, seed_preregistered_client
 from psok.mcp.ssrf import check_url
 
 log = logging.getLogger(__name__)
@@ -226,9 +225,10 @@ class MCPConnection:
                 headers=headers,
                 timeout=cfg.timeout_seconds,
                 auth=auth,
+                httpx_client_factory=mcp_http_client_factory,
             )
 
-        http_client = create_mcp_http_client(headers=headers or None, auth=auth)
+        http_client = mcp_http_client_factory(headers=headers or None, auth=auth)
         return streamable_http_client(cfg.url or "", http_client=http_client)
 
     async def call(self, tool_name: str, arguments: dict[str, Any]):

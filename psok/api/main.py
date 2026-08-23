@@ -626,10 +626,12 @@ def mcp_catalogue() -> list[dict[str, Any]]:
 
 
 @app.get("/api/mcp/servers")
-def mcp_servers() -> list[dict[str, Any]]:
+def mcp_servers(accounts: bool = False) -> list[dict[str, Any]]:
+    """Configured connectors. `accounts=true` also asks each who it is signed in as,
+    which can mean a network round trip, so the polling list does not ask for it."""
     from psok.mcp import commands as mcp
 
-    return mcp.status()
+    return mcp.status(with_accounts=accounts)
 
 
 class AddServer(BaseModel):
@@ -696,7 +698,10 @@ def mcp_set_oauth_client(name: str, body: OAuthClient) -> dict[str, str]:
     try:
         mcp.set_oauth_client(name, body.client_id, body.client_secret)
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        # A rejected client id is the caller's mistake, not a missing route. A
+        # 404 here sent "that is not a client id" back as "no such server".
+        status_code = 404 if "no server named" in str(exc) else 400
+        raise HTTPException(status_code, str(exc)) from exc
     return {"status": "stored"}
 
 
@@ -746,14 +751,50 @@ def mcp_unset_env(name: str, key: str) -> dict[str, Any]:
     return {"status": "unset", "name": name, "key": key}
 
 
+class LoginRequest(BaseModel):
+    # Sign out first, so the provider shows its account chooser instead of
+    # handing back whichever account it still has a session for.
+    force: bool = False
+    # Some servers cannot start their own flow without being told which account
+    # to start it for. Google Workspace is one.
+    account_hint: str | None = None
+
+
 @app.post("/api/mcp/servers/{name}/login")
-async def mcp_login(name: str) -> dict[str, Any]:
-    """Start the OAuth flow. The browser opens on this machine; the URL is also
-    returned so a remote UI can render it as a link."""
+async def mcp_login(name: str, body: LoginRequest | None = None) -> dict[str, Any]:
+    """Start the sign-in flow. The browser opens on this machine; the URL is also
+    published on /api/mcp/authorizations so a remote UI can render it as a link."""
+    from psok.mcp import commands as mcp
+    from psok.mcp.config import load_servers
+
+    request = body or LoginRequest()
+    config = load_servers().get(name)
+    if config is None:
+        raise HTTPException(404, f"no server named '{name}' in mcp.yaml")
+
+    message = await mcp.login(name, force=request.force, account_hint=request.account_hint)
+    config = load_servers()[name]
+    return {
+        "result": message,
+        "authorized": bool(mcp.is_signed_in(config)),
+        "account": mcp.account(name),
+    }
+
+
+@app.post("/api/mcp/servers/{name}/logout")
+def mcp_logout(name: str) -> dict[str, Any]:
+    """Forget the connected account so the next sign-in reaches the chooser.
+
+    Switching a connector off stops its process and leaves its account in
+    place; there was no way from here to change which account a connector uses.
+    """
     from psok.mcp import commands as mcp
 
-    message = await mcp.login(name)
-    return {"result": message, "authorized": mcp.has_tokens(name)}
+    try:
+        cleared = mcp.sign_out(name)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"status": "signed out", "name": name, "cleared": cleared}
 
 
 @app.get("/api/mcp/authorizations")

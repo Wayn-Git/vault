@@ -265,6 +265,47 @@ def test_client_metadata_uses_the_loopback_redirect():
     assert "authorization_code" in meta.grant_types
 
 
+async def test_oauth_http_client_asks_for_json_so_github_does_not_form_encode():
+    """GitHub's token endpoint replies form-urlencoded unless Accept: application/json
+    is sent, which breaks OAuthToken.model_validate_json (the bug this guards against).
+    The SDK's token-exchange/refresh requests don't set an Accept header themselves, so
+    mcp_http_client_factory must add one -- but only when one isn't already present,
+    since real MCP protocol requests set their own explicit Accept header.
+    """
+    import httpx2
+
+    from psok.mcp.oauth import mcp_http_client_factory
+
+    class DummyAuth(httpx2.Auth):
+        async def async_auth_flow(self, request):
+            yield request
+
+    client = mcp_http_client_factory(auth=DummyAuth())
+    try:
+        bare = httpx2.Request("POST", "https://github.com/login/oauth/access_token")
+        for hook in client.event_hooks["request"]:
+            await hook(bare)
+        assert bare.headers["accept"] == "application/json"
+
+        explicit = httpx2.Request(
+            "POST",
+            "https://example.com/mcp",
+            headers={"accept": "application/json, text/event-stream"},
+        )
+        for hook in client.event_hooks["request"]:
+            await hook(explicit)
+        assert explicit.headers["accept"] == "application/json, text/event-stream"
+    finally:
+        await client.aclose()
+
+    # Without an auth provider (no OAuth), no hook is installed at all.
+    plain = mcp_http_client_factory()
+    try:
+        assert plain.event_hooks["request"] == []
+    finally:
+        await plain.aclose()
+
+
 async def test_preregistered_client_is_seeded_so_registration_is_skipped(psok_home):
     from psok.mcp.oauth import seed_preregistered_client
     from psok.secrets import set_secret
@@ -377,3 +418,149 @@ def test_env_still_interpolates_from_the_environment(psok_home, monkeypatch):
     set_env("thing", "REGION", "${PSOK_TEST_REGION}")
 
     assert load_servers()["thing"].resolved_env()["REGION"] == "eu-west-1"
+
+
+# ------------------------------------------------------- who runs the sign-in
+
+# PSOK's OAuth provider is built for remote transports only (client.py's
+# `_transport`). A stdio server therefore runs its own flow in its own process,
+# and every one of these tests covers a way the old code forgot that: it stored
+# a Google client where nothing read it, reported a connector signed in that had
+# never seen an account, and offered no way to change account at all.
+
+
+def test_a_stdio_servers_client_goes_to_the_env_its_process_reads(psok_home):
+    mcp_commands.add_from_catalogue("google-workspace")
+
+    mcp_commands.set_oauth_client(
+        "google-workspace", "1234-abc.apps.googleusercontent.com", "GOCSPX-secret"
+    )
+
+    config = load_servers()["google-workspace"]
+    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
+    # The secret is a reference, never the value itself (ADR-0012).
+    assert config.env["GOOGLE_OAUTH_CLIENT_SECRET"].startswith("keychain:")
+    assert config.resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == "GOCSPX-secret"
+    # `oauth: true` on a stdio server is a claim the transport never honours.
+    assert config.oauth is False
+    assert config.oauth_client_id is None
+
+
+def test_an_email_is_refused_as_a_client_id(psok_home):
+    mcp_commands.add_from_catalogue("google-workspace")
+    mcp_commands.set_oauth_client("google-workspace", "1234-abc.apps.googleusercontent.com")
+
+    with pytest.raises(ValueError, match="not an OAuth client id"):
+        mcp_commands.set_oauth_client("google-workspace", "dadad@gmail.com")
+
+    # The working client survives the rejected one.
+    config = load_servers()["google-workspace"]
+    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
+
+
+def test_a_connector_is_not_signed_in_just_because_it_has_credentials(psok_home, monkeypatch):
+    """Configuring a client is not signing in, and connecting is not either."""
+    mcp_commands.add_from_catalogue("google-workspace")
+    mcp_commands.set_oauth_client("google-workspace", "1234-abc.apps.googleusercontent.com", "s")
+
+    credentials = psok_home / "google-credentials"
+    monkeypatch.setattr(
+        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+    )
+    config = load_servers()["google-workspace"]
+    assert mcp_commands.is_signed_in(config) is False
+    assert mcp_commands.missing_credentials(config) == []
+
+    credentials.mkdir()
+    (credentials / "someone@gmail.com.json").write_text("{}")
+    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is True
+    assert mcp_commands.account("google-workspace") == "someone@gmail.com"
+
+
+def test_missing_credentials_are_named_rather_than_reported_as_needing_sign_in(psok_home):
+    mcp_commands.add_from_catalogue("google-workspace")
+    config = load_servers()["google-workspace"]
+    assert mcp_commands.missing_credentials(config) == [
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+    ]
+
+
+def test_signing_out_forgets_the_account_the_server_itself_holds(psok_home, monkeypatch):
+    """Switching a connector off left its account in place, so reconnecting
+    silently reused it and no account could ever be changed."""
+    mcp_commands.add_from_catalogue("google-workspace")
+    credentials = psok_home / "google-credentials"
+    credentials.mkdir()
+    (credentials / "someone@gmail.com.json").write_text("{}")
+    monkeypatch.setattr(
+        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+    )
+
+    cleared = mcp_commands.sign_out("google-workspace")
+
+    assert cleared and "1 signed-in account" in cleared[0]
+    assert list(credentials.iterdir()) == []
+    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is False
+
+
+def test_signing_out_of_an_oauth_server_drops_its_token(psok_home):
+    from psok.mcp.oauth import has_tokens, token_ref
+    from psok.secrets import set_secret
+
+    mcp_commands.add_from_catalogue("github")
+    set_secret(token_ref("github"), '{"access_token": "gho_x", "token_type": "bearer"}')
+    assert has_tokens("github") is True
+
+    assert mcp_commands.sign_out("github") == ["the stored access token"]
+    assert has_tokens("github") is False
+
+
+def test_google_sign_in_always_asks_which_account(psok_home):
+    """Without this the browser's existing session is reused with no chooser,
+    and Google issues no refresh token, so the connection dies within the hour."""
+    asked = mcp_commands.always_ask_which_account(
+        "https://accounts.google.com/o/oauth2/auth?client_id=abc&response_type=code"
+    )
+    assert "prompt=select_account+consent" in asked
+    assert "access_type=offline" in asked
+
+    # Only Google is rewritten, and an explicit prompt is never overridden.
+    github = "https://github.com/login/oauth/authorize?client_id=abc"
+    assert mcp_commands.always_ask_which_account(github) == github
+    pinned = "https://accounts.google.com/o/oauth2/auth?prompt=none"
+    assert mcp_commands.always_ask_which_account(pinned) == pinned
+
+
+@pytest.mark.asyncio
+async def test_login_does_not_claim_a_sign_in_that_never_happened(psok_home):
+    """`login` used to report "authorized" for anything that connected, which is
+    how a Google connector with no account attached reported itself signed in."""
+    mcp_commands.add_from_catalogue("memory")
+
+    assert "needs no account" in await mcp_commands.login("memory")
+
+
+def test_an_abandoned_sign_in_is_not_mistaken_for_an_account(psok_home, monkeypatch):
+    """A server keeps flow bookkeeping beside its accounts. Counting the
+    bookkeeping reported a connector signed in "as oauth_states" when nobody
+    had finished signing in."""
+    mcp_commands.add_from_catalogue("google-workspace")
+    credentials = psok_home / "google-credentials"
+    credentials.mkdir()
+    (credentials / "oauth_states.json").write_text("{}")
+    monkeypatch.setattr(
+        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+    )
+
+    config = load_servers()["google-workspace"]
+    assert mcp_commands.is_signed_in(config) is False
+    assert mcp_commands.account("google-workspace") is None
+
+    (credentials / "someone@gmail.com.json").write_text("{}")
+    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is True
+    assert mcp_commands.account("google-workspace") == "someone@gmail.com"
+
+    # Signing out clears the bookkeeping as well, so the next flow starts clean.
+    mcp_commands.sign_out("google-workspace")
+    assert list(credentials.iterdir()) == []

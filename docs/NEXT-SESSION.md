@@ -52,11 +52,16 @@ rail.
   running `psok index` against it once would close this gap.
 - `sqlite-vec` and FTS5 both work. Bubblewrap is available, so the shell
   sandbox is real and differentially tested.
-- The GitHub connector (`github` in `mcp.yaml`) has no OAuth client registered
-  and was switched off at the end of the last session to stop `/api/health`
-  reporting `degraded` by default. Registering one (steps are in
-  [architecture/mcp-oauth.md](architecture/mcp-oauth.md)) and switching it back
-  on is a five-minute task whenever GitHub access is actually wanted.
+- **The GitHub connector has a registered OAuth client** and has completed a
+  real sign-in (44 tools). Its token needed the `Accept: application/json`
+  fix-up in `psok/mcp/oauth.py` to survive: GitHub's token endpoint answers
+  form-encoded without it, which the SDK's `OAuthToken.model_validate_json`
+  cannot parse.
+- **Google Workspace is configured but the redirect URI is the thing to check
+  first.** `workspace-mcp` runs its own OAuth on `http://localhost:8765/oauth2callback`
+  — *not* PSOK's `:33418` callback, which is GitHub's. That exact URI has to be
+  registered on the Google Cloud OAuth client or sign-in ends in
+  `redirect_uri_mismatch`.
 - Tests: `pytest` (268 unit, 1 skipped by design), `pytest -m live` (5, spawns
   real MCP servers and uses the network), `ruff check psok tests`. Frontend:
   `npm run lint`, `npm run build`, `npm run smoke` (needs a running
@@ -169,7 +174,8 @@ does not.
 | Add / remove a connector | `POST,DELETE /api/mcp/servers` |
 | Attach a hand-registered OAuth app | `POST /api/mcp/servers/{name}/oauth-client` |
 | **Credentials a stdio server takes through the environment** | `POST /api/mcp/servers/{name}/env`, `DELETE /api/mcp/servers/{name}/env/{key}` |
-| Start OAuth, poll for the login URL | `POST /api/mcp/servers/{name}/login`, `GET /api/mcp/authorizations` |
+| **Sign in, or switch account** | `POST /api/mcp/servers/{name}/login` `{force, account_hint}`, `GET /api/mcp/authorizations` |
+| **Sign out, so the next sign-in asks which account** | `POST /api/mcp/servers/{name}/logout` |
 | Connect one now | `POST /api/mcp/servers/{name}/connect` |
 | **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}` |
 | **Automations (beta): list, create, retime, delete** | `GET,POST /api/automations`, `PATCH,DELETE /api/automations/{id}` |
@@ -321,10 +327,14 @@ expect two prompts the first time someone uses a new connector.
    connector reports what is running rather than what was switched on.
 5. **`/` autocomplete** — backed by `/api/skills/search`; the marker is left in
    the message for the backend to parse and strip.
-6. **Connector setup** — catalogue with each entry's setup steps, OAuth client,
-   login with the authorization URL polled and shown as a link, and environment
-   credentials for stdio servers, all in a per-row setup panel in the
-   Connectors view.
+6. **Connector setup** — a connector is a row you *open*, not a row of four
+   controls. The detail page carries a **Connection** block (who it is signed
+   in as, Reconnect, Sign out), the credentials form, every action the
+   connector actually exposes with its risk, and an Information table. Sign-in
+   state is read from the store that really holds it: a stdio server keeps its
+   own accounts, so PSOK's keychain is the wrong place to ask, and asking it
+   anyway is what made a Google connector with no account attached report
+   itself signed in.
 7. **Audit, permissions and memory** — the trail with an optional follow mode;
    the standing approvals with a revoke button, in Settings → Permissions; and
    the standing facts with a switch and a way to retire one.
@@ -388,6 +398,13 @@ was fine.
 
 **Mutation-check regression tests.** Reintroduce the bug and confirm the test
 fails. A test that cannot fail protects nothing.
+
+**Tests must not read the developer's machine.** `conftest.py` isolated
+`PSOK_HOME` but not the OS keychain, so every credential test read and wrote
+the real login keyring: one assertion passed or failed depending on whether
+the person running it happened to be signed into GitHub, and a full `pytest`
+run deleted a real GitHub token. Both are fixed by an in-memory keyring in the
+autouse fixture. Any new store PSOK writes to needs the same treatment.
 
 **Read this file before starting work, and update it before ending a
 session.** It exists so state does not have to be re-derived from git log and

@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+import webbrowser
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from psok.mcp import catalogue as cat
 from psok.mcp.client import OAuthRegistrationUnsupported, OAuthRequired
@@ -15,10 +20,19 @@ from psok.mcp.config import (
     remove_server,
 )
 from psok.mcp.manager import MCPManager
-from psok.mcp.oauth import REDIRECT_URI, forget, has_tokens
-from psok.secrets import delete_secret, set_secret
+from psok.mcp.oauth import (
+    PENDING,
+    REDIRECT_URI,
+    PendingAuthorization,
+    forget,
+    has_tokens,
+    token_ref,
+)
+from psok.secrets import delete_secret, get_secret, set_secret
 from psok.security.confirmation import ConfirmationService, auto_approve
 from psok.tools.registry import ToolRegistry
+
+log = logging.getLogger(__name__)
 
 
 def _manager(open_browser: bool = True) -> MCPManager:
@@ -104,15 +118,81 @@ def registration_help(name: str, catalogue_id: str | None = None) -> str:
     return REGISTRATION_HELP.get(catalogue_id or name, "")
 
 
+def entry_for(config: ServerConfig) -> cat.CatalogueEntry | None:
+    """The catalogue entry a configured server came from, if any."""
+    return cat.get(config.catalogue_id or config.name)
+
+
+def auth_kind(config: ServerConfig) -> str:
+    """Who runs this server's sign-in: PSOK, the server itself, or nobody.
+
+    `client.py`'s `_transport` builds PSOK's OAuth provider for remote
+    transports only. A stdio server therefore never sees it, however its config
+    is flagged -- it runs its own flow in its own process. Conflating the two
+    is what let a Google client id be stored in fields nothing downstream reads
+    while the interface reported the connector as signed in.
+
+    Returns "oauth" (PSOK drives it), "setup" (the server drives it, once it
+    has credentials), or "none".
+    """
+    entry = entry_for(config)
+    if config.is_remote and config.oauth:
+        return "oauth"
+    if entry is not None and entry.auth is cat.AuthKind.SETUP:
+        return "setup"
+    return "none"
+
+
+def _reject_implausible_client_id(name: str, client_id: str) -> None:
+    """Refuse a value that cannot be an OAuth client id.
+
+    Every provider PSOK supports issues an opaque token here -- never an email
+    address, never something with a space in it. Storing one anyway replaced a
+    working Google client with the string `dadad@gmail.com` and left the
+    connector reporting itself configured, so this is a real failure mode
+    rather than a hypothetical one.
+    """
+    if "@" in client_id or client_id != client_id.strip() or " " in client_id:
+        raise ValueError(
+            f"'{client_id}' is not an OAuth client id for '{name}'. A client id is the"
+            " opaque identifier the provider issued when you registered the app"
+            " (GitHub: Ov23li…, Google: …apps.googleusercontent.com) -- not an email"
+            " address or an account name."
+        )
+
+
 def set_oauth_client(name: str, client_id: str, client_secret: str | None = None) -> ServerConfig:
     """Attach a hand-registered OAuth client to a server.
 
-    The secret goes to the keychain; only its reference is written to mcp.yaml.
+    Where the credentials belong depends on who runs the flow. PSOK's OAuth
+    provider is built for remote transports only, so a stdio server's client id
+    and secret go into the environment its process reads -- the catalogue entry
+    names the two variables. Secrets go to the keychain either way; mcp.yaml
+    keeps only a reference.
     """
     servers = load_servers()
     config = servers.get(name)
     if config is None:
         raise ValueError(f"no server named '{name}' in mcp.yaml")
+    _reject_implausible_client_id(name, client_id)
+
+    if config.transport is Transport.STDIO:
+        entry = entry_for(config)
+        if entry is None or not entry.client_id_env:
+            raise ValueError(
+                f"'{name}' runs over stdio and PSOK does not run its sign-in, so there is"
+                " nowhere for an OAuth client to go. Set whatever variables the server"
+                " documents as environment credentials instead."
+            )
+        # `oauth: true` on a stdio server is a claim `_transport` never honours.
+        config.oauth = False
+        config.oauth_client_id = None
+        config.oauth_client_secret_ref = None
+        add_server(config)
+        set_env(name, entry.client_id_env, client_id, secret=False)
+        if client_secret and entry.client_secret_env:
+            set_env(name, entry.client_secret_env, client_secret, secret=True)
+        return load_servers()[name]
 
     config.oauth = True
     config.oauth_client_id = client_id
@@ -189,19 +269,171 @@ async def connect_and_report(name: str | None = None, *, open_browser: bool = Tr
         await manager.shutdown()
 
 
-async def login(name: str) -> str:
-    """Run the OAuth flow by connecting; the SDK triggers it on the 401."""
+def _credentials_dir(config: ServerConfig) -> Path | None:
+    entry = entry_for(config)
+    if entry is None or not entry.credentials_path:
+        return None
+    return Path(entry.credentials_path).expanduser()
+
+
+def _account_files(directory: Path | None) -> list[Path]:
+    """The credential files that stand for a signed-in account, and no others.
+
+    A server keeps more than accounts in this directory: an abandoned sign-in
+    leaves `oauth_states.json` behind, and counting that as an account reported
+    the connector signed in "as oauth_states" when nobody had finished signing
+    in at all. Accounts are the files named for the address they belong to.
+    """
+    if directory is None or not directory.is_dir():
+        return []
+    return sorted((p for p in directory.iterdir() if p.is_file() and "@" in p.stem),
+                  key=lambda p: p.stem)
+
+
+def sign_out(name: str) -> list[str]:
+    """Forget the signed-in account, so the next sign-in reaches the chooser.
+
+    Switching a connector off only stops its process; the account it was signed
+    in as survives in storage, which is why reconnecting used to succeed
+    silently as whoever signed in first, with no way to change account short of
+    deleting keychain entries by hand. Signing out clears both stores: PSOK's
+    own tokens, and -- for a server that runs its own flow -- the credential
+    files that server keeps.
+
+    The registered *client* is deliberately cleared too: `seed_preregistered_client`
+    puts it back from mcp.yaml on the next connect, so this costs nothing and
+    stops a stale registration shadowing a re-entered one.
+    """
+    config = load_servers().get(name)
+    if config is None:
+        raise ValueError(f"no server named '{name}' in mcp.yaml")
+
+    cleared: list[str] = []
+    if has_tokens(name):
+        cleared.append("the stored access token")
+    forget(name)
+
+    directory = _credentials_dir(config)
+    if directory is not None and directory.is_dir():
+        accounts = _account_files(directory)
+        # Everything else in here is flow bookkeeping for a sign-in that is now
+        # being abandoned, so it goes too rather than being left to confuse the
+        # next one.
+        for path in directory.iterdir():
+            if path.is_file():
+                path.unlink()
+        if accounts:
+            noun = "account" if len(accounts) == 1 else "accounts"
+            cleared.append(f"{len(accounts)} signed-in {noun} held by the server itself")
+    return cleared
+
+
+def _authorization_url_in(text: str) -> str | None:
+    match = re.search(r"https?://\S+", text or "")
+    if match is None:
+        return None
+    return match.group(0).rstrip(").,'\"")
+
+
+def always_ask_which_account(url: str) -> str:
+    """Make the provider show its account chooser rather than assuming.
+
+    An authorization URL without this reuses whichever account the browser is
+    already signed into, silently -- so someone with two Google accounts gets
+    the wrong one with no chooser and no way to tell which they got. `consent`
+    goes with it because skipping the consent screen also skips issuing a
+    refresh token on Google, leaving a connection that dies in an hour.
+    """
+    parsed = urlparse(url)
+    if parsed.hostname not in ("accounts.google.com", "www.google.com"):
+        return url
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "prompt" in query:
+        return url
+    query["prompt"] = ["select_account consent"]
+    query.setdefault("access_type", ["offline"])
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+
+
+async def _server_side_login(
+    config: ServerConfig, entry: cat.CatalogueEntry, account_hint: str | None
+) -> str:
+    """Sign in to a server that owns its own OAuth flow.
+
+    Connecting such a server proves only that its process started. The account
+    lives inside it, reached by the tool the catalogue names, and that tool
+    answers with the provider's authorization URL -- which is the thing the
+    user actually has to visit. Surfacing it through PENDING puts it on the
+    same banner every other pending sign-in uses.
+    """
+    manager = _manager(open_browser=False)
+    try:
+        await manager.connect_server(config)
+        connection = manager.connections.get(config.name)
+        if connection is None:
+            return f"'{config.name}' did not start, so its sign-in could not begin"
+
+        arguments: dict[str, str] = {"service_name": entry.title}
+        if account_hint:
+            arguments["user_google_email"] = account_hint
+        raw = await connection.call(entry.auth_tool or "", arguments)
+
+        from psok.mcp.manager import normalize_result
+
+        result = normalize_result(raw)
+        url = _authorization_url_in(result.content)
+        if url is None:
+            return (
+                f"'{config.name}' did not return a sign-in link. It said: "
+                f"{result.content.strip()[:400]}"
+            )
+        url = always_ask_which_account(url)
+
+        PENDING[config.name] = PendingAuthorization(
+            server_name=config.name, authorization_url=url
+        )
+        webbrowser.open(url)
+        return (
+            f"opened {entry.title}'s sign-in page. Choose the account you want to"
+            f" connect, then approve access."
+        )
+    except Exception as exc:
+        return f"could not start sign-in for '{config.name}': {exc}"
+    finally:
+        await manager.shutdown()
+
+
+async def login(name: str, *, force: bool = False, account_hint: str | None = None) -> str:
+    """Take the user to the provider's own login page and finish the handshake.
+
+    `force` signs out first. Without it a provider that still holds a session
+    hands back the same account without ever showing its chooser, which makes
+    "switch account" impossible from inside PSOK.
+    """
     servers = load_servers()
     config = servers.get(name)
     if config is None:
         return f"no server named '{name}' in mcp.yaml"
-    if not config.oauth:
-        return f"'{name}' is not configured for OAuth"
+
+    kind = auth_kind(config)
+    if kind == "none":
+        return f"'{name}' needs no account — it has nothing to sign in to"
+
+    if force:
+        sign_out(name)
+
+    entry = entry_for(config)
+    if kind == "setup":
+        if entry is None or not entry.auth_tool:
+            return (
+                f"'{name}' signs in on its own when a tool first needs it. Give it the"
+                " credentials it documents, then run any of its tools."
+            )
+        return await _server_side_login(config, entry, account_hint)
 
     manager = _manager(open_browser=True)
     try:
         count = await manager.connect_server(config)
-        return f"authorized '{name}' and discovered {count} tools"
     except OAuthRegistrationUnsupported as exc:
         help_text = registration_help(name, config.catalogue_id)
         return f"{exc}\n\n{help_text}" if help_text else str(exc)
@@ -212,17 +444,114 @@ async def login(name: str) -> str:
     finally:
         await manager.shutdown()
 
+    # Connecting is not the same as authorizing: a server that needs no token
+    # for `tools/list` would otherwise report a sign-in that never happened.
+    if not has_tokens(name):
+        return f"connected '{name}' and discovered {count} tools, but no token was stored"
+    return f"signed in to '{name}' and discovered {count} tools"
 
-def status() -> list[dict]:
+
+def account(name: str) -> str | None:
+    """Which account this connector is signed in as, where that is knowable.
+
+    Nothing here guesses. A server that keeps its accounts as files names them
+    by address; a provider with an identity endpoint is asked, using the token
+    already stored. Anything else answers None, which the interface renders as
+    "connected" rather than inventing a name -- the failure this replaces was
+    the model filling the gap with `wayne@example.com`.
+    """
+    config = load_servers().get(name)
+    if config is None:
+        return None
+
+    accounts = _account_files(_credentials_dir(config))
+    if accounts:
+        return ", ".join(p.stem for p in accounts)
+
+    entry = entry_for(config)
+    if entry is None or not entry.identity_url:
+        return None
+
+    raw = get_secret(token_ref(name))
+    if not raw:
+        return None
+    try:
+        import json
+
+        import httpx2
+
+        token = json.loads(raw).get("access_token")
+        if not token:
+            return None
+        response = httpx2.get(
+            entry.identity_url,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=5.0,
+        )
+        if response.status_code != 200:
+            return None
+        return response.json().get(entry.identity_field or "")
+    except Exception as exc:  # identity is a nicety; never fail a listing over it
+        log.debug("identity lookup for %s failed: %s", name, exc)
+        return None
+
+
+def missing_credentials(config: ServerConfig) -> list[str]:
+    """Variables this server needs before its sign-in can even begin."""
+    entry = entry_for(config)
+    if entry is None or auth_kind(config) != "setup":
+        return []
+    wanted = [v for v in (entry.client_id_env, entry.client_secret_env) if v]
+    return [key for key in wanted if key not in config.env]
+
+
+def is_signed_in(config: ServerConfig) -> bool | None:
+    """Whether an account is actually attached. None where there is none to attach.
+
+    A stdio server's account is its own to hold, so the question is answered by
+    its credential store rather than by PSOK's keychain -- reading the wrong one
+    is what made a connector that had never seen a Google account report itself
+    signed in.
+    """
+    kind = auth_kind(config)
+    if kind == "none":
+        return None
+    if _credentials_dir(config) is not None:
+        return bool(_account_files(_credentials_dir(config)))
+    if kind == "setup":
+        return None
+    return has_tokens(config.name)
+
+
+def status(*, with_accounts: bool = False) -> list[dict]:
     out = []
     for name, config in load_servers().items():
+        entry = entry_for(config)
+        signed_in = is_signed_in(config)
         out.append(
             {
                 "name": name,
+                "title": entry.title if entry else name,
+                "category": entry.category if entry else "Other",
+                "description": config.description or (entry.description if entry else None),
+                "requires": entry.requires if entry else None,
+                "homepage": entry.homepage if entry else None,
+                "setup_hint": entry.setup_hint if entry else None,
                 "transport": str(config.transport),
                 "enabled": config.enabled,
                 "oauth": config.oauth,
-                "authorized": has_tokens(name) if config.oauth else None,
+                # How this connector signs in, and whether it has: the two facts
+                # the interface needs to offer the right control.
+                "auth_kind": auth_kind(config),
+                "signed_in": signed_in,
+                "missing_credentials": missing_credentials(config),
+                # What to ask for before a server that runs its own flow can
+                # start it, where it cannot start without being told.
+                "account_hint_label": entry.account_hint_label if entry else None,
+                "client_id_env": entry.client_id_env if entry else None,
+                "account": account(name) if with_accounts and signed_in else None,
+                # Kept for older callers; `signed_in` is the one to read.
+                "authorized": signed_in,
                 "source": str(config.source),
                 "target": config.url or f"{config.command} {' '.join(config.args)}".strip(),
                 # Key names and whether each is held in the keychain. Values

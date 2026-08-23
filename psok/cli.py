@@ -430,9 +430,35 @@ def cmd_mcp_env(args: argparse.Namespace) -> int:
 def cmd_mcp_login(args: argparse.Namespace) -> int:
     from psok.mcp import commands as mcp
 
+    if getattr(args, "switch_account", False):
+        print(f"signing out of '{args.name}' first, so the provider asks which account")
     print(f"opening your browser to authorize '{args.name}'...")
     print("(complete the sign-in there; this will wait for the redirect)")
-    print(mcp.run(mcp.login(args.name)))
+    print(
+        mcp.run(
+            mcp.login(
+                args.name,
+                force=getattr(args, "switch_account", False),
+                account_hint=getattr(args, "account", None),
+            )
+        )
+    )
+    return 0
+
+
+def cmd_mcp_logout(args: argparse.Namespace) -> int:
+    from psok.mcp import commands as mcp
+
+    try:
+        cleared = mcp.sign_out(args.name)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if not cleared:
+        print(f"'{args.name}' had no signed-in account to forget")
+        return 0
+    print(f"signed out of '{args.name}': forgot {', and '.join(cleared)}")
+    print(f"sign in again with:  psok mcp login {args.name}")
     return 0
 
 
@@ -462,8 +488,12 @@ def cmd_mcp_status(_: argparse.Namespace) -> int:
         return 0
     for row in rows:
         auth = ""
-        if row["oauth"]:
-            auth = " [authorized]" if row["authorized"] else " [needs sign-in]"
+        if row["signed_in"] is True:
+            auth = " [signed in]"
+        elif row["missing_credentials"]:
+            auth = f" [needs {', '.join(row['missing_credentials'])}]"
+        elif row["signed_in"] is False:
+            auth = " [needs sign-in]"
         state = "enabled" if row["enabled"] else "disabled"
         print(f"  {row['name']:<18} {row['transport']:<17} {state}{auth}")
         print(f"  {'':<18} {_brief(row['target'], 90)}")
@@ -513,7 +543,20 @@ def _add_mcp_commands(sub) -> None:
 
     login = mcp_sub.add_parser("login", help="sign in to a server through your browser")
     login.add_argument("name")
+    login.add_argument(
+        "--switch-account",
+        action="store_true",
+        help="sign out first, so the provider asks which account to use",
+    )
+    login.add_argument(
+        "--account",
+        help="the account to sign in as, for servers that must be told before they can start",
+    )
     login.set_defaults(func=cmd_mcp_login)
+
+    logout = mcp_sub.add_parser("logout", help="forget the account a server is signed in as")
+    logout.add_argument("name")
+    logout.set_defaults(func=cmd_mcp_logout)
 
     connect = mcp_sub.add_parser("connect", help="connect servers and list their tools")
     connect.add_argument("name", nargs="?", help="omit to connect every enabled server")

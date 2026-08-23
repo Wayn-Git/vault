@@ -23,7 +23,9 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import httpx2
 from mcp.client.auth import OAuthClientProvider
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
@@ -265,6 +267,36 @@ def build_auth_provider(
         redirect_handler=redirect_handler,
         callback_handler=callback_handler,
     )
+
+
+async def _prefer_json_accept(request: httpx2.Request) -> None:
+    """Ask for a JSON response body wherever a request doesn't already say otherwise.
+
+    The MCP SDK's OAuth token-exchange and refresh requests carry a
+    Content-Type but no Accept header (see mcp/client/auth/oauth2.py's
+    `_build_token_request` / `_build_refresh_request`). Per RFC 6749 the token
+    endpoint's response format when Accept is unspecified is up to the
+    provider, and GitHub's answer is `application/x-www-form-urlencoded`
+    (`access_token=...&token_type=bearer&...`) rather than JSON, which fails
+    `OAuthToken.model_validate_json`. Every genuine MCP protocol request
+    already sets its own explicit "accept" header (see
+    streamable_http.py's `_prepare_headers`), so this only ever fills a gap
+    left by the OAuth flow -- it never overrides an existing Accept header.
+    """
+    if "accept" not in request.headers:
+        request.headers["accept"] = "application/json"
+
+
+def mcp_http_client_factory(
+    headers: dict[str, str] | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+) -> httpx2.AsyncClient:
+    """create_mcp_http_client, plus the Accept-header fix-up above when OAuth is in play."""
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    if auth is not None:
+        client.event_hooks["request"].append(_prefer_json_accept)
+    return client
 
 
 def has_tokens(server_name: str) -> bool:

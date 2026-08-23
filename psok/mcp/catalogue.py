@@ -40,6 +40,29 @@ class CatalogueEntry:
     requires: str | None = None  # what the user must have installed
     setup_hint: str | None = None  # shown when auth is SETUP
     homepage: str | None = None
+    # Where a SETUP server's client credentials actually belong. PSOK's own
+    # OAuth layer is consulted for remote transports only (see client.py's
+    # `_transport`), so a stdio server that runs its own flow reads its client
+    # id and secret from the environment instead. Without this mapping,
+    # `set_oauth_client` wrote them to fields nothing downstream reads and then
+    # reported success.
+    client_id_env: str | None = None
+    client_secret_env: str | None = None
+    # A stdio server that owns its OAuth exposes a tool to begin it. This is how
+    # "Sign in" reaches the provider's real login page for such a server rather
+    # than spawning the process and calling that authorization.
+    auth_tool: str | None = None
+    # Some servers cannot begin their own flow without being told which account
+    # it is for. Naming that here lets the interface ask for it generically
+    # rather than special-casing one provider.
+    account_hint_label: str | None = None
+    # The server's own credential store, so signing out actually forgets the
+    # account instead of leaving the next connect silently reusing it.
+    credentials_path: str | None = None
+    # Who is signed in, asked of the provider with the stored token. Only set
+    # where one cheap unauthenticated-shaped GET answers it.
+    identity_url: str | None = None
+    identity_field: str | None = None
 
     def to_server_config(self, name: str | None = None) -> ServerConfig:
         return ServerConfig(
@@ -104,6 +127,15 @@ CATALOGUE: list[CatalogueEntry] = [
         url="https://api.githubcopilot.com/mcp/",
         oauth_scopes=["repo", "read:org", "read:user", "gist", "notifications", "workflow"],
         homepage="https://github.com/github/github-mcp-server",
+        setup_hint=(
+            "GitHub publishes no dynamic registration endpoint, so register one app once:\n"
+            "  1. github.com/settings/developers -> New OAuth App\n"
+            "  2. Authorization callback URL: http://127.0.0.1:33418/oauth/callback\n"
+            "  3. Generate a client secret\n"
+            "  4. Paste the client id and secret below, then sign in."
+        ),
+        identity_url="https://api.github.com/user",
+        identity_field="login",
     ),
     # ----------------------------------------------------------------- google
     CatalogueEntry(
@@ -134,11 +166,15 @@ CATALOGUE: list[CatalogueEntry] = [
             "  2. OAuth consent screen -> External -> add yourself as a test user\n"
             "  3. Credentials -> Create OAuth client ID -> *Web application*\n"
             "     Authorised redirect URI: http://localhost:8765/oauth2callback\n"
-            "  4. psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_ID=<id>\n"
-            "  5. psok mcp env google-workspace GOOGLE_OAUTH_CLIENT_SECRET=<secret> --secret\n"
-            "The first tool call opens Google's own consent page in your browser."
+            "  4. Paste the client id and secret below, then sign in.\n"
+            "Signing in opens Google's own account chooser in your browser."
         ),
         homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
+        client_id_env="GOOGLE_OAUTH_CLIENT_ID",
+        client_secret_env="GOOGLE_OAUTH_CLIENT_SECRET",
+        auth_tool="start_google_auth",
+        account_hint_label="Google account",
+        credentials_path="~/.google_workspace_mcp/credentials",
     ),
     # ------------------------------------------------------------------ local
     CatalogueEntry(
