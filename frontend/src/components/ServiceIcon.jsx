@@ -158,6 +158,45 @@ const MARKS = {
       />
     ),
   },
+  vercel: {
+    bg: '#000000',
+    node: <path fill="#ffffff" d="M12 3.5 21.5 20.5H2.5L12 3.5Z" />,
+  },
+  linkedin: {
+    bg: '#0a66c2',
+    node: (
+      <>
+        <rect x="3" y="3" width="18" height="18" rx="2.4" fill="#0a66c2" />
+        <circle cx="7.4" cy="7.4" r="1.7" fill="#fff" />
+        <path fill="#fff" d="M6.1 10.2h2.6v8H6.1zM10.4 10.2H13v1.1a3 3 0 0 1 2.6-1.3c2 0 3 1.3 3 3.6v4.6h-2.6v-4.1c0-1.1-.4-1.8-1.4-1.8s-1.6.7-1.6 1.8v4.1h-2.6v-8Z" />
+      </>
+    ),
+  },
+  spotify: {
+    bg: '#1db954',
+    node: (
+      <>
+        <circle cx="12" cy="12" r="9.2" fill="#1db954" />
+        <path
+          d="M7.4 9.6c3-.8 6.2-.5 8.8 1M8 12.5c2.5-.6 5.1-.4 7.3.9M8.6 15.3c2-.5 4-.3 5.8.7"
+          stroke="#000"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          fill="none"
+        />
+      </>
+    ),
+  },
+  'microsoft-todo': {
+    bg: '#ffffff',
+    node: (
+      <>
+        <rect x="3.2" y="4.5" width="17.6" height="15" rx="1.8" fill="#2564cf" />
+        <path d="M3.2 8.2h17.6" stroke="#fff" strokeWidth="1.2" opacity="0.5" />
+        <path d="M8 13.8l2.4 2.4 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      </>
+    ),
+  },
   skill: {
     bg: '#2b2721',
     node: (

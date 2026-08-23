@@ -62,6 +62,21 @@ rail.
   — *not* PSOK's `:33418` callback, which is GitHub's. That exact URI has to be
   registered on the Google Cloud OAuth client or sign-in ends in
   `redirect_uri_mismatch`.
+- **Vercel, Microsoft To Do, LinkedIn and Spotify were added and each was
+  started before it shipped.** Verified: Vercel accepts PSOK's *dynamic*
+  registration (`POST …/login/oauth/register` → 201), so unlike GitHub it needs
+  nothing registered by hand; Microsoft To Do's `sign_in` returns a device code
+  and URL; LinkedIn discovers 19 tools; Spotify 22. Spotify is the one still
+  needing credentials — a Spotify developer app, entered in its panel.
+- **Two were refused, and why.** `lharries/whatsapp-mcp` publishes no package at
+  all (clone + a separate Go bridge + QR). Every published WhatsApp server
+  instead depends on `better-sqlite3`, which supports Node 20–25 while this
+  machine runs **Node 26**, so they exit 1 with no message — recheck when
+  `better-sqlite3` ships Node 26 support. `jordanburke/microsoft-todo-mcp-server`
+  is broken in **all five** published versions (`Dynamic require of "fs" is not
+  supported`); `fabienbutz/microsoft-todo-mcp` shipped in its place and is
+  better anyway — it signs in with Microsoft's own public client, so there is no
+  Azure app to register.
 - Tests: `pytest` (268 unit, 1 skipped by design), `pytest -m live` (5, spawns
   real MCP servers and uses the network), `ruff check psok tests`. Frontend:
   `npm run lint`, `npm run build`, `npm run smoke` (needs a running

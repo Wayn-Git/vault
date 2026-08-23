@@ -48,10 +48,22 @@ class CatalogueEntry:
     # reported success.
     client_id_env: str | None = None
     client_secret_env: str | None = None
+    # Some read neither: they want a JSON file of their own. Same idea as the
+    # two variables above -- put the credentials where this server actually
+    # looks -- with the file's path and the keys it expects. The keychain stays
+    # the source of truth; the file is written from it.
+    credentials_file: str | None = None
+    credentials_file_keys: dict[str, str] = field(default_factory=dict)
     # A stdio server that owns its OAuth exposes a tool to begin it. This is how
     # "Sign in" reaches the provider's real login page for such a server rather
     # than spawning the process and calling that authorization.
     auth_tool: str | None = None
+    # Others sign in by being run differently rather than by exposing a tool --
+    # a `--login` flag, or a second binary in the same package. Without this,
+    # such a server can only be signed into by hand in a terminal, and PSOK's
+    # Connect button would claim a sign-in it never performed.
+    auth_command: str | None = None  # defaults to the entry's own command
+    auth_command_args: list[str] = field(default_factory=list)
     # Some servers cannot begin their own flow without being told which account
     # it is for. Naming that here lets the interface ask for it generically
     # rather than special-casing one provider.
@@ -62,8 +74,25 @@ class CatalogueEntry:
     # mean nine identical sign-ins to the same address.
     shares_account_with: str | None = None
     # The server's own credential store, so signing out actually forgets the
-    # account instead of leaving the next connect silently reusing it.
+    # account instead of leaving the next connect silently reusing it. Either a
+    # directory or a single file -- a token cache is often just one file.
     credentials_path: str | None = None
+    # Which files in that directory stand for a signed-in account. The default
+    # matches Google's, whose credential files are named by address, and it
+    # exists to exclude the `oauth_states.json` an abandoned flow leaves behind.
+    # A server storing something else -- LinkedIn keeps a browser profile --
+    # says so here, or it reports itself signed out forever.
+    account_files: str = "*@*"
+    # Where the store is one JSON file that exists before anyone signs in --
+    # because the client credentials live in it too -- the key that appears
+    # only once a sign-in has actually completed. Without this, storing a
+    # client id would report the connector signed in, which is the exact claim
+    # this module exists to stop making.
+    account_key: str | None = None
+    # Whether those filenames name the account. False where the store says only
+    # that *someone* is signed in: better to render "Signed in" than to present
+    # a profile directory's filename as if it were an address.
+    account_from_filename: bool = True
     # Who is signed in, asked of the provider with the stored token. Only set
     # where one cheap unauthenticated-shaped GET answers it.
     identity_url: str | None = None
@@ -253,6 +282,118 @@ CATALOGUE: list[CatalogueEntry] = [
         args=["-y", "@modelcontextprotocol/server-memory"],
         requires="Node.js (npx)",
         homepage="https://github.com/modelcontextprotocol/servers",
+    ),
+    # ----------------------------------------------------------------- vercel
+    CatalogueEntry(
+        id="vercel",
+        title="Vercel",
+        description=(
+            "Projects, deployments and deployment logs, plus Web Analytics and a search"
+            " over Vercel's own documentation."
+        ),
+        category="Development",
+        auth=AuthKind.OAUTH,
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://mcp.vercel.com",
+        # Vercel's authorization server publishes a registration_endpoint, so
+        # unlike GitHub it registers PSOK itself and needs nothing registered by
+        # hand. Scopes are left to discovery: the resource advertises `openid`
+        # and naming more here would only narrow what it grants.
+        homepage="https://vercel.com/docs/agent-resources/vercel-mcp",
+    ),
+    # ------------------------------------------------------------- microsoft
+    CatalogueEntry(
+        id="microsoft-todo",
+        title="Microsoft To Do",
+        description="Task lists, tasks and checklist items in Microsoft To Do.",
+        category="Productivity",
+        auth=AuthKind.SETUP,
+        transport=Transport.STDIO,
+        command="npx",
+        args=["-y", "microsoft-todo-mcp"],
+        requires="Node.js (npx)",
+        setup_hint=(
+            "Nothing to register. This server signs in with Microsoft's own public\n"
+            "client, and asks only for the `Tasks.ReadWrite` scope — your To Do lists\n"
+            "and nothing else: no mail, no files, no calendar.\n"
+            "Connecting shows a short code and opens microsoft.com/devicelogin. Enter\n"
+            "the code there and approve, and the connection completes on its own."
+        ),
+        homepage="https://github.com/fabienbutz/microsoft-todo-mcp",
+        auth_tool="sign_in",
+        # One cache file rather than a directory of accounts, and its name says
+        # nothing about who is signed in.
+        credentials_path="~/.config/microsoft-todo-mcp/token-cache.json",
+        account_from_filename=False,
+    ),
+    # -------------------------------------------------------------- linkedin
+    CatalogueEntry(
+        id="linkedin",
+        title="LinkedIn",
+        description=(
+            "Profiles, companies, jobs, the feed and your inbox, read through a real"
+            " browser session rather than an API."
+        ),
+        category="Communication",
+        auth=AuthKind.SETUP,
+        transport=Transport.STDIO,
+        command="uvx",
+        args=["mcp-server-linkedin@latest"],
+        requires="uv (uvx). The server downloads and manages its own Chromium.",
+        setup_hint=(
+            "Read this before connecting. LinkedIn has no API for this: the server\n"
+            "signs into your real account in a browser and reads the pages as you\n"
+            "would. Automated access is against LinkedIn's terms of service, and\n"
+            "accounts do get restricted or banned for it. Connecting opens a browser\n"
+            "window for you to sign in; the session is kept in ~/.linkedin-mcp/profile\n"
+            "and signing out deletes it. Keep to one active session at a time."
+        ),
+        homepage="https://github.com/stickerdaniel/linkedin-mcp-server",
+        # A browser profile, not a file per account: it says someone is signed
+        # in without saying who.
+        credentials_path="~/.linkedin-mcp/profile",
+        account_files="*",
+        account_from_filename=False,
+        auth_command_args=["mcp-server-linkedin@latest", "--login"],
+    ),
+    # --------------------------------------------------------------- spotify
+    CatalogueEntry(
+        id="spotify",
+        title="Spotify",
+        description=(
+            "Search, playback control, queue, saved tracks and playlist management."
+        ),
+        category="Media",
+        auth=AuthKind.SETUP,
+        transport=Transport.STDIO,
+        command="npx",
+        args=["-y", "@0xbarandiaran/spotify-mcp-server"],
+        requires="Node.js (npx) and a Spotify developer app",
+        setup_hint=(
+            "This is a published fork of marcelmarais/spotify-mcp-server, updated for\n"
+            "Spotify's February 2026 API change — the original is not on npm.\n"
+            "Spotify requires your own app rather than a shared one:\n"
+            "  1. developer.spotify.com/dashboard -> Create app\n"
+            "  2. Redirect URI: http://127.0.0.1:8888/callback (this exact URI)\n"
+            "  3. Paste the client id and secret below, then press Connect.\n"
+            "Everything works on a free account except volume control, which Spotify\n"
+            "allows only for Premium."
+        ),
+        homepage="https://github.com/marcelmarais/spotify-mcp-server",
+        # This server reads no environment at all -- verified against its own
+        # `getConfigFilePath`, which prefers ~/.spotify-mcp/config.json.
+        credentials_file="~/.spotify-mcp/config.json",
+        credentials_file_keys={
+            "client_id": "clientId",
+            "client_secret": "clientSecret",
+            "redirect_uri": "redirectUri",
+        },
+        credentials_path="~/.spotify-mcp/config.json",
+        # The config file exists as soon as the client id is stored, so only the
+        # token a finished sign-in writes means signed in.
+        account_key="accessToken",
+        account_from_filename=False,
+        auth_command_args=["-y", "-p", "@0xbarandiaran/spotify-mcp-server", "spotify-mcp-auth"],
     ),
 ]
 

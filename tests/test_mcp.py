@@ -6,6 +6,8 @@ live end-to-end proof lives in test_mcp_live.py.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from psok.mcp import catalogue as cat
@@ -500,7 +502,9 @@ def test_signing_out_forgets_the_account_the_server_itself_holds(psok_home, monk
     cleared = mcp_commands.sign_out("google-gmail")
 
     assert cleared and "1 signed-in account" in cleared[0]
-    assert list(credentials.iterdir()) == []
+    # The whole store goes, not just the files at its top level: a browser
+    # profile keeps its session in subdirectories.
+    assert not credentials.exists()
     assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is False
 
 
@@ -574,7 +578,7 @@ def test_an_abandoned_sign_in_is_not_mistaken_for_an_account(psok_home, monkeypa
 
     # Signing out clears the bookkeeping as well, so the next flow starts clean.
     mcp_commands.sign_out("google-gmail")
-    assert list(credentials.iterdir()) == []
+    assert not credentials.exists()
 
 
 def test_google_apps_are_separate_connectors_sharing_one_account(psok_home):
@@ -637,3 +641,141 @@ def test_one_google_client_covers_every_google_app(psok_home):
 
     # GitHub authorizes a different account and must not be written to.
     assert "GOOGLE_OAUTH_CLIENT_ID" not in servers["github"].env
+
+
+# --------------------------------------------------- the four new connectors
+
+
+def test_vercel_registers_itself_unlike_github():
+    """Vercel's authorization server publishes a registration_endpoint, so it is
+    the first OAuth connector needing nothing registered by hand."""
+    entry = cat.get("vercel")
+    assert entry.auth is cat.AuthKind.OAUTH
+    assert entry.transport is Transport.STREAMABLE_HTTP
+    assert entry.url == "https://mcp.vercel.com"
+    assert "vercel" not in mcp_commands.REGISTRATION_HELP
+    # Naming scopes here would narrow what discovery negotiates.
+    assert entry.oauth_scopes == []
+
+
+def test_a_store_that_does_not_name_accounts_says_signed_in_without_inventing_one(
+    psok_home, monkeypatch
+):
+    """LinkedIn keeps a browser profile, not a file per address. It can say that
+    someone is signed in; it cannot say who, and guessing from the filename
+    would be the same invention this module exists to prevent."""
+    mcp_commands.add_from_catalogue("linkedin")
+    profile = psok_home / "linkedin-profile"
+    monkeypatch.setattr(cat.get("linkedin"), "credentials_path", str(profile), raising=False)
+
+    config = load_servers()["linkedin"]
+    assert mcp_commands.is_signed_in(config) is False
+    # No client to register, so nothing is outstanding before sign-in.
+    assert mcp_commands.missing_credentials(config) == []
+
+    profile.mkdir()
+    (profile / "Cookies").write_bytes(b"session")
+    assert mcp_commands.is_signed_in(load_servers()["linkedin"]) is True
+    assert mcp_commands.account("linkedin") is None
+
+
+def test_signing_out_removes_a_nested_profile_not_just_its_top_level(psok_home, monkeypatch):
+    mcp_commands.add_from_catalogue("linkedin")
+    profile = psok_home / "linkedin-profile"
+    (profile / "Default" / "Storage").mkdir(parents=True)
+    (profile / "Default" / "Storage" / "leveldb").write_bytes(b"x")
+    (profile / "Cookies").write_bytes(b"session")
+    monkeypatch.setattr(cat.get("linkedin"), "credentials_path", str(profile), raising=False)
+
+    mcp_commands.sign_out("linkedin")
+
+    assert not profile.exists()
+    assert mcp_commands.is_signed_in(load_servers()["linkedin"]) is False
+
+
+def test_a_single_file_credential_store_is_its_own_account(psok_home, monkeypatch):
+    """Microsoft To Do keeps one token cache, not a directory of accounts.
+    Reading it as a directory found nothing and reported a signed-in connector
+    as signed out forever."""
+    mcp_commands.add_from_catalogue("microsoft-todo")
+    cache = psok_home / "token-cache.json"
+    monkeypatch.setattr(cat.get("microsoft-todo"), "credentials_path", str(cache), raising=False)
+
+    assert mcp_commands.is_signed_in(load_servers()["microsoft-todo"]) is False
+    cache.write_text('{"accessToken": "x"}')
+    assert mcp_commands.is_signed_in(load_servers()["microsoft-todo"]) is True
+    assert mcp_commands.account("microsoft-todo") is None
+
+
+def test_microsoft_todo_needs_nothing_registered(psok_home):
+    """It signs in with Microsoft's own public client, so there is no client id
+    to ask for -- only a sign-in."""
+    mcp_commands.add_from_catalogue("microsoft-todo")
+    config = load_servers()["microsoft-todo"]
+    assert mcp_commands.missing_credentials(config) == []
+    assert cat.get("microsoft-todo").auth_tool == "sign_in"
+
+
+def test_credentials_reach_the_json_file_a_server_actually_reads(psok_home, monkeypatch):
+    """Spotify reads no environment at all -- verified against its own
+    getConfigFilePath. Routing its client into env vars would have stored it
+    where nothing looks, the same failure as Google's."""
+    mcp_commands.add_from_catalogue("spotify")
+    config_file = psok_home / "spotify" / "config.json"
+    monkeypatch.setattr(cat.get("spotify"), "credentials_file", str(config_file), raising=False)
+    monkeypatch.setattr(cat.get("spotify"), "credentials_path", str(config_file), raising=False)
+
+    assert mcp_commands.missing_credentials(load_servers()["spotify"]) == ["a client id and secret"]
+
+    mcp_commands.set_oauth_client("spotify", "abc123", "s3cret")
+
+    written = json.loads(config_file.read_text())
+    assert written["clientId"] == "abc123"
+    assert written["clientSecret"] == "s3cret"
+    assert written["redirectUri"] == "http://127.0.0.1:8888/callback"
+    # The keychain stays the source of truth (ADR-0012).
+    from psok.secrets import get_secret
+
+    assert get_secret("psok-mcp/spotify.client_secret") == "s3cret"
+    assert config_file.stat().st_mode & 0o777 == 0o600
+    assert mcp_commands.missing_credentials(load_servers()["spotify"]) == []
+
+
+def test_storing_a_client_is_not_signing_in(psok_home, monkeypatch):
+    """Spotify's client id and its access token share one file, so the file
+    existing cannot mean signed in -- that is exactly the claim that made a
+    Google connector with no account report itself connected."""
+    mcp_commands.add_from_catalogue("spotify")
+    config_file = psok_home / "spotify" / "config.json"
+    for field in ("credentials_file", "credentials_path"):
+        monkeypatch.setattr(cat.get("spotify"), field, str(config_file), raising=False)
+
+    mcp_commands.set_oauth_client("spotify", "abc123", "s3cret")
+    assert mcp_commands.is_signed_in(load_servers()["spotify"]) is False
+
+    config_file.write_text(json.dumps({"clientId": "abc123", "accessToken": "tok"}))
+    assert mcp_commands.is_signed_in(load_servers()["spotify"]) is True
+
+
+def test_a_sign_in_tool_is_only_sent_the_arguments_it_declares(psok_home):
+    """These were hardcoded to Google's shape. Microsoft To Do's sign_in takes
+    none, and handing it `user_google_email` would send a Google address to
+    Microsoft."""
+    from psok.mcp.client import DiscoveredTool
+
+    class _Conn:
+        def __init__(self, schema):
+            self.tools = [DiscoveredTool(name="sign_in", description="", input_schema=schema)]
+
+    mcp_commands.add_from_catalogue("microsoft-todo")
+    config = load_servers()["microsoft-todo"]
+    entry = cat.get("microsoft-todo")
+
+    takes_nothing = _Conn({"type": "object", "properties": {}})
+    assert mcp_commands._auth_arguments(takes_nothing, entry, config, None) == {}
+
+    takes_email = _Conn(
+        {"type": "object", "properties": {"user_google_email": {}, "service_name": {}}}
+    )
+    sent = mcp_commands._auth_arguments(takes_email, entry, config, "me@gmail.com")
+    assert sent == {"service_name": entry.title, "user_google_email": "me@gmail.com"}

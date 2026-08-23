@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
+import shutil
 import webbrowser
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -167,6 +170,47 @@ def _reject_implausible_client_id(name: str, client_id: str) -> None:
         )
 
 
+def _write_credentials_file(
+    name: str, entry: cat.CatalogueEntry, client_id: str, client_secret: str | None
+) -> None:
+    """Put the client where a server that reads a JSON file will find it.
+
+    Same rule as `client_id_env`: credentials go where the server actually
+    looks. The medium differs because the server decided so -- this one reads no
+    environment at all.
+
+    ADR-0012 says PSOK's secrets live in the keychain, and they still do: the
+    secret is stored there first and this file is written from it, so the
+    keychain stays the source of truth and re-entering the client rewrites the
+    file. The file itself is unavoidable -- the server has no other input -- so
+    it is written 0600 and the sign-in tokens the server later adds to it stay
+    under the same mode.
+    """
+    path = Path(entry.credentials_file or "").expanduser()
+    keys = entry.credentials_file_keys
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except ValueError:
+            existing = {}
+
+    if client_secret:
+        set_secret(f"psok-mcp/{name}.client_secret", client_secret)
+    else:
+        client_secret = get_secret(f"psok-mcp/{name}.client_secret")
+
+    existing[keys["client_id"]] = client_id
+    if client_secret and "client_secret" in keys:
+        existing[keys["client_secret"]] = client_secret
+    if "redirect_uri" in keys:
+        existing.setdefault(keys["redirect_uri"], "http://127.0.0.1:8888/callback")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, indent=2))
+    path.chmod(0o600)
+
+
 def set_oauth_client(name: str, client_id: str, client_secret: str | None = None) -> ServerConfig:
     """Attach a hand-registered OAuth client to a server.
 
@@ -184,6 +228,9 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
 
     if config.transport is Transport.STDIO:
         entry = entry_for(config)
+        if entry is not None and entry.credentials_file:
+            _write_credentials_file(name, entry, client_id, client_secret)
+            return load_servers()[name]
         if entry is None or not entry.client_id_env:
             raise ValueError(
                 f"'{name}' runs over stdio and PSOK does not run its sign-in, so there is"
@@ -283,6 +330,24 @@ async def connect_and_report(name: str | None = None, *, open_browser: bool = Tr
         await manager.shutdown()
 
 
+def _accounts_of(config: ServerConfig) -> list[Path]:
+    """Every signed-in account this server's own store holds."""
+    entry = entry_for(config)
+    found = _account_files(_credentials_dir(config), entry.account_files if entry else "*@*")
+    if entry is None or not entry.account_key:
+        return found
+    # The file is there before anyone signs in, because the client credentials
+    # share it. Only the key written by a completed sign-in settles it.
+    return [path for path in found if _json_key_present(path, entry.account_key)]
+
+
+def _json_key_present(path: Path, key: str) -> bool:
+    try:
+        return bool(json.loads(path.read_text()).get(key))
+    except (OSError, ValueError):
+        return False
+
+
 def _credentials_dir(config: ServerConfig) -> Path | None:
     entry = entry_for(config)
     if entry is None or not entry.credentials_path:
@@ -290,18 +355,25 @@ def _credentials_dir(config: ServerConfig) -> Path | None:
     return Path(entry.credentials_path).expanduser()
 
 
-def _account_files(directory: Path | None) -> list[Path]:
+def _account_files(directory: Path | None, pattern: str = "*@*") -> list[Path]:
     """The credential files that stand for a signed-in account, and no others.
 
-    A server keeps more than accounts in this directory: an abandoned sign-in
-    leaves `oauth_states.json` behind, and counting that as an account reported
-    the connector signed in "as oauth_states" when nobody had finished signing
-    in at all. Accounts are the files named for the address they belong to.
+    A server keeps more than accounts in its store: an abandoned sign-in leaves
+    `oauth_states.json` behind, and counting that as an account reported the
+    connector signed in "as oauth_states" when nobody had finished signing in at
+    all. What an account looks like is the server's business, so the catalogue
+    entry says -- Google names its files by address, LinkedIn keeps a browser
+    profile, Microsoft To Do keeps one token cache file.
     """
-    if directory is None or not directory.is_dir():
+    if directory is None:
         return []
-    return sorted((p for p in directory.iterdir() if p.is_file() and "@" in p.stem),
-                  key=lambda p: p.stem)
+    # A single-file store is its own account: a token cache is one file, not a
+    # directory of them, and treating it as a directory found nothing.
+    if directory.is_file():
+        return [directory]
+    if not directory.is_dir():
+        return []
+    return sorted((p for p in directory.glob(pattern) if p.is_file()), key=lambda p: p.stem)
 
 
 def shares_account_with(name: str) -> list[str]:
@@ -350,14 +422,16 @@ def sign_out(name: str) -> list[str]:
     forget(name)
 
     directory = _credentials_dir(config)
-    if directory is not None and directory.is_dir():
-        accounts = _account_files(directory)
-        # Everything else in here is flow bookkeeping for a sign-in that is now
-        # being abandoned, so it goes too rather than being left to confuse the
-        # next one.
-        for path in directory.iterdir():
-            if path.is_file():
-                path.unlink()
+    if directory is not None and directory.exists():
+        accounts = _accounts_of(config)
+        if directory.is_file():
+            directory.unlink()
+        else:
+            # Everything else in there is flow bookkeeping for a sign-in that is
+            # now being abandoned, so it goes too rather than being left to
+            # confuse the next one. A browser profile keeps its state in
+            # subdirectories, so those go with it.
+            shutil.rmtree(directory, ignore_errors=True)
         if accounts:
             noun = "account" if len(accounts) == 1 else "accounts"
             cleared.append(f"{len(accounts)} signed-in {noun} held by the server itself")
@@ -396,6 +470,33 @@ def always_ask_which_account(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
 
 
+def _auth_arguments(connection, entry: cat.CatalogueEntry, config: ServerConfig,
+                    account_hint: str | None) -> dict[str, str]:
+    """Only the arguments this server's sign-in tool actually declares.
+
+    These were hardcoded to Google's shape -- `service_name` and
+    `user_google_email` -- which is fine for the one server they were written
+    for and wrong for every other. Microsoft To Do's `sign_in` takes no
+    arguments at all, and handing it Google's would be sending a Google address
+    to Microsoft.
+
+    Where an address *is* required, the server uses it only as a `login_hint`,
+    which `always_ask_which_account` then strips: nothing is ever stored under
+    it, because the callback saves under the account the provider verifies.
+    """
+    declared = {}
+    for tool in getattr(connection, "tools", []):
+        if tool.name == entry.auth_tool:
+            declared = (tool.input_schema or {}).get("properties") or {}
+            break
+
+    candidates = {
+        "service_name": entry.title,
+        "user_google_email": account_hint or account(config.name) or ACCOUNT_TO_BE_CHOSEN,
+    }
+    return {key: value for key, value in candidates.items() if key in declared}
+
+
 async def _server_side_login(
     config: ServerConfig, entry: cat.CatalogueEntry, account_hint: str | None
 ) -> str:
@@ -414,15 +515,9 @@ async def _server_side_login(
         if connection is None:
             return f"'{config.name}' did not start, so its sign-in could not begin"
 
-        # The server requires an address before it will build a flow, but only
-        # ever uses it as a `login_hint` -- which `always_ask_which_account`
-        # then strips, so the chooser is the user's. Nothing is stored under
-        # this address: the callback saves under the account Google verifies.
-        arguments = {
-            "service_name": entry.title,
-            "user_google_email": account_hint or account(config.name) or ACCOUNT_TO_BE_CHOSEN,
-        }
-        raw = await connection.call(entry.auth_tool or "", arguments)
+        raw = await connection.call(
+            entry.auth_tool or "", _auth_arguments(connection, entry, config, account_hint)
+        )
 
         from psok.mcp.manager import normalize_result
 
@@ -439,14 +534,66 @@ async def _server_side_login(
             server_name=config.name, authorization_url=url
         )
         webbrowser.open(url)
-        return (
-            f"opened {entry.title}'s sign-in page. Choose the account you want to"
-            f" connect, then approve access."
-        )
+        # A device-code flow answers with a code as well as a URL, and the code
+        # is useless if it is not shown -- so the server's own words are passed
+        # through rather than replaced with a summary that drops them.
+        return f"opened {entry.title}'s sign-in page.\n\n{result.content.strip()[:600]}"
     except Exception as exc:
         return f"could not start sign-in for '{config.name}': {exc}"
     finally:
         await manager.shutdown()
+
+
+async def _command_login(config: ServerConfig, entry: cat.CatalogueEntry) -> str:
+    """Sign in to a server whose flow is a command rather than a tool.
+
+    LinkedIn opens a browser for `--login`; Spotify ships a second binary that
+    prints an authorization URL and waits on its own loopback callback. Neither
+    exposes a tool to call, so without this they could only be signed into by
+    hand in a terminal -- and PSOK's Connect button would have to either lie or
+    do nothing.
+
+    The URL is published through PENDING like every other pending sign-in, so a
+    browser that did not open on its own is still one click away.
+    """
+    command = entry.auth_command or config.command
+    if not command:
+        return f"'{config.name}' has no command to sign in with"
+
+    process = await asyncio.create_subprocess_exec(
+        command,
+        *entry.auth_command_args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env={**os.environ, **config.resolved_env()},
+    )
+
+    seen: list[str] = []
+    published: str | None = None
+    try:
+        assert process.stdout is not None
+        while True:
+            raw = await process.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode(errors="replace").rstrip()
+            seen.append(line)
+            if published is None and (url := _authorization_url_in(line)):
+                published = url
+                PENDING[config.name] = PendingAuthorization(
+                    server_name=config.name, authorization_url=url
+                )
+                webbrowser.open(url)
+        await process.wait()
+    finally:
+        if process.returncode is None:
+            process.kill()
+        PENDING.pop(config.name, None)
+
+    if is_signed_in(load_servers()[config.name]):
+        return f"signed in to {entry.title}"
+    tail = "\n".join(seen[-8:]).strip()
+    return f"sign-in to {entry.title} did not complete." + (f" It said:\n{tail}" if tail else "")
 
 
 async def login(name: str, *, force: bool = False, account_hint: str | None = None) -> str:
@@ -470,6 +617,8 @@ async def login(name: str, *, force: bool = False, account_hint: str | None = No
 
     entry = entry_for(config)
     if kind == "setup":
+        if entry is not None and entry.auth_command_args:
+            return await _command_login(config, entry)
         if entry is None or not entry.auth_tool:
             return (
                 f"'{name}' signs in on its own when a tool first needs it. Give it the"
@@ -510,11 +659,17 @@ def account(name: str) -> str | None:
     if config is None:
         return None
 
-    accounts = _account_files(_credentials_dir(config))
+    entry = entry_for(config)
+    accounts = _accounts_of(config)
     if accounts:
+        # Only where the filename really is the address. A browser profile or a
+        # token cache says someone is signed in without saying who, and naming
+        # the file as if it were an account is the same invention this exists to
+        # prevent.
+        if entry is not None and not entry.account_from_filename:
+            return None
         return ", ".join(p.stem for p in accounts)
 
-    entry = entry_for(config)
     if entry is None or not entry.identity_url:
         return None
 
@@ -543,10 +698,16 @@ def account(name: str) -> str | None:
 
 
 def missing_credentials(config: ServerConfig) -> list[str]:
-    """Variables this server needs before its sign-in can even begin."""
+    """What this server needs before its sign-in can even begin."""
     entry = entry_for(config)
     if entry is None or auth_kind(config) != "setup":
         return []
+    if entry.credentials_file:
+        # A server reading a JSON file has nothing in `env` to check, so the
+        # question is whether the client id has reached that file yet.
+        path = Path(entry.credentials_file).expanduser()
+        key = entry.credentials_file_keys.get("client_id", "clientId")
+        return [] if _json_key_present(path, key) else ["a client id and secret"]
     wanted = [v for v in (entry.client_id_env, entry.client_secret_env) if v]
     return [key for key in wanted if key not in config.env]
 
@@ -563,7 +724,7 @@ def is_signed_in(config: ServerConfig) -> bool | None:
     if kind == "none":
         return None
     if _credentials_dir(config) is not None:
-        return bool(_account_files(_credentials_dir(config)))
+        return bool(_accounts_of(config))
     if kind == "setup":
         return None
     return has_tokens(config.name)
