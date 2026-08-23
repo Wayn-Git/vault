@@ -92,6 +92,44 @@ work should land unless there's a reason to branch). Topics and description
 are set; nothing about the repo's GitHub-side configuration needs attention
 right now.
 
+## Where the time goes in a turn, measured
+
+Measured from `execution_logs` on a real browser automation run (conversation
+`105aebf8…`, 2026-08-23) before any of the fixes below:
+
+| | |
+|---|---|
+| Wall clock | 303 s |
+| Tool calls | 27 |
+| Time in tools | 70 s (23%) |
+| **Time in model round trips** | **233 s (77%)** |
+| Outcome | died on `max_iterations`, *"iteration limit reached"* |
+
+Browser tools are not the bottleneck — `take_snapshot` averages 30 ms,
+`browser_click` 1.1 s. The model is: the same trivial no-tool prompt against
+`nemotron-3-ultra-550b` returned in **1.09 s / 8.75 s / 50.23 s** across three
+samples. An agent turn costs one model round trip per tool call, so a
+fifteen-step browser task multiplies that variance by fifteen.
+
+**Fixed since, with numbers:**
+
+- Recall embedded its query against an Ollama that is not installed. A refused
+  connection counted as transient, so it was retried with backoff: **6.09 s,
+  twice a turn**. Now asked once and remembered as down — **0.064 s**. The unit
+  suite dropped 8.3 s → 2.8 s on the same change.
+- Every HTTP call built and closed its own client, so each model call paid a
+  fresh TCP+TLS handshake — 26 per browser task. Pooled per event loop: **75%
+  less connection overhead**.
+- `_unattended_director` claimed to share the live registry and did not
+  (`_registry_for(None)` → `cwd()` vs the interface's workspace root). The two
+  alternated, so **every automation tick tore down and respawned every MCP
+  subprocess**, killing the live browser with them.
+
+**Still open — the 77%.** `providers.yaml` now carries commented Groq and
+Cerebras entries; both are OpenAI-compatible (no adapter needed) and free.
+Adding a key and pointing the automations at one is the remaining lever, and
+the number above is the baseline to beat.
+
 ## Planned next steps, roughly in the order they pay for themselves
 
 1. **Rotate the NVIDIA key.** It's the single highest-consequence loose end —
@@ -164,7 +202,7 @@ does not.
 
 | Need | Endpoint |
 |---|---|
-| Conversation list / create | `GET,POST /api/conversations` |
+| Conversation list / create | `GET,POST /api/conversations` (scheduled runs excluded; `?include_automations=true` for all) |
 | **Rename, or switch provider/model** | `PATCH /api/conversations/{id}` |
 | **Delete one** | `DELETE /api/conversations/{id}` (409 while its turn runs) |
 | History | `GET /api/conversations/{id}/messages` |
@@ -195,6 +233,7 @@ does not.
 | **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}` |
 | **Automations (beta): list, create, retime, delete** | `GET,POST /api/automations`, `PATCH,DELETE /api/automations/{id}` |
 | **Run one now, on the scheduler's path** | `POST /api/automations/{id}/run` |
+| **Every kept run of one automation** | `GET /api/automations/{id}/runs` |
 | **Start every switched-on connector now** | `POST /api/mcp/reconcile` |
 | Audit trail | `GET /api/logs` |
 | Component health | `GET /api/health` |
@@ -362,7 +401,13 @@ expect two prompts the first time someone uses a new connector.
 10. **Automations (beta)** — `⌘4`. A prompt and an interval, run as an ordinary
     turn in a conversation of its own, while the server is up. Marked beta in
     the rail, on the page, and in the API payload. The page states both beta
-    positions rather than burying them.
+    positions rather than burying them. Each run's conversation carries
+    `automation_id`, is **excluded from the rail** — 31 of 111 conversations
+    were runs, and the rail lists a fixed 50, so they pushed real conversations
+    off the end — and is listed instead under its automation
+    (`GET /api/automations/{id}/runs`), which is also the only way earlier runs
+    were ever reachable. Twenty are kept per automation. Unattended runs stream
+    and get 30 iterations rather than 12.
 11. **Pins** — a message header's pin, or `⌘P` on the newest one, with a strip
     above the transcript that jumps to any of them. Deliberately inert: not sent
     to the model, does not change recall, does not reorder history. A column on
