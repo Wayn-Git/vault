@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from psok.config import load_providers
-from psok.runtime.http import post_json
+from psok.runtime.http import ProviderHTTPError, post_json
 from psok.secrets import resolve_api_key
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,22 @@ log = logging.getLogger(__name__)
 DEFAULT_LOCAL_MODEL = "nomic-embed-text"
 DEFAULT_LOCAL_BASE = "http://localhost:11434"
 BATCH_SIZE = 32
+
+# Endpoints that refused a connection, so the next caller in this process does
+# not pay the wait again.
+#
+# A refused connection is not a transient failure: nothing is listening, and
+# trying three more times with backoff cannot change that. It cost 6.09s
+# measured, on a path the agent loop runs twice a turn -- recall before the
+# first model call, and again after memory extraction -- so a machine without
+# Ollama installed paid ~12s per turn for a service it does not have. Cleared
+# only by restarting, which is also when someone would have started Ollama.
+_UNREACHABLE: set[str] = set()
+
+
+def forget_unreachable() -> None:
+    """Try a previously-refused endpoint again (it may have been started since)."""
+    _UNREACHABLE.clear()
 
 
 class EmbeddingError(RuntimeError):
@@ -57,13 +73,26 @@ class Embedder:
         native = base_url.rstrip("/")
         if native.endswith("/v1"):
             native = native[:-3].rstrip("/")
+        url = f"{native}/api/embed"
+        if url in _UNREACHABLE:
+            raise EmbeddingError(f"Ollama at {native} refused a connection earlier this session")
         try:
             data = await post_json(
-                f"{native}/api/embed",
+                url,
                 headers={"Content-Type": "application/json"},
                 payload={"model": self.model, "input": batch},
                 timeout=120.0,
+                # A refused connection means nothing is listening, which no
+                # amount of backoff fixes.
+                max_retries=0,
             )
+        except ProviderHTTPError as exc:
+            if "unreachable" in str(exc):
+                _UNREACHABLE.add(url)
+            raise EmbeddingError(
+                f"could not reach Ollama at {native}. Is it running, and has"
+                f" '{self.model}' been pulled? (ollama pull {self.model}). {exc}"
+            ) from exc
         except Exception as exc:
             raise EmbeddingError(
                 f"could not reach Ollama at {native}. Is it running, and has"

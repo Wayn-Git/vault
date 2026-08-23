@@ -1603,3 +1603,66 @@ async def test_removing_a_connector_takes_its_failure_with_it(db, psok_home):
 
     assert "gone" not in manager.errors
     assert "gone" not in manager.state()
+
+
+# ------------------------------------------------- dead time on the turn path
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedding_endpoint_is_not_retried(monkeypatch):
+    """Recall embeds a query before the first model call of every turn. With
+    nothing listening on Ollama's port, ConnectError counted as transient and
+    was retried with backoff -- 6.09s measured, twice a turn, on a machine that
+    had never had Ollama installed. Nothing is listening; backoff cannot help.
+    """
+    from psok.retrieval import embeddings
+
+    embeddings.forget_unreachable()
+    attempts = 0
+
+    from psok.runtime.http import ProviderHTTPError
+
+    seen_retries = []
+
+    async def refuse(url, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        seen_retries.append(kwargs.get("max_retries"))
+        raise ProviderHTTPError(f"{url} unreachable: ConnectError: nope")
+
+    monkeypatch.setattr(embeddings, "post_json", refuse)
+
+    with pytest.raises(embeddings.EmbeddingError):
+        await embeddings.Embedder().embed_one("probe")
+    assert attempts == 1
+    # The retrying happens inside post_json, so asking it not to is the only
+    # thing that stops the backoff.
+    assert seen_retries == [0], "a refused connection must not be retried"
+
+    # And the next caller in this process does not pay the wait again.
+    with pytest.raises(embeddings.EmbeddingError):
+        await embeddings.Embedder().embed_one("probe")
+    assert attempts == 1, "the endpoint is known to be down; do not ask again"
+
+    embeddings.forget_unreachable()
+    with pytest.raises(embeddings.EmbeddingError):
+        await embeddings.Embedder().embed_one("probe")
+    assert attempts == 2, "forgetting lets a started Ollama be found"
+
+
+@pytest.mark.asyncio
+async def test_http_connections_are_reused_across_calls():
+    """A client was built and closed per request, so every model call paid a
+    fresh TCP and TLS handshake -- 26 of them in one measured browser task."""
+    from psok.runtime import http
+
+    await http.close_clients()
+    first = http._client(30.0)
+    second = http._client(30.0)
+    assert first is second, "the pooled client must be reused"
+    assert not first.is_closed
+
+    await http.close_clients()
+    assert first.is_closed
+    assert http._client(30.0) is not first, "a closed client is replaced, not reused"
+    await http.close_clients()

@@ -38,6 +38,37 @@ def backoff(attempt: int) -> float:
     return min(2.0**attempt, 8.0) * (0.5 + random.random() / 2)
 
 
+# One client per event loop, so connections are reused across calls.
+#
+# A client was built and closed per request and per retry, which meant a fresh
+# TCP and TLS handshake to the provider every time. A browser task makes on the
+# order of 26 model calls -- each one a tool call's worth of round trip -- so
+# that was 26 handshakes to the same host, paid in series, before any tokens
+# moved. Keyed by loop because a client is bound to the loop that created it,
+# and the CLI, the API and tests each run their own.
+_CLIENTS: dict[object, httpx.AsyncClient] = {}
+
+
+def _client(timeout: float) -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_keepalive_connections=16, keepalive_expiry=300.0),
+        )
+        _CLIENTS[loop] = client
+    return client
+
+
+async def close_clients() -> None:
+    """Close this loop's pooled client. Called on shutdown; safe to skip."""
+    loop = asyncio.get_running_loop()
+    client = _CLIENTS.pop(loop, None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
+
 def is_retryable(status: int) -> bool:
     return status in RETRYABLE_STATUS or status >= 500
 
@@ -67,8 +98,9 @@ async def post_json(
 
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, headers=headers, json=payload, params=params)
+            response = await _client(timeout).post(
+                url, headers=headers, json=payload, params=params, timeout=timeout
+            )
         except TRANSIENT_EXCEPTIONS as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt == max_retries:
@@ -115,26 +147,25 @@ async def stream_sse(
     for attempt in range(max_retries + 1):
         started = False
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "POST", url, headers=headers, json=payload, params=params
-                ) as response:
-                    if response.status_code >= 400:
-                        body = (await response.aread()).decode(errors="replace")[:1000]
-                        error = f"{response.status_code}: {body}"
-                        if not is_retryable(response.status_code) or attempt == max_retries:
-                            raise ProviderHTTPError(f"{url} returned {error}")
-                        await asyncio.sleep(_delay_for(response, attempt))
-                        continue
+            async with _client(timeout).stream(
+                "POST", url, headers=headers, json=payload, params=params, timeout=timeout
+            ) as response:
+                if response.status_code >= 400:
+                    body = (await response.aread()).decode(errors="replace")[:1000]
+                    error = f"{response.status_code}: {body}"
+                    if not is_retryable(response.status_code) or attempt == max_retries:
+                        raise ProviderHTTPError(f"{url} returned {error}")
+                    await asyncio.sleep(_delay_for(response, attempt))
+                    continue
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data and data != "[DONE]":
-                            started = True
-                            yield data
-                    return
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data and data != "[DONE]":
+                        started = True
+                        yield data
+                return
         except TRANSIENT_EXCEPTIONS as exc:
             if started or attempt == max_retries:
                 raise ProviderHTTPError(f"{url} stream failed: {exc}") from exc

@@ -35,6 +35,7 @@ from psok.db.repositories import (
     MessageRepository,
 )
 from psok.mcp.manager import MCPManager
+from psok.runtime.http import close_clients
 from psok.runtime.registry import is_known_provider
 from psok.security.confirmation import ConfirmationRequest, ConfirmationService
 from psok.skills.loader import scan
@@ -79,7 +80,7 @@ async def _unattended_director(callback):
     """
     from psok.security.confirmation import ConfirmationService
 
-    registry, root = await _registry_for(None)
+    registry, root = await _registry_for(None, reuse_any=True)
     gated = registry.with_confirmation(ConfirmationService(callback=callback))
     return Director(gated, workspace_root=root, stream=False)
 
@@ -100,6 +101,7 @@ async def _lifespan(_: FastAPI):
     await _runner.stop()
     if _mcp["manager"] is not None:
         await _mcp["manager"].shutdown()
+    await close_clients()
 
 
 app = FastAPI(title="PSOK", version="0.1.0", lifespan=_lifespan)
@@ -176,10 +178,23 @@ async def _await_confirmation(request: ConfirmationRequest) -> bool:
         _pending.pop(request_id, None)
 
 
-async def _registry_for(workspace: str | None):
+async def _registry_for(workspace: str | None, *, reuse_any: bool = False):
+    """The tool registry for a workspace, building or rebuilding it if needed.
+
+    `reuse_any` takes whatever registry is already built, whatever root it was
+    built for. An unattended run has no workspace of its own, so it resolved to
+    `cwd()` -- which is rarely the root the interface is using. The two then
+    alternated, and every automation tick tore down and serially respawned every
+    MCP subprocess, killing the live browser with them, twice each interval.
+    A scheduled turn wants the tools that are already running, not a workspace
+    of its own.
+    """
     root = str(Path(workspace).expanduser().resolve()) if workspace else str(Path.cwd())
 
     async with _registry_lock:
+        if reuse_any and _mcp["registry"] is not None:
+            root = _mcp["workspace"]
+
         if _mcp["registry"] is not None and _mcp["workspace"] == root:
             # Pick up connectors switched on or off since the registry was
             # built. Without this the toggle only took effect on restart, so a
