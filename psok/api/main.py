@@ -70,6 +70,12 @@ _registry_lock = asyncio.Lock()
 # cannot fill the disk.
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
 
+# Iterations an unattended run may take. Higher than the interactive default
+# because a multi-step browser task spends one per tool call and nobody is
+# there to tell it to continue; still bounded, and `RUN_TIMEOUT_SECONDS` and
+# `Guards.max_seconds` remain the real stops.
+AUTOMATION_MAX_ITERATIONS = 30
+
 
 async def _unattended_director(callback):
     """A director whose tools refuse anything a person has not pre-approved.
@@ -78,11 +84,27 @@ async def _unattended_director(callback):
     MCP tools an interactive one does -- but through its own gate, so swapping
     the callback here cannot change the rules for a turn someone is watching.
     """
+    from psok.agent.director import Guards
     from psok.security.confirmation import ConfirmationService
 
     registry, root = await _registry_for(None, reuse_any=True)
     gated = registry.with_confirmation(ConfirmationService(callback=callback))
-    return Director(gated, workspace_root=root, stream=False)
+    return Director(
+        gated,
+        workspace_root=root,
+        # Nobody is watching, but streaming is not only for watching: a
+        # non-streamed call is one 120s request that retries the *whole*
+        # response up to four times, so a slow model turns into eight minutes of
+        # the same answer being re-requested. Retries on a stream stop once
+        # tokens are flowing.
+        stream=True,
+        # A browser task is fifteen or more steps, and each one costs an
+        # iteration: a measured run reached "go to google, search, click, search,
+        # play" and died at twelve with `iteration limit reached`, having done
+        # most of the work. The interactive default stays where it is; unattended
+        # work is exactly where nobody is there to say "carry on".
+        guards=Guards(max_iterations=AUTOMATION_MAX_ITERATIONS),
+    )
 
 
 _runner = AutomationRunner(lambda callback: _LazyDirector(callback))

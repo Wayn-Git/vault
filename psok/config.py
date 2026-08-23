@@ -78,6 +78,19 @@ providers:
   - name: ollama
     base_url: http://localhost:11434/v1
     default_model: qwen2.5:7b
+  # Fast open-weights inference, free tier, no card. Worth having configured
+  # because an agent turn costs one model round trip per tool call: a browser
+  # task is a dozen or more of them in series, so latency per call matters far
+  # more than it does in chat. Both speak the OpenAI API, so they need no
+  # adapter -- only a key.
+  # - name: groq
+  #   base_url: https://api.groq.com/openai/v1
+  #   api_key_ref: psok/groq
+  #   default_model: llama-3.3-70b-versatile
+  # - name: cerebras
+  #   base_url: https://api.cerebras.ai/v1
+  #   api_key_ref: psok/cerebras
+  #   default_model: llama-3.3-70b
   # - name: openai
   #   api_key_ref: psok/openai
   #   default_model: gpt-4o
