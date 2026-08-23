@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from psok.agent.prompt import budget_history
-from psok.db.repositories import CalendarRepository, TaskRepository
+from psok.db.repositories import (
+    CalendarRepository,
+    ConversationRepository,
+    MessageRepository,
+    TaskRepository,
+)
 from psok.retrieval.store import _sanitize_fts_query
 from psok.secrets import redact
 from psok.tools.base import ToolContext
@@ -1666,3 +1671,102 @@ async def test_http_connections_are_reused_across_calls():
     assert first.is_closed
     assert http._client(30.0) is not first, "a closed client is replaced, not reused"
     await http.close_clients()
+
+
+# ----------------------------------------------- automation runs and the rail
+
+
+def test_scheduled_runs_stay_out_of_the_conversation_rail(db):
+    """26 of one machine's 50 rail entries were automation runs. The rail has a
+    fixed limit, so a pair of 15-minute automations pushed every conversation a
+    person actually had off the end of it."""
+    repo = ConversationRepository(db)
+    mine = repo.create("nvidia", "m", "something I asked")
+    run = repo.create("nvidia", "m", "RickROll · automation", automation_id=6)
+
+    listed = [r["id"] for r in repo.list()]
+    assert mine in listed
+    assert run not in listed, "a scheduled run is not a conversation someone had"
+
+    # It is not hidden, just listed somewhere it belongs.
+    assert [r["id"] for r in repo.runs_of("6")] == [run]
+    assert run in [r["id"] for r in repo.list(include_automations=True)]
+
+
+def test_only_the_newest_runs_are_kept(db):
+    """Nothing pruned runs, so they accumulated for as long as the automation
+    stayed enabled — 192 a day for two automations on 15 minutes."""
+    repo = ConversationRepository(db)
+    made = [repo.create("nvidia", "m", f"run {i}", automation_id=3) for i in range(8)]
+    MessageRepository(db).append(made[0], "user", "the oldest run said something")
+
+    dropped = repo.prune_runs("3", keep=3)
+
+    assert dropped == 5
+    kept = [r["id"] for r in repo.runs_of("3")]
+    assert len(kept) == 3
+    assert made[0] not in kept and made[-1] in kept, "the newest survive, the oldest go"
+    # Its messages go with it rather than being orphaned.
+    assert MessageRepository(db).history(made[0]) == []
+    # Another automation's runs are untouched.
+    other = repo.create("nvidia", "m", "elsewhere", automation_id=4)
+    repo.prune_runs("3", keep=0)
+    assert [r["id"] for r in repo.runs_of("4")] == [other]
+
+
+def test_a_run_records_which_automation_wrote_it(db, monkeypatch):
+    """Without this the runs are indistinguishable from conversations someone
+    started, which is what let them crowd the rail."""
+    from psok.automation import AutomationRepository
+
+    repo = AutomationRepository(db)
+    automation = repo.create(name="RickROll", prompt="go", every_minutes=15)
+    conversation = ConversationRepository(db).create(
+        "nvidia", "m", f"{automation.name} · automation", automation_id=automation.id
+    )
+
+    row = ConversationRepository(db).get(conversation)
+    assert row["automation_id"] == str(automation.id)
+    assert [r["id"] for r in ConversationRepository(db).runs_of(str(automation.id))] == [
+        conversation
+    ]
+
+
+def test_runs_written_before_the_column_existed_are_adopted(tmp_path, monkeypatch):
+    """Adding automation_id leaves older runs NULL, which reads as "a person
+    started this" -- so they keep crowding the rail and are never pruned. On the
+    machine this was written for that was 31 of 111 conversations."""
+    import sqlite3
+
+    from psok.db import connection
+
+    monkeypatch.setenv("PSOK_HOME", str(tmp_path))
+    connection.reset_connection()
+    conn = connection.get_connection()
+
+    from psok.automation import AutomationRepository
+
+    automation = AutomationRepository(conn).create(name="RickROll", prompt="go", every_minutes=15)
+    # A run as the pre-column code wrote it: correct title, no automation_id.
+    conn.execute(
+        "INSERT INTO conversations (id, title, provider, model) VALUES (?, ?, ?, ?)",
+        ("legacy", "RickROll · automation", "nvidia", "m"),
+    )
+    # And a conversation a person titled for themselves.
+    conn.execute(
+        "INSERT INTO conversations (id, title, provider, model) VALUES (?, ?, ?, ?)",
+        ("mine", "notes about RickROll", "nvidia", "m"),
+    )
+    conn.commit()
+
+    connection._adopt_existing_automation_runs(conn)
+
+    rows = dict(conn.execute("SELECT id, automation_id FROM conversations").fetchall())
+    assert rows["legacy"] == str(automation.id), "an orphaned run is claimed"
+    assert rows["mine"] is None, "a conversation someone titled is left alone"
+
+    # Idempotent: running it again changes nothing.
+    connection._adopt_existing_automation_runs(conn)
+    assert dict(conn.execute("SELECT id, automation_id FROM conversations").fetchall()) == rows
+    assert isinstance(conn, sqlite3.Connection)
+    connection.reset_connection()

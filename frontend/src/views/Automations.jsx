@@ -48,6 +48,59 @@ function when(iso) {
   return delta >= 0 ? `in ${size}` : `${size} ago`
 }
 
+/* What this automation has actually done, run by run.
+
+   Only the newest was reachable before: the backend overwrites
+   `last_conversation_id` each time, so every earlier run became unreferenced the
+   moment the next finished — findable only by scrolling the conversation rail
+   the runs were flooding. They are out of that rail now, so this is the only
+   place they live. */
+function RunHistory({ automation }) {
+  const { setActiveId, setView } = useApp()
+  const [runs, setRuns] = useState(null)
+  const [open, setOpen] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setRuns(await api.automationRuns(automation.id))
+    } catch {
+      setRuns([])
+    }
+  }, [automation.id])
+
+  // Reload when a run finishes, so the list is not stale behind the status.
+  useEffect(() => { if (open) load() }, [open, load, automation.last_run_at])
+
+  const openRun = (id) => { setActiveId(id); setView('chat') }
+
+  if (!automation.last_conversation_id) return null
+
+  return (
+    <div className="auto-runs">
+      <button type="button" className="auto-open" onClick={() => openRun(automation.last_conversation_id)}>
+        <Icon name="chat" size={12} /> Read what it did
+      </button>
+      <button type="button" className="auto-open" onClick={() => setOpen((o) => !o)}>
+        <Icon name="clock" size={12} /> {open ? 'Hide earlier runs' : 'Earlier runs'}
+      </button>
+      {open && (
+        <ul className="auto-run-list">
+          {runs === null && <li className="auto-run-empty">Loading…</li>}
+          {runs?.length === 0 && <li className="auto-run-empty">No runs kept yet.</li>}
+          {runs?.map((run) => (
+            <li key={run.id}>
+              <button type="button" onClick={() => openRun(run.id)}>
+                <span>{when(run.created_at)}</span>
+                {run.id === automation.last_conversation_id && <span className="state">newest</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function Composer({ onDone, onCancel }) {
   const { toast, health } = useApp()
   const [name, setName] = useState('')
@@ -227,15 +280,7 @@ export default function Automations() {
                     </span>
                   )}
                 </div>
-                {row.last_conversation_id && (
-                  <button
-                    type="button"
-                    className="auto-open"
-                    onClick={() => { setActiveId(row.last_conversation_id); setView('chat') }}
-                  >
-                    <Icon name="chat" size={12} /> Read what it did
-                  </button>
-                )}
+                <RunHistory automation={row} />
               </div>
               <div className="auto-actions">
                 <button

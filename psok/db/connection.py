@@ -41,6 +41,35 @@ def migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn)
     conn.executescript(SCHEMA_PATH.read_text())
     conn.commit()
+    _adopt_existing_automation_runs(conn)
+
+
+def _adopt_existing_automation_runs(conn: sqlite3.Connection) -> None:
+    """Claim runs written before `conversations.automation_id` existed.
+
+    Adding the column leaves every run made before it NULL, which reads as "a
+    person started this" -- so those keep crowding the rail and are never
+    pruned. On the machine this was written for that is 31 of 111
+    conversations. They are recognised the only way available after the fact:
+    the title `run` gave them, `f"{name} · automation"`, matched against an
+    automation that still carries that name. A conversation someone happened to
+    title that way is claimed too, which is why the match must be exact rather
+    than a suffix search, and why this only ever runs against NULL rows.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, name FROM automations WHERE name IS NOT NULL AND name != ''"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return  # no automations table yet; nothing to adopt
+
+    for automation_id, name in rows:
+        conn.execute(
+            "UPDATE conversations SET automation_id = ?"
+            " WHERE automation_id IS NULL AND title = ?",
+            (str(automation_id), f"{name} · automation"),
+        )
+    conn.commit()
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:

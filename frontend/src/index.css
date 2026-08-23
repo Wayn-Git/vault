@@ -2914,3 +2914,36 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
    under the composer -- was removed. It reported what the + menu reports, in
    the loudest position on the screen, and it was the first thing anyone looked
    at even though it was almost never what they wanted. */
+
+/* Run history on an automation card.
+
+   Scheduled runs are no longer in the conversation rail — they were 26 of one
+   machine's 50 entries and pushed real conversations off the end — so this is
+   the only place they are read from. */
+.auto-runs { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 8px; }
+.auto-run-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  flex-basis: 100%;
+  display: grid;
+  gap: 1px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+.auto-run-list li button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+}
+.auto-run-list li button:hover { background: rgba(255, 255, 255, 0.03); color: var(--text); }
+.auto-run-empty { padding: 6px 10px; font-size: 12px; color: var(--text-faint); }

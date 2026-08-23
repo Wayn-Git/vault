@@ -56,11 +56,18 @@ class ConversationRepository:
     def __init__(self, conn: sqlite3.Connection | None = None):
         self.conn = _conn(conn)
 
-    def create(self, provider: str, model: str, title: str | None = None) -> str:
+    def create(
+        self,
+        provider: str,
+        model: str,
+        title: str | None = None,
+        automation_id: str | None = None,
+    ) -> str:
         cid = str(uuid.uuid4())
         self.conn.execute(
-            "INSERT INTO conversations (id, title, provider, model) VALUES (?, ?, ?, ?)",
-            (cid, title, provider, model),
+            "INSERT INTO conversations (id, title, provider, model, automation_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (cid, title, provider, model, automation_id),
         )
         self.conn.commit()
         return cid
@@ -70,10 +77,47 @@ class ConversationRepository:
             "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
         ).fetchone()
 
-    def list(self, limit: int = 50) -> list[sqlite3.Row]:
+    def list(self, limit: int = 50, *, include_automations: bool = False) -> list[sqlite3.Row]:
+        """Conversations, newest first. Scheduled runs are excluded by default.
+
+        They share this list's fixed limit, and a pair of automations on a
+        15-minute interval writes roughly 192 a day -- enough to push every
+        conversation a person actually had off the end of it. They are listed
+        per automation instead, by `runs_of`.
+        """
+        if include_automations:
+            return self.conn.execute(
+                "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
         return self.conn.execute(
-            "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,)
+            "SELECT * FROM conversations WHERE automation_id IS NULL"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
         ).fetchall()
+
+    def runs_of(self, automation_id: str, limit: int = 50) -> list[sqlite3.Row]:
+        """Every conversation one automation has written, newest first."""
+        return self.conn.execute(
+            "SELECT * FROM conversations WHERE automation_id = ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (automation_id, limit),
+        ).fetchall()
+
+    def prune_runs(self, automation_id: str, keep: int) -> int:
+        """Drop all but the newest `keep` runs of one automation.
+
+        Nothing pruned these before, so they accumulated for as long as the
+        automation was enabled. Comparing a failed run against the one before it
+        is the usual reason to look, so a handful are kept rather than one.
+        """
+        stale = self.conn.execute(
+            "SELECT id FROM conversations WHERE automation_id = ?"
+            " ORDER BY created_at DESC LIMIT -1 OFFSET ?",
+            (automation_id, keep),
+        ).fetchall()
+        for row in stale:
+            self.delete(row["id"])
+        return len(stale)
 
     def update(
         self,

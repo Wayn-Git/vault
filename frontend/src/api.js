@@ -92,6 +92,9 @@ export const api = {
   updateAutomation: (id, patch) => j(`/automations/${id}`, json('PATCH', patch)),
   deleteAutomation: (id) => j(`/automations/${id}`, json('DELETE')),
   runAutomation: (id) => j(`/automations/${id}/run`, json('POST', {})),
+  // Every kept run of one automation. They are out of the conversation rail,
+  // so this is where they are read.
+  automationRuns: (id) => j(`/automations/${id}/runs`),
 
   logs: (limit = 100) => j(`/logs?limit=${limit}`),
 

@@ -296,8 +296,15 @@ class CreateConversation(BaseModel):
 
 
 @app.get("/api/conversations")
-def list_conversations() -> list[dict[str, Any]]:
-    return [dict(r) for r in ConversationRepository().list()]
+def list_conversations(include_automations: bool = False) -> list[dict[str, Any]]:
+    """Conversations for the rail. Scheduled runs are listed per automation instead.
+
+    They shared this list's fixed limit, so a pair of 15-minute automations
+    filled it and pushed real conversations off the end.
+    """
+    return [dict(r) for r in ConversationRepository().list(
+        include_automations=include_automations
+    )]
 
 
 @app.post("/api/conversations")
@@ -600,11 +607,29 @@ def update_automation(automation_id: int, body: UpdateAutomation) -> dict[str, A
     return updated.to_json()  # type: ignore[union-attr]
 
 
+@app.get("/api/automations/{automation_id}/runs")
+def list_automation_runs(automation_id: int) -> list[dict[str, Any]]:
+    """Every run this automation has kept, newest first.
+
+    Only the newest was reachable before: `record` overwrites
+    `last_conversation_id`, so every earlier run became unreferenced the moment
+    the next one finished, findable only by scrolling the rail it was flooding.
+    """
+    return [dict(r) for r in ConversationRepository().runs_of(str(automation_id))]
+
+
 @app.delete("/api/automations/{automation_id}")
-def delete_automation(automation_id: int) -> dict[str, str]:
+def delete_automation(automation_id: int, delete_runs: bool = False) -> dict[str, Any]:
+    """Delete an automation. Its runs are kept unless `delete_runs` is set."""
+    removed = 0
+    if delete_runs:
+        repo = ConversationRepository()
+        for row in repo.runs_of(str(automation_id), limit=10_000):
+            repo.delete(row["id"])
+            removed += 1
     if not AutomationRepository().delete(automation_id):
         raise HTTPException(404, "no such automation")
-    return {"status": "deleted"}
+    return {"status": "deleted", "runs_deleted": removed}
 
 
 @app.post("/api/automations/{automation_id}/run")

@@ -21,9 +21,20 @@ CREATE TABLE IF NOT EXISTS conversations (
     title                  TEXT,
     provider               TEXT NOT NULL,
     model                  TEXT NOT NULL,
+    -- Set when a scheduled run wrote this conversation rather than a person.
+    -- Every run gets its own -- history is replayed into each model call, so
+    -- one shared conversation would make each run slower than the last -- and
+    -- without this they were indistinguishable from conversations someone
+    -- started, so 26 of one machine's 50 rail entries were automation runs and
+    -- real conversations fell off the end of the list.
+    -- Deliberately not a foreign key: a run outlives the automation it came from.
+    automation_id          TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_automation
+    ON conversations(automation_id, created_at);
 
 -- Normalized per-message rows, not one JSON blob per conversation (ADR-0017)
 CREATE TABLE IF NOT EXISTS messages (

@@ -45,6 +45,11 @@ TICK_SECONDS = 30
 # An automation that hangs must not wedge the runner for the rest of the session.
 RUN_TIMEOUT_SECONDS = 300
 
+# How many past runs of one automation to keep. Enough to compare a failure
+# against the run before it, which is the usual reason to look at all, without
+# keeping every run an enabled automation has ever made.
+KEEP_RUNS = 20
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -238,6 +243,11 @@ class AutomationRepository:
             ),
         )
         self.conn.commit()
+        # Runs accumulated for as long as the automation was enabled, because
+        # nothing ever removed one.
+        from psok.db.repositories import ConversationRepository
+
+        ConversationRepository(self.conn).prune_runs(str(automation_id), KEEP_RUNS)
 
 
 class UnattendedGate:
@@ -300,7 +310,10 @@ async def run_once(
         model = model or providers[provider].default_model or "default"
 
     conversation_id = ConversationRepository().create(
-        provider, model or "default", f"{automation.name} · automation"
+        provider,
+        model or "default",
+        f"{automation.name} · automation",
+        automation_id=automation.id,
     )
 
     answer = ""
