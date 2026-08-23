@@ -34,6 +34,12 @@ from psok.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
 
+# Stands in for the address a server demands before it will build an
+# authorization URL, when the whole point is that the user has not chosen one
+# yet. It never reaches the provider: the hint carrying it is stripped before
+# the browser opens, and the account is whatever they pick.
+ACCOUNT_TO_BE_CHOSEN = "pending@psok.local"
+
 
 def _manager(open_browser: bool = True) -> MCPManager:
     registry = ToolRegistry(ConfirmationService(auto_approve))
@@ -189,9 +195,17 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
         config.oauth_client_id = None
         config.oauth_client_secret_ref = None
         add_server(config)
-        set_env(name, entry.client_id_env, client_id, secret=False)
-        if client_secret and entry.client_secret_env:
-            set_env(name, entry.client_secret_env, client_secret, secret=True)
+        # Connectors that share an account share the client that authorizes it.
+        # One Google client covers all nine Google applications, so asking for
+        # it once per connector would be asking for the same thing nine times
+        # and leaving eight of them broken until you did.
+        for target in [name, *shares_account_with(name)]:
+            target_entry = entry_for(load_servers()[target])
+            if target_entry is None or not target_entry.client_id_env:
+                continue
+            set_env(target, target_entry.client_id_env, client_id, secret=False)
+            if client_secret and target_entry.client_secret_env:
+                set_env(target, target_entry.client_secret_env, client_secret, secret=True)
         return load_servers()[name]
 
     config.oauth = True
@@ -290,6 +304,28 @@ def _account_files(directory: Path | None) -> list[Path]:
                   key=lambda p: p.stem)
 
 
+def shares_account_with(name: str) -> list[str]:
+    """Other configured connectors that sign in as the same account.
+
+    The nine Google applications are one Google account reached nine ways. The
+    interface has to say so, or switching Gmail on after connecting Calendar
+    looks like it needs its own sign-in and offers a button that would do
+    nothing new.
+    """
+    config = load_servers().get(name)
+    entry = entry_for(config) if config else None
+    if entry is None or not entry.shares_account_with:
+        return []
+    return sorted(
+        other
+        for other, config in load_servers().items()
+        if other != name
+        and (lambda e: e is not None and e.shares_account_with == entry.shares_account_with)(
+            entry_for(config)
+        )
+    )
+
+
 def sign_out(name: str) -> list[str]:
     """Forget the signed-in account, so the next sign-in reaches the chooser.
 
@@ -343,13 +379,18 @@ def always_ask_which_account(url: str) -> str:
     the wrong one with no chooser and no way to tell which they got. `consent`
     goes with it because skipping the consent screen also skips issuing a
     refresh token on Google, leaving a connection that dies in an hour.
+
+    `login_hint` goes, for the same reason: it pre-selects an account, and the
+    address it carries is one PSOK had to invent to satisfy a required argument
+    rather than one the user chose. Google verifies the account actually picked
+    and the credential is stored under that, so dropping the hint is what makes
+    "choose your account on Google's page" true.
     """
     parsed = urlparse(url)
     if parsed.hostname not in ("accounts.google.com", "www.google.com"):
         return url
     query = parse_qs(parsed.query, keep_blank_values=True)
-    if "prompt" in query:
-        return url
+    query.pop("login_hint", None)
     query["prompt"] = ["select_account consent"]
     query.setdefault("access_type", ["offline"])
     return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
@@ -373,9 +414,14 @@ async def _server_side_login(
         if connection is None:
             return f"'{config.name}' did not start, so its sign-in could not begin"
 
-        arguments: dict[str, str] = {"service_name": entry.title}
-        if account_hint:
-            arguments["user_google_email"] = account_hint
+        # The server requires an address before it will build a flow, but only
+        # ever uses it as a `login_hint` -- which `always_ask_which_account`
+        # then strips, so the chooser is the user's. Nothing is stored under
+        # this address: the callback saves under the account Google verifies.
+        arguments = {
+            "service_name": entry.title,
+            "user_google_email": account_hint or account(config.name) or ACCOUNT_TO_BE_CHOSEN,
+        }
         raw = await connection.call(entry.auth_tool or "", arguments)
 
         from psok.mcp.manager import normalize_result
@@ -549,6 +595,7 @@ def status(*, with_accounts: bool = False) -> list[dict]:
                 # start it, where it cannot start without being told.
                 "account_hint_label": entry.account_hint_label if entry else None,
                 "client_id_env": entry.client_id_env if entry else None,
+                "shares_account_with": shares_account_with(name),
                 "account": account(name) if with_accounts and signed_in else None,
                 # Kept for older callers; `signed_in` is the one to read.
                 "authorized": signed_in,

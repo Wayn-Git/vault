@@ -80,9 +80,9 @@ def test_api_key_resolves_from_the_keychain(psok_home):
 
 def test_catalogue_covers_the_requested_categories():
     ids = set(cat.CATALOGUE_BY_ID)
-    assert {"playwright", "github", "google-workspace"} <= ids
+    assert {"playwright", "github", "google-gmail", "google-calendar"} <= ids
     categories = {e.category for e in cat.CATALOGUE}
-    assert {"Browser", "Development", "Google"} <= categories
+    assert {"Browser", "Development", "Communication", "Productivity"} <= categories
 
 
 def test_catalogue_entries_are_well_formed():
@@ -430,13 +430,13 @@ def test_env_still_interpolates_from_the_environment(psok_home, monkeypatch):
 
 
 def test_a_stdio_servers_client_goes_to_the_env_its_process_reads(psok_home):
-    mcp_commands.add_from_catalogue("google-workspace")
+    mcp_commands.add_from_catalogue("google-gmail")
 
     mcp_commands.set_oauth_client(
-        "google-workspace", "1234-abc.apps.googleusercontent.com", "GOCSPX-secret"
+        "google-gmail", "1234-abc.apps.googleusercontent.com", "GOCSPX-secret"
     )
 
-    config = load_servers()["google-workspace"]
+    config = load_servers()["google-gmail"]
     assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
     # The secret is a reference, never the value itself (ADR-0012).
     assert config.env["GOOGLE_OAUTH_CLIENT_SECRET"].startswith("keychain:")
@@ -447,39 +447,39 @@ def test_a_stdio_servers_client_goes_to_the_env_its_process_reads(psok_home):
 
 
 def test_an_email_is_refused_as_a_client_id(psok_home):
-    mcp_commands.add_from_catalogue("google-workspace")
-    mcp_commands.set_oauth_client("google-workspace", "1234-abc.apps.googleusercontent.com")
+    mcp_commands.add_from_catalogue("google-gmail")
+    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com")
 
     with pytest.raises(ValueError, match="not an OAuth client id"):
-        mcp_commands.set_oauth_client("google-workspace", "dadad@gmail.com")
+        mcp_commands.set_oauth_client("google-gmail", "dadad@gmail.com")
 
     # The working client survives the rejected one.
-    config = load_servers()["google-workspace"]
+    config = load_servers()["google-gmail"]
     assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
 
 
 def test_a_connector_is_not_signed_in_just_because_it_has_credentials(psok_home, monkeypatch):
     """Configuring a client is not signing in, and connecting is not either."""
-    mcp_commands.add_from_catalogue("google-workspace")
-    mcp_commands.set_oauth_client("google-workspace", "1234-abc.apps.googleusercontent.com", "s")
+    mcp_commands.add_from_catalogue("google-gmail")
+    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com", "s")
 
     credentials = psok_home / "google-credentials"
     monkeypatch.setattr(
-        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+        cat.get("google-gmail"), "credentials_path", str(credentials), raising=False
     )
-    config = load_servers()["google-workspace"]
+    config = load_servers()["google-gmail"]
     assert mcp_commands.is_signed_in(config) is False
     assert mcp_commands.missing_credentials(config) == []
 
     credentials.mkdir()
     (credentials / "someone@gmail.com.json").write_text("{}")
-    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is True
-    assert mcp_commands.account("google-workspace") == "someone@gmail.com"
+    assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is True
+    assert mcp_commands.account("google-gmail") == "someone@gmail.com"
 
 
 def test_missing_credentials_are_named_rather_than_reported_as_needing_sign_in(psok_home):
-    mcp_commands.add_from_catalogue("google-workspace")
-    config = load_servers()["google-workspace"]
+    mcp_commands.add_from_catalogue("google-gmail")
+    config = load_servers()["google-gmail"]
     assert mcp_commands.missing_credentials(config) == [
         "GOOGLE_OAUTH_CLIENT_ID",
         "GOOGLE_OAUTH_CLIENT_SECRET",
@@ -489,19 +489,19 @@ def test_missing_credentials_are_named_rather_than_reported_as_needing_sign_in(p
 def test_signing_out_forgets_the_account_the_server_itself_holds(psok_home, monkeypatch):
     """Switching a connector off left its account in place, so reconnecting
     silently reused it and no account could ever be changed."""
-    mcp_commands.add_from_catalogue("google-workspace")
+    mcp_commands.add_from_catalogue("google-gmail")
     credentials = psok_home / "google-credentials"
     credentials.mkdir()
     (credentials / "someone@gmail.com.json").write_text("{}")
     monkeypatch.setattr(
-        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+        cat.get("google-gmail"), "credentials_path", str(credentials), raising=False
     )
 
-    cleared = mcp_commands.sign_out("google-workspace")
+    cleared = mcp_commands.sign_out("google-gmail")
 
     assert cleared and "1 signed-in account" in cleared[0]
     assert list(credentials.iterdir()) == []
-    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is False
+    assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is False
 
 
 def test_signing_out_of_an_oauth_server_drops_its_token(psok_home):
@@ -525,11 +525,22 @@ def test_google_sign_in_always_asks_which_account(psok_home):
     assert "prompt=select_account+consent" in asked
     assert "access_type=offline" in asked
 
-    # Only Google is rewritten, and an explicit prompt is never overridden.
+    # Only Google is rewritten.
     github = "https://github.com/login/oauth/authorize?client_id=abc"
     assert mcp_commands.always_ask_which_account(github) == github
-    pinned = "https://accounts.google.com/o/oauth2/auth?prompt=none"
-    assert mcp_commands.always_ask_which_account(pinned) == pinned
+
+    # The pre-selected account goes. The server requires an address before it
+    # will build a URL at all, and passes it as a login_hint -- but that address
+    # is one PSOK invented to satisfy the argument, so leaving it in would
+    # pre-select an account the user never chose.
+    hinted = (
+        "https://accounts.google.com/o/oauth2/auth?client_id=abc"
+        f"&login_hint={mcp_commands.ACCOUNT_TO_BE_CHOSEN}&prompt=consent"
+    )
+    asked = mcp_commands.always_ask_which_account(hinted)
+    assert "login_hint" not in asked
+    assert mcp_commands.ACCOUNT_TO_BE_CHOSEN not in asked
+    assert "prompt=select_account+consent" in asked
 
 
 @pytest.mark.asyncio
@@ -545,22 +556,84 @@ def test_an_abandoned_sign_in_is_not_mistaken_for_an_account(psok_home, monkeypa
     """A server keeps flow bookkeeping beside its accounts. Counting the
     bookkeeping reported a connector signed in "as oauth_states" when nobody
     had finished signing in."""
-    mcp_commands.add_from_catalogue("google-workspace")
+    mcp_commands.add_from_catalogue("google-gmail")
     credentials = psok_home / "google-credentials"
     credentials.mkdir()
     (credentials / "oauth_states.json").write_text("{}")
     monkeypatch.setattr(
-        cat.get("google-workspace"), "credentials_path", str(credentials), raising=False
+        cat.get("google-gmail"), "credentials_path", str(credentials), raising=False
     )
 
-    config = load_servers()["google-workspace"]
+    config = load_servers()["google-gmail"]
     assert mcp_commands.is_signed_in(config) is False
-    assert mcp_commands.account("google-workspace") is None
+    assert mcp_commands.account("google-gmail") is None
 
     (credentials / "someone@gmail.com.json").write_text("{}")
-    assert mcp_commands.is_signed_in(load_servers()["google-workspace"]) is True
-    assert mcp_commands.account("google-workspace") == "someone@gmail.com"
+    assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is True
+    assert mcp_commands.account("google-gmail") == "someone@gmail.com"
 
     # Signing out clears the bookkeeping as well, so the next flow starts clean.
-    mcp_commands.sign_out("google-workspace")
+    mcp_commands.sign_out("google-gmail")
     assert list(credentials.iterdir()) == []
+
+
+def test_google_apps_are_separate_connectors_sharing_one_account(psok_home):
+    """One server covering nine services behind a single row meant wanting Gmail
+    switched on Drive, Chat and Forms too. They are separate connectors now --
+    but one Google account, so signing into any is signing into all."""
+    gmail = cat.get("google-gmail")
+    calendar = cat.get("google-calendar")
+
+    assert gmail.args == ["workspace-mcp", "--single-user", "--tools", "gmail"]
+    assert calendar.args == ["workspace-mcp", "--single-user", "--tools", "calendar"]
+    # Same account store, so a sign-in in one is a sign-in in all.
+    assert gmail.credentials_path == calendar.credentials_path
+    assert gmail.shares_account_with == calendar.shares_account_with
+
+    mcp_commands.add_from_catalogue("google-gmail")
+    mcp_commands.add_from_catalogue("google-calendar")
+    mcp_commands.add_from_catalogue("github")
+
+    assert mcp_commands.shares_account_with("google-gmail") == ["google-calendar"]
+    # GitHub signs in as itself and must not be swept in.
+    assert mcp_commands.shares_account_with("github") == []
+
+
+def test_one_google_sign_in_covers_every_google_app(psok_home, monkeypatch):
+    mcp_commands.add_from_catalogue("google-gmail")
+    mcp_commands.add_from_catalogue("google-drive")
+    credentials = psok_home / "google-credentials"
+    credentials.mkdir()
+    for app in ("google-gmail", "google-drive"):
+        monkeypatch.setattr(cat.get(app), "credentials_path", str(credentials), raising=False)
+
+    servers = load_servers()
+    assert mcp_commands.is_signed_in(servers["google-gmail"]) is False
+    assert mcp_commands.is_signed_in(servers["google-drive"]) is False
+
+    (credentials / "someone@gmail.com.json").write_text("{}")
+
+    servers = load_servers()
+    assert mcp_commands.is_signed_in(servers["google-gmail"]) is True
+    assert mcp_commands.is_signed_in(servers["google-drive"]) is True
+    assert mcp_commands.account("google-drive") == "someone@gmail.com"
+
+
+def test_one_google_client_covers_every_google_app(psok_home):
+    """The client authorizes the account, and the account is shared -- so asking
+    for it once per connector would be asking nine times for the same value and
+    leaving eight broken until you obliged."""
+    for app in ("google-gmail", "google-calendar", "google-drive"):
+        mcp_commands.add_from_catalogue(app)
+    mcp_commands.add_from_catalogue("github")
+
+    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com", "GOCSPX-s")
+
+    servers = load_servers()
+    for app in ("google-gmail", "google-calendar", "google-drive"):
+        env = servers[app].env
+        assert env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
+        assert servers[app].resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == "GOCSPX-s"
+
+    # GitHub authorizes a different account and must not be written to.
+    assert "GOOGLE_OAUTH_CLIENT_ID" not in servers["github"].env

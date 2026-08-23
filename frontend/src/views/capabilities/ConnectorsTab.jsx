@@ -78,15 +78,22 @@ function ConnectionBlock({ server, busy, onAct }) {
         </div>
       )}
 
+      {(server.shares_account_with || []).length > 0 && (
+        <p className="conn-setup-note">
+          One account for {server.shares_account_with.length + 1} connectors — signing in here
+          signs in {server.shares_account_with.join(', ')} too, and signing out signs them all out.
+        </p>
+      )}
+
       <div className="conn-connection-actions">
         {!blocked && !server.signed_in && (
           <button
             type="button"
             className="btn btn--small btn--primary"
             disabled={Boolean(busy) || (needsHint && !hint.trim())}
-            onClick={() => onAct('login', { accountHint: hint.trim() || null })}
+            onClick={() => onAct('connect')}
           >
-            {busy === 'login' ? 'Opening…' : 'Sign in'}
+            {busy === 'connect' ? 'Opening…' : 'Connect'}
           </button>
         )}
         {server.signed_in && (
@@ -411,9 +418,11 @@ function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChan
 /* A configured connector in the list: what it is, and how it is doing. */
 function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   const blocked = (server.missing_credentials || []).length > 0
-  const state = live?.connected
-    ? `${live.tools} tool${live.tools === 1 ? '' : 's'} live`
-    : reason ?? 'off'
+  // `reason` is only passed for a connector that is not usable, and it outranks
+  // the tool count: a running process whose account is missing was reporting
+  // "122 tools live" for tools that would every one of them have failed.
+  const state = reason ?? `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`
+  const tone = reason ? (live?.error ? 'error' : 'off') : 'live'
 
   return (
     <button type="button" className="conn-row" onClick={onOpen}>
@@ -421,23 +430,19 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
       <span className="conn-row-text">
         <span className="conn-row-name">{server.title}</span>
         <span className="conn-row-sub">
-          {blocked
-            ? `Needs ${server.missing_credentials.join(' and ')}`
-            : server.account || server.description || server.target}
+          {server.account || server.description || server.target}
         </span>
       </span>
-      <span className={`conn-status conn-status--${live?.error ? 'error' : live?.connected ? 'live' : 'off'}`}>
-        {state}
-      </span>
-      {server.auth_kind !== 'none' && !blocked && !server.signed_in && (
+      <span className={`conn-status conn-status--${tone}`}>{state}</span>
+      {server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
         <span
           role="button"
           tabIndex={0}
-          className="btn btn--small"
-          onClick={(e) => { e.stopPropagation(); onAct('login', {}) }}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('login', {}) } }}
+          className="btn btn--small btn--primary"
+          onClick={(e) => { e.stopPropagation(); onAct('connect') }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('connect') } }}
         >
-          {busy === 'login' ? 'Opening…' : 'Sign in'}
+          {busy === 'connect' ? 'Opening…' : 'Connect'}
         </span>
       )}
       <Icon name="chevron" size={15} className="conn-row-chevron" />
@@ -513,6 +518,22 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       } else if (action === 'switch') {
         const cap = (caps.connectors ?? []).find((c) => c.name === server.name)
         await setCapEnabled(cap || { kind: 'connector', name: server.name, enabled: false }, !cap?.enabled)
+      } else if (action === 'connect') {
+        /* What "connect" means to someone clicking it: switch it on, and take
+           me to the provider to choose my account. Those were two separate
+           controls in two places, so a connector could be on and unusable, or
+           signed in and switched off, and neither said so. */
+        const cap = (caps.connectors ?? []).find((c) => c.name === server.name)
+        if (!cap?.enabled) {
+          await setCapEnabled(cap || { kind: 'connector', name: server.name, enabled: false }, true)
+        }
+        const result = await api.mcpLogin(server.name, {})
+        if (result.authorized) {
+          toast(`Connected ${server.title}${result.account ? ` as ${result.account}` : ''}`, 'ok')
+        } else {
+          toast(result.result, 'info')
+          setHelp({ server: server.name, text: result.result })
+        }
       } else if (action === 'logout') {
         const result = await api.mcpLogout(server.name)
         toast(
@@ -557,11 +578,23 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const matches = (server) =>
     !q || server.name.toLowerCase().includes(q) || (server.target || '').toLowerCase().includes(q)
 
+  /* Connected means usable, not merely running.
+
+     Grouping on the process alone put Google Workspace under "Connected"
+     reporting 122 tools live, beside a "Sign in" button, while no Google
+     account was attached to it — every one of those tools would have failed.
+     A connector that still needs an account or its credentials is waiting on
+     you, whatever its process is doing. */
+  const usable = (server) =>
+    Boolean(live[server.name]?.connected)
+    && (server.missing_credentials || []).length === 0
+    && server.signed_in !== false
+
   const [running, waiting] = useMemo(() => {
     const on = []
     const off = []
     for (const server of servers.filter(matches)) {
-      (live[server.name]?.connected ? on : off).push(server)
+      (usable(server) ? on : off).push(server)
     }
     return [on, off]
   }, [servers, live, q]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -581,9 +614,9 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   const why = (server) => {
     const state = live[server.name] || {}
-    if (state.error) return 'failed to start'
     if ((server.missing_credentials || []).length > 0) return 'needs credentials'
     if (server.signed_in === false) return 'needs sign-in'
+    if (state.error) return 'failed to start'
     if (!state.enabled) return 'off'
     return started ? 'not running' : 'not started yet'
   }

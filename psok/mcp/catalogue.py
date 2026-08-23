@@ -56,6 +56,11 @@ class CatalogueEntry:
     # it is for. Naming that here lets the interface ask for it generically
     # rather than special-casing one provider.
     account_hint_label: str | None = None
+    # Connectors sharing this key share one signed-in account: signing into any
+    # of them signs into all, and signing out of one signs out of all. The nine
+    # Google applications are one Google account, and pretending otherwise would
+    # mean nine identical sign-ins to the same address.
+    shares_account_with: str | None = None
     # The server's own credential store, so signing out actually forgets the
     # account instead of leaving the next connect silently reusing it.
     credentials_path: str | None = None
@@ -78,6 +83,88 @@ class CatalogueEntry:
             catalogue_id=self.id,
             description=self.description,
         )
+
+
+# One Google server, presented as the applications people actually think in.
+#
+# `workspace-mcp` covers nine Google services at once, and adding it put 122
+# tools behind a single row called "Google Workspace" -- so wanting Gmail meant
+# switching on Drive, Chat and Forms as well, and the row could not say what it
+# was for. `--tools` selects the services one process registers, so each
+# application here is its own connector with its own icon, its own on/off, and
+# only its own tools.
+#
+# The account is shared on purpose. All of them read the same credential
+# directory, so signing in once connects every Google app that is switched on,
+# and signing out of one signs out of all -- which is the truth about a Google
+# account, and less surprising than nine separate sign-ins to the same address.
+GOOGLE_APPS: list[tuple[str, str, str, str]] = [
+    ("gmail", "Gmail", "Communication", "Read, search, draft, send and label mail."),
+    (
+        "calendar",
+        "Google Calendar",
+        "Productivity",
+        "Read and manage events across your calendars.",
+    ),
+    ("drive", "Google Drive", "Productivity", "Search Drive, read files and manage folders."),
+    ("docs", "Google Docs", "Productivity", "Read, write and comment on documents."),
+    ("sheets", "Google Sheets", "Productivity", "Read and write spreadsheet ranges."),
+    ("slides", "Google Slides", "Creativity", "Read and build presentations."),
+    ("forms", "Google Forms", "Productivity", "Build forms and read their responses."),
+    ("tasks", "Google Tasks", "Productivity", "Read and manage task lists."),
+    ("chat", "Google Chat", "Communication", "Read spaces and send messages."),
+]
+
+GOOGLE_SETUP_HINT = (
+    "Google requires your own OAuth client rather than a shared one. You only do\n"
+    "this once — every Google app then shares it.\n"
+    "  1. console.cloud.google.com -> APIs & Services -> enable the APIs you want\n"
+    "     (Gmail API, Calendar API, Drive API, …)\n"
+    "  2. OAuth consent screen -> External -> add yourself as a test user\n"
+    "  3. Credentials -> Create OAuth client ID -> *Web application*\n"
+    "     Authorised redirect URI: http://localhost:8765/oauth2callback\n"
+    "     (this exact URI — it is the server's own callback, not PSOK's)\n"
+    "  4. Paste the client id and secret below, then press Connect."
+)
+
+
+def _google_apps() -> list[CatalogueEntry]:
+    entries = []
+    for service, title, category, description in GOOGLE_APPS:
+        entries.append(
+            CatalogueEntry(
+                id=f"google-{service}",
+                title=title,
+                description=description,
+                category=category,
+                auth=AuthKind.SETUP,
+                transport=Transport.STDIO,
+                command="uvx",
+                args=["workspace-mcp", "--single-user", "--tools", service],
+                env={
+                    # The server's own OAuth callback listener. Its default is
+                    # 8000, which is where PSOK's API usually sits, so this pins
+                    # a free port; the redirect URI registered with Google has
+                    # to match it exactly. Bound lazily, only during a sign-in,
+                    # so several of these can run at once.
+                    "WORKSPACE_MCP_PORT": "8765",
+                    "OAUTHLIB_INSECURE_TRANSPORT": "1",  # plain http on loopback
+                    # Lets the callback accept a code whose flow state it does
+                    # not hold, which is what allows the account to be chosen on
+                    # Google's page rather than declared up front.
+                    "MCP_SINGLE_USER_MODE": "1",
+                },
+                requires="uv (uvx) and a Google Cloud OAuth client",
+                setup_hint=GOOGLE_SETUP_HINT,
+                homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
+                client_id_env="GOOGLE_OAUTH_CLIENT_ID",
+                client_secret_env="GOOGLE_OAUTH_CLIENT_SECRET",
+                auth_tool="start_google_auth",
+                credentials_path="~/.google_workspace_mcp/credentials",
+                shares_account_with="google",
+            )
+        )
+    return entries
 
 
 CATALOGUE: list[CatalogueEntry] = [
@@ -138,44 +225,7 @@ CATALOGUE: list[CatalogueEntry] = [
         identity_field="login",
     ),
     # ----------------------------------------------------------------- google
-    CatalogueEntry(
-        id="google-workspace",
-        title="Google Workspace",
-        description=(
-            "Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks and Chat in one"
-            " server. Sign in once with Google and every surface is available."
-        ),
-        category="Google",
-        auth=AuthKind.SETUP,
-        transport=Transport.STDIO,
-        command="uvx",
-        args=["workspace-mcp"],
-        # This server runs its own OAuth callback listener. Its default port is
-        # 8000, which is also where PSOK's API usually sits, so the entry pins a
-        # free one rather than letting the two fight over the socket. The
-        # redirect URI registered with Google has to match this exactly.
-        env={
-            "WORKSPACE_MCP_PORT": "8765",
-            "OAUTHLIB_INSECURE_TRANSPORT": "1",  # the callback is plain http on loopback
-        },
-        requires="uv (uvx) and a Google Cloud OAuth client",
-        setup_hint=(
-            "Google requires your own OAuth client rather than a shared one.\n"
-            "  1. console.cloud.google.com -> APIs & Services -> enable the Gmail API"
-            " (and Calendar/Drive if you want them)\n"
-            "  2. OAuth consent screen -> External -> add yourself as a test user\n"
-            "  3. Credentials -> Create OAuth client ID -> *Web application*\n"
-            "     Authorised redirect URI: http://localhost:8765/oauth2callback\n"
-            "  4. Paste the client id and secret below, then sign in.\n"
-            "Signing in opens Google's own account chooser in your browser."
-        ),
-        homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
-        client_id_env="GOOGLE_OAUTH_CLIENT_ID",
-        client_secret_env="GOOGLE_OAUTH_CLIENT_SECRET",
-        auth_tool="start_google_auth",
-        account_hint_label="Google account",
-        credentials_path="~/.google_workspace_mcp/credentials",
-    ),
+    *_google_apps(),
     # ------------------------------------------------------------------ local
     CatalogueEntry(
         id="fetch",

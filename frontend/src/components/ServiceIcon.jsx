@@ -68,6 +68,96 @@ const MARKS = {
       </>
     ),
   },
+  gmail: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#EA4335" d="M3 7.1 12 13l9-5.9V6a1.4 1.4 0 0 0-1.4-1.4H4.4A1.4 1.4 0 0 0 3 6v1.1Z" />
+        <path fill="#34A853" d="M3 8.9V18a1.4 1.4 0 0 0 1.4 1.4h2.4V11L3 8.9Z" />
+        <path fill="#4285F4" d="M17.2 19.4h2.4A1.4 1.4 0 0 0 21 18V8.9L17.2 11v8.4Z" />
+        <path fill="#FBBC05" d="M6.8 19.4h10.4V11L12 14.5 6.8 11v8.4Z" />
+      </>
+    ),
+  },
+  calendar: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2" fill="#fff" stroke="#4285F4" strokeWidth="1.6" />
+        <path d="M3.5 8.5h17" stroke="#4285F4" strokeWidth="1.6" />
+        <path fill="#4285F4" d="M7 2.8h1.6v3H7zm8.4 0H17v3h-1.6z" />
+        <text x="12" y="16.6" textAnchor="middle" fontSize="7.5" fontWeight="700" fill="#4285F4" fontFamily="system-ui, sans-serif">31</text>
+      </>
+    ),
+  },
+  drive: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#0F9D58" d="m8.6 3.5 6.8 11.8h-6.8L5.2 9.4 8.6 3.5Z" />
+        <path fill="#F4B400" d="M15.4 3.5H8.6l6.8 11.8 3.4-5.9L15.4 3.5Z" />
+        <path fill="#4285F4" d="M2 15.3h13.6l-3.4 5.9H5.4L2 15.3Z" opacity="0.95" />
+      </>
+    ),
+  },
+  docs: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#4285F4" d="M6 2.6h7l5 5v13.8H6V2.6Z" />
+        <path fill="#a1c2fa" d="M13 2.6l5 5h-5v-5Z" />
+        <path d="M8.6 11h6.8M8.6 13.8h6.8M8.6 16.6h4.4" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" />
+      </>
+    ),
+  },
+  sheets: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#0F9D58" d="M6 2.6h7l5 5v13.8H6V2.6Z" />
+        <path fill="#a8dbc0" d="M13 2.6l5 5h-5v-5Z" />
+        <path d="M8.6 11.2h6.8v6.2H8.6zM8.6 13.3h6.8M8.6 15.4h6.8M12 11.2v6.2" stroke="#fff" strokeWidth="1.2" fill="none" />
+      </>
+    ),
+  },
+  slides: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#F4B400" d="M6 2.6h7l5 5v13.8H6V2.6Z" />
+        <path fill="#fae2a6" d="M13 2.6l5 5h-5v-5Z" />
+        <rect x="8.6" y="11.4" width="6.8" height="5" rx="0.6" fill="#fff" />
+      </>
+    ),
+  },
+  forms: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <path fill="#7248B9" d="M6 2.6h7l5 5v13.8H6V2.6Z" />
+        <path fill="#c3aee0" d="M13 2.6l5 5h-5v-5Z" />
+        <path d="M9.4 11.6h5.6M9.4 14.2h5.6M9.4 16.8h3.4" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" />
+      </>
+    ),
+  },
+  tasks: {
+    bg: '#ffffff',
+    node: (
+      <>
+        <circle cx="12" cy="12" r="9" fill="#2684FC" />
+        <path d="M8 12.2l2.6 2.6L16 9.4" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      </>
+    ),
+  },
+  chat: {
+    bg: '#ffffff',
+    node: (
+      <path
+        fill="#00AC47"
+        d="M4.6 3.5h14.8A1.6 1.6 0 0 1 21 5.1v9.6a1.6 1.6 0 0 1-1.6 1.6H9.8L5 20.5v-4.2h-.4A1.6 1.6 0 0 1 3 14.7V5.1a1.6 1.6 0 0 1 1.6-1.6Z"
+      />
+    ),
+  },
   skill: {
     bg: '#2b2721',
     node: (
@@ -79,11 +169,21 @@ const MARKS = {
   },
 }
 
+/* The Google applications each carry their own mark rather than nine copies of
+   the Google G: a directory where every Google row looks identical is the
+   problem the marks exist to solve. */
 const ALIASES = {
   'google-workspace': 'google',
   'chrome-devtools': 'chrome',
-  gmail: 'google',
-  drive: 'google',
+  'google-gmail': 'gmail',
+  'google-calendar': 'calendar',
+  'google-drive': 'drive',
+  'google-docs': 'docs',
+  'google-sheets': 'sheets',
+  'google-slides': 'slides',
+  'google-forms': 'forms',
+  'google-tasks': 'tasks',
+  'google-chat': 'chat',
 }
 
 export default function ServiceIcon({ name, size = 34, kind = 'connector' }) {
