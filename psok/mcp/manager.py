@@ -10,6 +10,7 @@ gate rather than here.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from psok.mcp.client import MCPConnection, MCPConnectionError, OAuthRequired
@@ -20,6 +21,11 @@ from psok.tools.registry import ToolRegistry, mcp_tool_key
 log = logging.getLogger(__name__)
 
 MAX_TOOLS_PER_SERVER = 128
+
+# How long reconcile leaves a failed server alone, by consecutive failure. The
+# last value repeats, so a server that is genuinely gone is retried twice an
+# hour rather than at the head of every turn.
+RETRY_BACKOFF_SECONDS = (60.0, 300.0, 1800.0)
 
 
 def normalize_result(result: Any) -> ToolResult:
@@ -72,6 +78,37 @@ class MCPManager:
         self.open_browser = open_browser
         self.connections: dict[str, MCPConnection] = {}
         self.errors: dict[str, str] = {}
+        # When reconcile may next try a failed server again, and how many times
+        # in a row it has failed -- see `_hold_off`.
+        self.retry_after: dict[str, float] = {}
+        self.attempts: dict[str, int] = {}
+
+    def _hold_off(self, name: str) -> None:
+        """Back a failed server off, rather than writing it off.
+
+        `reconcile` used to skip anything with an error forever, so one refused
+        DNS lookup left a connector reading "failed to start" until something
+        explicitly cleared it. Backing off keeps the property that comment was
+        protecting -- no connect timeout at the head of every turn -- without
+        making a bad minute permanent.
+        """
+        self.attempts[name] = self.attempts.get(name, 0) + 1
+        delay = RETRY_BACKOFF_SECONDS[min(self.attempts[name] - 1, len(RETRY_BACKOFF_SECONDS) - 1)]
+        self.retry_after[name] = time.monotonic() + delay
+
+    def _clear_failure(self, name: str) -> None:
+        self.errors.pop(name, None)
+        self.retry_after.pop(name, None)
+        self.attempts.pop(name, None)
+
+    def forget_error(self, name: str) -> None:
+        """Let the next reconcile retry this server immediately.
+
+        Called when the user does something that means "try again now" -- a
+        sign-in, a toggle, an explicit connect -- which should not have to wait
+        out a backoff the user has no way of seeing.
+        """
+        self._clear_failure(name)
 
     # ------------------------------------------------------------------ connect
 
@@ -89,13 +126,15 @@ class MCPManager:
             # Already classified (OAuthRequired, OAuthRegistrationUnsupported, ...).
             # Re-wrapping would erase the type callers branch on.
             self.errors[config.name] = str(exc)
+            self._hold_off(config.name)
             raise
         except Exception as exc:
             self.errors[config.name] = str(exc)
+            self._hold_off(config.name)
             raise MCPConnectionError(f"'{config.name}' failed to connect: {exc}") from exc
 
         self.connections[config.name] = connection
-        self.errors.pop(config.name, None)
+        self._clear_failure(config.name)
         return self._register_tools(config, connection)
 
     def _register_tools(self, config: ServerConfig, connection: MCPConnection) -> int:
@@ -201,9 +240,11 @@ class MCPManager:
         connector switched on in the interface stayed dark until PSOK was
         restarted -- the toggle wrote a row nothing acted on.
 
-        A server that already failed is left alone until something asks for it
-        again: retrying a dead one here would spend its connect timeout at the
-        start of every turn, before the model is even called.
+        A server that already failed is left alone until its backoff expires:
+        retrying a dead one on every pass would spend its connect timeout at the
+        start of every turn, before the model is even called. But it *is*
+        retried eventually -- skipping it forever meant one transient DNS
+        failure disabled a connector for the rest of the session.
         """
         from psok.capabilities import CapabilityService, Kind
 
@@ -215,7 +256,7 @@ class MCPManager:
             # Removed from mcp.yaml. Its failure has to go with it, or health
             # stays degraded forever over a connector that no longer exists.
             await self.disconnect_server(name)
-            self.errors.pop(name, None)
+            self._clear_failure(name)
             results[name] = 0
 
         for name, config in configured.items():
@@ -231,7 +272,7 @@ class MCPManager:
             # Only an explicit "on" starts a process. A server connected by hand
             # is left connected: no opinion is not the same as "switch it off".
             if not connected and service.is_enabled(Kind.CONNECTOR, name):
-                if name in self.errors:
+                if name in self.errors and time.monotonic() < self.retry_after.get(name, 0.0):
                     continue
                 try:
                     results[name] = await self.connect_server(config)

@@ -39,6 +39,13 @@ async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
         except AmbiguousDate as exc:
             return ToolResult.error(f"{exc}. Ask the user to clarify when they'll work on it.")
 
+    reminder_at = None
+    if args.get("reminder_hint"):
+        try:
+            reminder_at = resolve_date_hint(args["reminder_hint"])
+        except AmbiguousDate as exc:
+            return ToolResult.error(f"{exc}. Ask the user when they want to be reminded.")
+
     duration = args.get("duration_estimate_minutes")
 
     if scheduled_at:
@@ -61,12 +68,17 @@ async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
         duration_estimate_minutes=int(duration) if duration else None,
         priority=args.get("priority"),
         source="agent",
+        reminder_at=reminder_at.isoformat() if reminder_at else None,
     )
     parts = [f"created task {task_id}: {title}"]
     if due_at:
         parts.append(f"due {due_at:%Y-%m-%d %H:%M}")
     if scheduled_at:
         parts.append(f"scheduled {scheduled_at:%Y-%m-%d %H:%M}")
+    if reminder_at:
+        parts.append(f"reminding at {reminder_at:%Y-%m-%d %H:%M}")
+    elif due_at:
+        parts.append("reminding at the deadline")
     return ToolResult.ok(", ".join(parts))
 
 
@@ -80,7 +92,11 @@ async def update_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
     for key in ("title", "notes", "status", "priority", "duration_estimate_minutes"):
         if args.get(key) is not None:
             fields[key] = args[key]
-    for hint_key, column in (("due_date_hint", "due_at"), ("scheduled_hint", "scheduled_at")):
+    for hint_key, column in (
+        ("due_date_hint", "due_at"),
+        ("scheduled_hint", "scheduled_at"),
+        ("reminder_hint", "reminder_at"),
+    ):
         if args.get(hint_key):
             try:
                 fields[column] = resolve_date_hint(args[hint_key]).isoformat()
@@ -88,6 +104,12 @@ async def update_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
                 return ToolResult.error(f"{exc}. Ask the user to clarify.")
     if not fields:
         return ToolResult.error("nothing to update")
+
+    # Moving the time a reminder is owed makes an already-delivered one stale:
+    # without this, pushing a task to tomorrow means never hearing about it
+    # again, because it was announced today.
+    if "reminder_at" in fields or "due_at" in fields:
+        fields["reminded_at"] = None
 
     repo.update(task_id, **fields)
     return ToolResult.ok(f"updated task {task_id}: {', '.join(fields)}")
@@ -104,6 +126,10 @@ async def list_upcoming(args: dict[str, Any], _: ToolContext) -> ToolResult:
             bits.append(f"due {r['due_at']}")
         if r["scheduled_at"]:
             bits.append(f"scheduled {r['scheduled_at']}")
+        if r["reminder_at"]:
+            bits.append(f"reminder {r['reminder_at']}")
+        if r["external_source"]:
+            bits.append(f"from {r['external_source']}")
         lines.append(" | ".join(bits))
     return ToolResult.ok("\n".join(lines))
 
@@ -183,6 +209,11 @@ def tools() -> list[Tool]:
                         "description": f"When the user will work on it, distinct from the"
                         f" deadline. {_HINT}",
                     },
+                    "reminder_hint": {
+                        "type": "string",
+                        "description": "When to notify the user on their desktop. Defaults to"
+                        f" the deadline when omitted. {_HINT}",
+                    },
                     "duration_estimate_minutes": {"type": "integer"},
                     "priority": {"type": "string", "enum": ["low", "medium", "high"]},
                 },
@@ -207,6 +238,11 @@ def tools() -> list[Tool]:
                     "priority": {"type": "string"},
                     "due_date_hint": {"type": "string"},
                     "scheduled_hint": {"type": "string"},
+                    "reminder_hint": {
+                        "type": "string",
+                        "description": "When to notify the user. Retiming a task clears any"
+                        " reminder already delivered, so it is announced again at the new time.",
+                    },
                     "duration_estimate_minutes": {"type": "integer"},
                 },
                 "required": ["task_id"],

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -48,6 +49,8 @@ from psok.tools.registry import build_default_registry
 # visits drive their machine through this API.
 DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+log = logging.getLogger(__name__)
+
 
 def _cors_origins() -> list[str]:
     configured = os.environ.get("PSOK_CORS_ORIGINS", "").strip()
@@ -65,6 +68,12 @@ _mcp: dict[str, Any] = {"manager": None, "registry": None, "workspace": None, "e
 # once would each build one, orphaning a set of stdio subprocesses -- or worse,
 # shut down the manager the other turn was mid-tool-call against.
 _registry_lock = asyncio.Lock()
+
+# Sign-ins running in the background, keyed by server. A flow outlives the
+# request that started it, so the task has to be held somewhere -- both to keep
+# it from being garbage collected and to refuse a second sign-in to a server
+# already in the middle of one.
+_login_tasks: dict[str, asyncio.Task] = {}
 
 # Big enough for a document or a screenshot, small enough that a stray upload
 # cannot fill the disk.
@@ -822,10 +831,18 @@ class LoginRequest(BaseModel):
     account_hint: str | None = None
 
 
-@app.post("/api/mcp/servers/{name}/login")
+@app.post("/api/mcp/servers/{name}/login", status_code=202)
 async def mcp_login(name: str, body: LoginRequest | None = None) -> dict[str, Any]:
-    """Start the sign-in flow. The browser opens on this machine; the URL is also
-    published on /api/mcp/authorizations so a remote UI can render it as a link."""
+    """Start the sign-in flow, and answer without waiting for it to finish.
+
+    Signing in takes as long as a person takes. Holding the request open for it
+    meant a five-minute HTTP call that the browser, or any proxy in front of it,
+    gave up on long before the user did -- which surfaced as an unexplained
+    network error over a sign-in that was going fine. The flow now runs as a
+    task and reports through `GET /api/mcp/authorizations`, which is where the
+    login URL already lived and which interfaces already poll.
+    """
+    from psok.capabilities import CapabilityService, Kind
     from psok.mcp import commands as mcp
     from psok.mcp.config import load_servers
 
@@ -834,23 +851,50 @@ async def mcp_login(name: str, body: LoginRequest | None = None) -> dict[str, An
     if config is None:
         raise HTTPException(404, f"no server named '{name}' in mcp.yaml")
 
-    message = await mcp.login(name, force=request.force, account_hint=request.account_hint)
-    config = load_servers()[name]
-    return {
-        "result": message,
-        "authorized": bool(mcp.is_signed_in(config)),
-        "account": mcp.account(name),
-    }
+    existing = _login_tasks.get(name)
+    if existing is not None and not existing.done():
+        raise HTTPException(409, f"a sign-in to '{name}' is already in progress")
+
+    # Signing in means "and now use it": without this the token is stored, the
+    # connector stays switched off, and nothing ever starts it.
+    CapabilityService().set_enabled(Kind.CONNECTOR, name, True)
+    if _mcp["manager"] is None:
+        await _registry_for(None)
+
+    async def run() -> None:
+        try:
+            await mcp.login(
+                name,
+                force=request.force,
+                account_hint=request.account_hint,
+                manager=_mcp["manager"],
+            )
+        except Exception as exc:  # a failed sign-in is a reported outcome, not a crash
+            log.warning("sign-in to %s failed: %s", name, exc)
+            mcp.report_login_failure(name, str(exc))
+        finally:
+            _mcp["errors"].pop(name, None)
+            _login_tasks.pop(name, None)
+
+    _login_tasks[name] = asyncio.create_task(run(), name=f"mcp-login:{name}")
+    return {"status": "started", "server": name}
 
 
 @app.post("/api/mcp/servers/{name}/logout")
-def mcp_logout(name: str) -> dict[str, Any]:
+async def mcp_logout(name: str) -> dict[str, Any]:
     """Forget the connected account so the next sign-in reaches the chooser.
 
     Switching a connector off stops its process and leaves its account in
     place; there was no way from here to change which account a connector uses.
     """
     from psok.mcp import commands as mcp
+
+    task = _login_tasks.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+    # A server held open only to receive a sign-in the user has just abandoned
+    # would otherwise sit there until its own deadline.
+    await mcp.end_auth_session(name)
 
     try:
         cleared = mcp.sign_out(name)
@@ -860,11 +904,27 @@ def mcp_logout(name: str) -> dict[str, Any]:
 
 
 @app.get("/api/mcp/authorizations")
-def mcp_pending_authorizations() -> list[dict[str, str]]:
-    from psok.mcp.oauth import PENDING
+def mcp_pending_authorizations() -> list[dict[str, Any]]:
+    """Sign-ins this process started, in flight or recently finished.
 
+    `status` is `waiting` while the user is with the provider, then `done` or
+    `failed` with the reason. This is the only channel that outlives the request
+    that started the flow, so it is how an interface learns a sign-in landed.
+    """
+    from psok.mcp import commands as mcp
+    from psok.mcp.oauth import PENDING, prune_finished
+
+    prune_finished()
     return [
-        {"server": name, "authorization_url": p.authorization_url} for name, p in PENDING.items()
+        {
+            "server": name,
+            "authorization_url": p.authorization_url,
+            "status": p.status,
+            "message": p.message,
+            "finished_at": p.finished_at,
+            "account": mcp.account(name) if p.status == "done" else None,
+        }
+        for name, p in PENDING.items()
     ]
 
 

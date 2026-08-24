@@ -177,6 +177,13 @@ def _google_apps() -> list[CatalogueEntry]:
                     # to match it exactly. Bound lazily, only during a sign-in,
                     # so several of these can run at once.
                     "WORKSPACE_MCP_PORT": "8765",
+                    # And if that port is busy, fail rather than move. Left to
+                    # itself workspace-mcp walks to 8766..8769 and composes a
+                    # redirect URI from whichever it got -- which Google then
+                    # rejects as redirect_uri_mismatch, naming a port the user
+                    # never chose and cannot see. Nine of these entries share
+                    # one port, so this is the common case, not a corner.
+                    "WORKSPACE_MCP_PORT_FALLBACK_COUNT": "0",
                     "OAUTHLIB_INSECURE_TRANSPORT": "1",  # plain http on loopback
                     # Lets the callback accept a code whose flow state it does
                     # not hold, which is what allows the account to be chosen on

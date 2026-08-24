@@ -379,10 +379,17 @@ class TaskRepository:
         duration_estimate_minutes: int | None = None,
         priority: str | None = None,
         source: str = "user",
+        reminder_at: str | None = None,
+        external_source: str | None = None,
+        external_id: str | None = None,
+        external_etag: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
-            " priority, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " priority, source, reminder_at, external_source, external_id, external_etag,"
+            " last_synced_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
             (
                 title,
                 notes,
@@ -391,6 +398,11 @@ class TaskRepository:
                 duration_estimate_minutes,
                 priority,
                 source,
+                reminder_at,
+                external_source,
+                external_id,
+                external_etag,
+                external_id,
             ),
         )
         self.conn.commit()
@@ -409,6 +421,10 @@ class TaskRepository:
             "status",
             "priority",
             "calendar_event_id",
+            "reminder_at",
+            "reminded_at",
+            "external_etag",
+            "last_synced_at",
         }
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
@@ -426,6 +442,49 @@ class TaskRepository:
             sql += " WHERE status IN ('todo', 'in_progress')"
         sql += " ORDER BY (due_at IS NULL), due_at, id LIMIT ?"
         return self.conn.execute(sql, (limit,)).fetchall()
+
+    def due_reminders(self, now: str) -> list[sqlite3.Row]:
+        """Open tasks whose reminder has come round and has not been given.
+
+        `reminder_at` when it is set, otherwise `due_at` -- so a plain deadline
+        is announced without anyone having to set a second field, and a task
+        with neither is never announced at all.
+        """
+        return self.conn.execute(
+            "SELECT * FROM tasks"
+            " WHERE status IN ('todo', 'in_progress')"
+            "   AND reminded_at IS NULL"
+            "   AND COALESCE(reminder_at, due_at) IS NOT NULL"
+            "   AND COALESCE(reminder_at, due_at) <= ?"
+            " ORDER BY COALESCE(reminder_at, due_at), id",
+            (now,),
+        ).fetchall()
+
+    def mark_reminded(self, task_id: int, when: str) -> bool:
+        """Claim a reminder. False if something already claimed it.
+
+        The `reminded_at IS NULL` predicate is the claim: two ticks overlapping,
+        or a tick racing a restart, cannot both win it, so nobody is told twice.
+        """
+        cur = self.conn.execute(
+            "UPDATE tasks SET reminded_at = ?, updated_at = datetime('now')"
+            " WHERE id = ? AND reminded_at IS NULL",
+            (when, task_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def by_external(self, source: str, external_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM tasks WHERE external_source = ? AND external_id = ?",
+            (source, external_id),
+        ).fetchone()
+
+    def external_ids(self, source: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT id, external_id, status FROM tasks WHERE external_source = ?",
+            (source,),
+        ).fetchall()
 
 
 class CalendarRepository:

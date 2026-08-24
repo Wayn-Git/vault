@@ -7,6 +7,7 @@ hijacked URL must not be able to reach services on the local network.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -60,3 +61,13 @@ def check_url(url: str, *, allow_local: bool = False) -> None:
             f"'{parsed.hostname}' resolves to a private or loopback address."
             " Set allow_local: true on this server if that is intended."
         )
+
+
+async def check_url_async(url: str, *, allow_local: bool = False) -> None:
+    """check_url with the name resolution off the event loop.
+
+    `getaddrinfo` blocks, and this runs before every remote connect -- on a slow
+    or failing resolver it stalled the whole process, streaming turns included,
+    which surfaced in the interface as an unexplained network error.
+    """
+    await asyncio.to_thread(check_url, url, allow_local=allow_local)

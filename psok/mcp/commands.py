@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import shutil
+import time
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -42,6 +44,19 @@ log = logging.getLogger(__name__)
 # yet. It never reaches the provider: the hint carrying it is stripped before
 # the browser opens, and the account is whatever they pick.
 ACCOUNT_TO_BE_CHOSEN = "pending@psok.local"
+
+# How long a server that owns its own OAuth is kept running for the user to
+# finish in the browser, and how often its credential store is checked. Matched
+# to the loopback callback's wait so the two sign-in shapes give a person the
+# same amount of time.
+AUTH_SESSION_TIMEOUT_SECONDS = 300.0
+AUTH_POLL_SECONDS = 2.0
+
+# Servers held open purely for a sign-in in progress, and the tasks that own
+# them. Separate from the live registry's manager: this one exists only until
+# the flow lands, and must not be mistaken for a connection anyone can use.
+_AUTH_SESSIONS: dict[str, MCPManager] = {}
+_AUTH_TASKS: dict[str, asyncio.Task] = {}
 
 
 def _manager(open_browser: bool = True) -> MCPManager:
@@ -417,6 +432,9 @@ def sign_out(name: str) -> list[str]:
         raise ValueError(f"no server named '{name}' in mcp.yaml")
 
     cleared: list[str] = []
+    # Whatever an earlier sign-in reported is now about the account being
+    # forgotten, so it must not be left on screen next to a "signed out" row.
+    PENDING.pop(name, None)
     if has_tokens(name):
         cleared.append("the stored access token")
     forget(name)
@@ -507,12 +525,24 @@ async def _server_side_login(
     answers with the provider's authorization URL -- which is the thing the
     user actually has to visit. Surfacing it through PENDING puts it on the
     same banner every other pending sign-in uses.
+
+    **The server has to stay running until the user is done.** It is the thing
+    the provider redirects back to: `workspace-mcp` binds its own
+    `localhost:8765/oauth2callback` listener lazily, inside its own process, and
+    Microsoft To Do polls Microsoft for the device code from inside its own
+    process too. Shutting the manager down when this function returned killed
+    both -- Google's redirect then reached a port nothing held ("Unable to
+    connect to localhost:8765") and To Do's code could never complete. So
+    ownership of the manager passes to `_watch_server_side_login`, which tears
+    it down when the sign-in lands, times out, or the server is asked to stop.
     """
+    await end_auth_session(config.name)
     manager = _manager(open_browser=False)
     try:
         await manager.connect_server(config)
         connection = manager.connections.get(config.name)
         if connection is None:
+            await manager.shutdown()
             return f"'{config.name}' did not start, so its sign-in could not begin"
 
         raw = await connection.call(
@@ -524,6 +554,7 @@ async def _server_side_login(
         result = normalize_result(raw)
         url = _authorization_url_in(result.content)
         if url is None:
+            await manager.shutdown()
             return (
                 f"'{config.name}' did not return a sign-in link. It said: "
                 f"{result.content.strip()[:400]}"
@@ -534,13 +565,70 @@ async def _server_side_login(
             server_name=config.name, authorization_url=url
         )
         webbrowser.open(url)
+
+        _AUTH_SESSIONS[config.name] = manager
+        _AUTH_TASKS[config.name] = asyncio.create_task(
+            _watch_server_side_login(config, entry),
+            name=f"mcp-auth:{config.name}",
+        )
         # A device-code flow answers with a code as well as a URL, and the code
         # is useless if it is not shown -- so the server's own words are passed
         # through rather than replaced with a summary that drops them.
         return f"opened {entry.title}'s sign-in page.\n\n{result.content.strip()[:600]}"
     except Exception as exc:
+        await manager.shutdown()
+        PENDING.pop(config.name, None)
         return f"could not start sign-in for '{config.name}': {exc}"
+
+
+async def _watch_server_side_login(config: ServerConfig, entry: cat.CatalogueEntry) -> None:
+    """Hold the server open until its own sign-in finishes, then let it go.
+
+    Polling the credential store is the only signal available: the flow happens
+    entirely inside the server's process and it does not report back.
+    """
+    deadline = time.monotonic() + AUTH_SESSION_TIMEOUT_SECONDS
+    outcome, message = "failed", f"{entry.title} sign-in was not completed in time"
+    try:
+        while time.monotonic() < deadline:
+            await asyncio.sleep(AUTH_POLL_SECONDS)
+            fresh = load_servers().get(config.name)
+            if fresh is None:
+                outcome, message = "failed", f"'{config.name}' was removed during sign-in"
+                break
+            if is_signed_in(fresh):
+                who = account(config.name)
+                outcome = "done"
+                message = f"signed in to {entry.title}" + (f" as {who}" if who else "")
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # a broken poll must not leave the process running
+        outcome, message = "failed", f"sign-in for '{config.name}' failed: {exc}"
+        log.debug("auth watch for %s failed", config.name, exc_info=True)
     finally:
+        if (pending := PENDING.get(config.name)) is not None:
+            pending.finish(outcome, message)
+        _AUTH_TASKS.pop(config.name, None)
+        manager = _AUTH_SESSIONS.pop(config.name, None)
+        if manager is not None:
+            await manager.shutdown()
+
+
+async def end_auth_session(name: str) -> None:
+    """Stop any sign-in already in flight for this server.
+
+    Two concurrent sign-ins to the same server are two processes racing for one
+    callback port, and the loser composes a redirect URI the provider will
+    reject. The most recent request wins.
+    """
+    task = _AUTH_TASKS.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(BaseException):
+            await task
+    manager = _AUTH_SESSIONS.pop(name, None)
+    if manager is not None:
         await manager.shutdown()
 
 
@@ -588,20 +676,36 @@ async def _command_login(config: ServerConfig, entry: cat.CatalogueEntry) -> str
     finally:
         if process.returncode is None:
             process.kill()
-        PENDING.pop(config.name, None)
 
     if is_signed_in(load_servers()[config.name]):
-        return f"signed in to {entry.title}"
+        return _finish(config.name, "done", f"signed in to {entry.title}")
     tail = "\n".join(seen[-8:]).strip()
-    return f"sign-in to {entry.title} did not complete." + (f" It said:\n{tail}" if tail else "")
+    return _finish(
+        config.name,
+        "failed",
+        f"sign-in to {entry.title} did not complete." + (f" It said:\n{tail}" if tail else ""),
+    )
 
 
-async def login(name: str, *, force: bool = False, account_hint: str | None = None) -> str:
+async def login(
+    name: str,
+    *,
+    force: bool = False,
+    account_hint: str | None = None,
+    manager: MCPManager | None = None,
+) -> str:
     """Take the user to the provider's own login page and finish the handshake.
 
     `force` signs out first. Without it a provider that still holds a session
     hands back the same account without ever showing its chooser, which makes
     "switch account" impossible from inside PSOK.
+
+    `manager` is the live one, where there is one. Signing in through a
+    throwaway manager stored the token and then shut the connection down, so
+    the interface -- which reads what is *running*, not what is stored -- kept
+    listing a freshly signed-in connector under "added, not running". Passing
+    the live manager makes signing in mean "and now use it", which is what the
+    button says.
     """
     servers = load_servers()
     config = servers.get(name)
@@ -626,24 +730,55 @@ async def login(name: str, *, force: bool = False, account_hint: str | None = No
             )
         return await _server_side_login(config, entry, account_hint)
 
-    manager = _manager(open_browser=True)
+    live = manager is not None
+    connector = manager or _manager(open_browser=True)
+    if live:
+        # A previous failure must not make the user's own retry a no-op.
+        connector.forget_error(name)
+        connector.open_browser = True
     try:
-        count = await manager.connect_server(config)
+        count = await connector.connect_server(config)
     except OAuthRegistrationUnsupported as exc:
         help_text = registration_help(name, config.catalogue_id)
-        return f"{exc}\n\n{help_text}" if help_text else str(exc)
+        return _finish(name, "failed", f"{exc}\n\n{help_text}" if help_text else str(exc))
     except OAuthRequired as exc:
-        return f"authorization did not complete for '{name}': {exc}"
+        return _finish(name, "failed", f"authorization did not complete for '{name}': {exc}")
     except Exception as exc:
-        return f"could not connect '{name}': {exc}"
+        return _finish(name, "failed", f"could not connect '{name}': {exc}")
     finally:
-        await manager.shutdown()
+        if live:
+            connector.open_browser = False
+        else:
+            await connector.shutdown()
 
     # Connecting is not the same as authorizing: a server that needs no token
     # for `tools/list` would otherwise report a sign-in that never happened.
     if not has_tokens(name):
-        return f"connected '{name}' and discovered {count} tools, but no token was stored"
-    return f"signed in to '{name}' and discovered {count} tools"
+        return _finish(
+            name,
+            "done",
+            f"connected '{name}' and discovered {count} tools, but no token was stored",
+        )
+    return _finish(name, "done", f"signed in to '{name}' and discovered {count} tools")
+
+
+def report_login_failure(name: str, message: str) -> None:
+    """Publish a sign-in failure that happened outside `login`'s own handling."""
+    _finish(name, "failed", message)
+
+
+def _finish(name: str, status: str, message: str) -> str:
+    """Record the outcome where a polling interface can see it, and return it.
+
+    Sign-in can outlive the request that asked for it, so the answer cannot only
+    be a return value.
+    """
+    pending = PENDING.get(name)
+    if pending is None:
+        pending = PendingAuthorization(server_name=name, authorization_url="")
+        PENDING[name] = pending
+    pending.finish(status, message)
+    return message
 
 
 def account(name: str) -> str | None:
@@ -679,22 +814,44 @@ def account(name: str) -> str | None:
     try:
         import json
 
+        token = json.loads(raw).get("access_token")
+    except ValueError:
+        return None
+    if not token:
+        return None
+    return _identity_of(entry.identity_url, entry.identity_field or "", token)
+
+
+# Identity answers per access token. The Connectors page asks for every
+# signed-in server's account on every load and polls while it is open, and each
+# answer was a fresh blocking HTTP request with a five-second timeout -- so a
+# slow provider stalled the whole listing, repeatedly, for a value that cannot
+# change while the token does not.
+_IDENTITY_CACHE: dict[tuple[str, str], str | None] = {}
+
+
+def _identity_of(url: str, field: str, token: str) -> str | None:
+    key = (url, token)
+    if key in _IDENTITY_CACHE:
+        return _IDENTITY_CACHE[key]
+    try:
         import httpx2
 
-        token = json.loads(raw).get("access_token")
-        if not token:
-            return None
         response = httpx2.get(
-            entry.identity_url,
+            url,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=5.0,
         )
         if response.status_code != 200:
+            # Not cached: a 401 here usually means a token about to be
+            # refreshed, and remembering it would outlive the reason for it.
             return None
-        return response.json().get(entry.identity_field or "")
+        answer = response.json().get(field)
     except Exception as exc:  # identity is a nicety; never fail a listing over it
-        log.debug("identity lookup for %s failed: %s", name, exc)
+        log.debug("identity lookup for %s failed: %s", url, exc)
         return None
+    _IDENTITY_CACHE[key] = answer
+    return answer
 
 
 def missing_credentials(config: ServerConfig) -> list[str]:

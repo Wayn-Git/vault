@@ -20,6 +20,7 @@ import asyncio
 import threading
 import webbrowser
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -105,15 +106,49 @@ class KeychainTokenStorage:
 
 @dataclass
 class PendingAuthorization:
-    """One in-flight authorization, surfaced so a UI can show the login link."""
+    """One authorization, surfaced so a UI can show the link and the outcome.
+
+    Sign-in outlives the request that started it -- a user reading a consent
+    screen takes as long as it takes -- so this is also how the flow reports
+    that it finished. `status` walks `waiting -> done | failed` and stays on
+    the terminal value until the interface has seen it, which is what lets the
+    login endpoint answer immediately instead of holding a connection open for
+    five minutes.
+    """
 
     server_name: str
     authorization_url: str
     state: str | None = None
+    status: str = "waiting"
+    message: str | None = None
+    finished_at: str | None = None
+
+    def finish(self, status: str, message: str | None = None) -> None:
+        self.status = status
+        self.message = message
+        self.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
 
 
-# In-flight authorizations, keyed by server name, so the API can list them.
+# Authorizations this process started, keyed by server name, so the API can
+# list them. A finished one is kept until something acknowledges it.
 PENDING: dict[str, PendingAuthorization] = {}
+
+# How long a finished authorization stays listed. Long enough that an interface
+# polling every few seconds cannot miss the outcome, short enough that it does
+# not read as a sign-in still in progress.
+FINISHED_TTL_SECONDS = 120.0
+
+
+def prune_finished(now: datetime | None = None) -> None:
+    """Drop authorizations that finished long enough ago to have been seen."""
+    moment = now or datetime.now(UTC)
+    for name, pending in list(PENDING.items()):
+        if pending.status == "waiting" or not pending.finished_at:
+            continue
+        if (moment - datetime.fromisoformat(pending.finished_at)).total_seconds() > (
+            FINISHED_TTL_SECONDS
+        ):
+            del PENDING[name]
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -238,8 +273,15 @@ def build_auth_provider(
     *,
     open_browser: bool = True,
     on_authorization_url=None,
+    awaiting_user: asyncio.Event | None = None,
 ) -> OAuthClientProvider:
-    """Wire the SDK's OAuth client to PSOK's keychain and loopback callback."""
+    """Wire the SDK's OAuth client to PSOK's keychain and loopback callback.
+
+    `awaiting_user` is set the moment the flow starts waiting on a person. The
+    connect deadline reads it to tell "this server is not answering" apart from
+    "this human is still reading the consent screen" -- two failures that look
+    identical from the outside and want opposite responses.
+    """
     storage = KeychainTokenStorage(config.name)
 
     async def redirect_handler(authorization_url: str) -> None:
@@ -249,6 +291,8 @@ def build_auth_provider(
             state=(parse_qs(urlparse(authorization_url).query).get("state") or [None])[0],
         )
         PENDING[config.name] = pending
+        if awaiting_user is not None:
+            awaiting_user.set()
         if on_authorization_url is not None:
             await on_authorization_url(authorization_url)
         if open_browser:
@@ -256,9 +300,17 @@ def build_auth_provider(
 
     async def callback_handler() -> AuthorizationCodeResult:
         try:
-            return await _wait_for_callback()
+            result = await _wait_for_callback()
+        except Exception:
+            # Leave the record behind saying what happened; the login task
+            # replaces the message with the classified cause it can see.
+            if (pending := PENDING.get(config.name)) is not None:
+                pending.finish("failed", "authorization did not complete")
+            raise
         finally:
-            PENDING.pop(config.name, None)
+            if awaiting_user is not None:
+                awaiting_user.clear()
+        return result
 
     return OAuthClientProvider(
         server_url=config.url or "",

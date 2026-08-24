@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../../components/Icon.jsx'
 import ServiceIcon from '../../components/ServiceIcon.jsx'
 import { useApp } from '../../store.jsx'
@@ -500,12 +500,32 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   useEffect(() => { refresh() }, [refresh])
 
-  // `login` blocks until the provider redirects back, so the URL it produced is
-  // only visible to a second request. Keep asking while this view is open.
+  /* `login` returns as soon as the flow starts, because a sign-in takes as long
+     as the person takes. This poll is how the outcome arrives: an entry stays
+     `waiting` while they are with the provider, then turns `done` or `failed`
+     with the reason. Announcing a terminal one once, and refreshing on it, is
+     what makes a connector appear under Connected without a manual reload. */
+  const announced = useRef(new Set())
   useEffect(() => {
-    const tick = setInterval(() => { api.mcpAuthorizations().then(setAuths).catch(() => {}) }, 3000)
+    const tick = setInterval(async () => {
+      let rows
+      try { rows = await api.mcpAuthorizations() } catch { return }
+      setAuths(rows)
+      for (const row of rows) {
+        if (row.status === 'waiting' || announced.current.has(row.server + row.finished_at)) continue
+        announced.current.add(row.server + row.finished_at)
+        if (row.status === 'done') {
+          toast(row.message || `Connected ${row.server}`, 'ok')
+        } else {
+          toast(`Could not connect ${row.server}`, 'bad')
+          setHelp({ server: row.server, text: row.message || 'the sign-in did not complete' })
+        }
+        refresh()
+        refreshHealth()
+      }
+    }, 3000)
     return () => clearInterval(tick)
-  }, [])
+  }, [refresh, refreshHealth, toast])
 
   const act = useCallback(async (server, action, options = {}) => {
     setBusy((b) => ({ ...b, [server.name]: action }))
@@ -527,13 +547,8 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
         if (!cap?.enabled) {
           await setCapEnabled(cap || { kind: 'connector', name: server.name, enabled: false }, true)
         }
-        const result = await api.mcpLogin(server.name, {})
-        if (result.authorized) {
-          toast(`Connected ${server.title}${result.account ? ` as ${result.account}` : ''}`, 'ok')
-        } else {
-          toast(result.result, 'info')
-          setHelp({ server: server.name, text: result.result })
-        }
+        await api.mcpLogin(server.name, {})
+        toast(`Opening ${server.title}'s sign-in — finish in the browser`, 'info')
       } else if (action === 'logout') {
         const result = await api.mcpLogout(server.name)
         toast(
@@ -543,13 +558,8 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
           'ok',
         )
       } else if (action === 'login') {
-        const result = await api.mcpLogin(server.name, options)
-        if (result.authorized) {
-          toast(`Signed in to ${server.title}${result.account ? ` as ${result.account}` : ''}`, 'ok')
-        } else {
-          toast(result.result, 'info')
-          setHelp({ server: server.name, text: result.result })
-        }
+        await api.mcpLogin(server.name, options)
+        toast(`Opening ${server.title}'s sign-in — finish in the browser`, 'info')
       }
       await refresh()
       refreshHealth()
@@ -598,6 +608,10 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     }
     return [on, off]
   }, [servers, live, q]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A finished sign-in stays listed briefly so its outcome cannot be missed.
+  // It is not something to offer a login link for.
+  const waitingAuths = useMemo(() => auths.filter((a) => a.status !== 'done' && a.status !== 'failed'), [auths])
 
   const configured = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
   const available = useMemo(() => catalogue.filter((entry) => {
@@ -668,10 +682,10 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   return (
     <>
-      {auths.length > 0 && (
+      {waitingAuths.length > 0 && (
         <div className="auth-banner" data-enter>
-          <span>{auths.length} sign-in{auths.length > 1 ? 's' : ''} waiting:</span>
-          {auths.map((a) => (
+          <span>{waitingAuths.length} sign-in{waitingAuths.length > 1 ? 's' : ''} waiting:</span>
+          {waitingAuths.map((a) => (
             <span key={a.server} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
               <button type="button" className="btn btn--small" onClick={() => window.open(a.authorization_url, '_blank', 'noopener')}>
                 <Icon name="link" size={13} /> open {a.server}

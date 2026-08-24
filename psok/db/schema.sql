@@ -96,10 +96,27 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority                 TEXT,
     source                   TEXT NOT NULL DEFAULT 'user',
     calendar_event_id        INTEGER REFERENCES calendar_events(id),
+    -- When to say something. NULL means "at due_at"; a task with neither is
+    -- never announced, which is the right default for a list you look at.
+    reminder_at              TEXT,
+    -- Stamped when the reminder actually fired. Written in the same
+    -- transaction as the notification so a restart cannot repeat one.
+    reminded_at              TEXT,
+    -- Identity in whatever system this row was mirrored from, so a repeated
+    -- pull updates the same row instead of adding another.
+    external_source          TEXT,
+    external_id              TEXT,
+    external_etag            TEXT,
+    last_synced_at           TEXT,
     created_at               TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_at);
+-- The scan the reminder tick runs, twice a minute, forever.
+CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON tasks(reminded_at, reminder_at, due_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external
+    ON tasks(external_source, external_id)
+    WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS calendar_events (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,

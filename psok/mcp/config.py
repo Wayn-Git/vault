@@ -86,6 +86,11 @@ class ServerConfig:
     enabled: bool = True
     startup: bool = False
     timeout_seconds: float = 60.0
+    # How long a *person* gets to finish an interactive sign-in, as against
+    # `timeout_seconds`, which is how long a *server* gets to answer. Matched to
+    # the loopback callback's own wait: a shorter one here abandons a sign-in
+    # the user is still completing, which the browser then reports as success.
+    auth_timeout_seconds: float = 300.0
     source: Source = Source.CONFIGURED
     catalogue_id: str | None = None
     description: str | None = None
@@ -171,6 +176,8 @@ class ServerConfig:
             data["api_key_header"] = self.api_key_header
         if self.timeout_seconds != 60.0:
             data["timeout_seconds"] = self.timeout_seconds
+        if self.auth_timeout_seconds != 300.0:
+            data["auth_timeout_seconds"] = self.auth_timeout_seconds
         if self.source is not Source.CONFIGURED:
             data["source"] = str(self.source)
         return data
@@ -196,6 +203,7 @@ class ServerConfig:
             enabled=bool(raw.get("enabled", True)),
             startup=bool(raw.get("startup", False)),
             timeout_seconds=float(raw.get("timeout_seconds", 60.0)),
+            auth_timeout_seconds=float(raw.get("auth_timeout_seconds", 300.0)),
             source=Source(raw.get("source", "configured")),
             catalogue_id=raw.get("catalogue_id"),
             description=raw.get("description"),
@@ -218,8 +226,32 @@ def load_servers(path: Path | None = None) -> dict[str, ServerConfig]:
     raw = yaml.safe_load(p.read_text()) or {}
     servers: dict[str, ServerConfig] = {}
     for name, entry in (raw.get("mcpServers") or {}).items():
-        servers[name] = ServerConfig.from_dict(name, entry or {})
+        config = ServerConfig.from_dict(name, entry or {})
+        _fill_catalogue_env(config)
+        servers[name] = config
     return servers
+
+
+def _fill_catalogue_env(config: ServerConfig) -> None:
+    """Add environment keys the catalogue has gained since this server was added.
+
+    A bundled server is a copy of a catalogue entry taken at the moment it was
+    added, so a fix to the entry never reached anyone who already had it -- the
+    `WORKSPACE_MCP_PORT_FALLBACK_COUNT` that stops Google composing a redirect
+    URI on a port nobody registered would only have helped new users.
+
+    Additive only. Anything already in the file wins, because that is either the
+    user's own value or a keychain reference written by `psok mcp env`.
+    """
+    if config.source is not Source.BUNDLED or not config.catalogue_id:
+        return
+    from psok.mcp import catalogue as cat
+
+    entry = cat.get(config.catalogue_id)
+    if entry is None:
+        return
+    for key, value in (entry.env or {}).items():
+        config.env.setdefault(key, value)
 
 
 def save_servers(servers: dict[str, ServerConfig], path: Path | None = None) -> None:

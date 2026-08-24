@@ -20,7 +20,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from psok.mcp.config import ServerConfig, Transport
 from psok.mcp.oauth import build_auth_provider, mcp_http_client_factory, seed_preregistered_client
-from psok.mcp.ssrf import check_url
+from psok.mcp.ssrf import check_url_async
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,13 @@ class OAuthRegistrationUnsupported(MCPConnectionError):
     GitHub is the common case: it advertises PKCE but expects apps to be
     registered by hand, so the user has to supply a client id once.
     """
+
+
+class _AuthorizationTimeout(TimeoutError):
+    """The user never finished authorizing. Internal: `connect` reclassifies it."""
+
+    def __init__(self, server_name: str):
+        super().__init__(f"'{server_name}' was not authorized in time")
 
 
 @dataclass
@@ -90,6 +97,8 @@ class MCPConnection:
         self._requests: asyncio.Queue[tuple[str, dict, asyncio.Future]] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._ready: asyncio.Future[None] | None = None
+        # Set while the OAuth flow is waiting on a person rather than a server.
+        self._awaiting_user = asyncio.Event()
 
     @property
     def connected(self) -> bool:
@@ -106,26 +115,66 @@ class MCPConnection:
 
         self.config.validate()
         if self.config.is_remote and self.config.url:
-            check_url(self.config.url, allow_local=self.config.allow_local)
+            await check_url_async(self.config.url, allow_local=self.config.allow_local)
         if self.config.oauth:
             await seed_preregistered_client(self.config)
 
         loop = asyncio.get_running_loop()
         self._ready = loop.create_future()
+        self._awaiting_user.clear()
         self._task = asyncio.create_task(self._run(), name=f"mcp:{self.config.name}")
 
         try:
-            await asyncio.wait_for(self._ready, timeout=self.config.timeout_seconds)
+            await self._await_ready()
             self.breaker.record_success()
         except Exception as exc:
-            self.breaker.record_failure()
+            # A person taking their time on a consent screen is not a server
+            # fault. Counting it as one is what tripped the breaker on a
+            # sign-in that was still in progress, and left the connector dark
+            # after the browser had already said "Connected".
+            if not isinstance(exc, _AuthorizationTimeout):
+                self.breaker.record_failure()
             self.last_error = str(exc)
             await self.disconnect()
+            if isinstance(exc, _AuthorizationTimeout):
+                raise MCPConnectionError(
+                    f"'{self.config.name}' was not authorized within"
+                    f" {self.config.auth_timeout_seconds:g}s"
+                ) from exc
             if isinstance(exc, TimeoutError):
                 raise MCPConnectionError(
                     f"'{self.config.name}' did not respond within {self.config.timeout_seconds:g}s"
                 ) from exc
             raise
+
+    async def _await_ready(self) -> None:
+        """Wait for the session, giving an interactive sign-in its own deadline.
+
+        `timeout_seconds` is how long a *server* gets to answer. An OAuth
+        connect can contain an entire browser sign-in, which is bounded by the
+        callback wait instead -- so once the flow says it is waiting on a
+        person, switch to `auth_timeout_seconds` rather than declaring the
+        server dead at 60s while the user is still typing their password.
+        """
+        assert self._ready is not None
+        deadline = self.config.timeout_seconds
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready), timeout=deadline)
+            return
+        except TimeoutError:
+            if not self._awaiting_user.is_set():
+                raise
+
+        remaining = max(self.config.auth_timeout_seconds - deadline, 0)
+        log.info(
+            "%s is waiting on the user to authorize; allowing a further %gs",
+            self.config.name,
+            remaining,
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready), timeout=remaining)
+        except TimeoutError as exc:
+            raise _AuthorizationTimeout(self.config.name) from exc
 
     async def _run(self) -> None:
         """Hold transport and session open, and serve tool calls from the queue."""
@@ -216,7 +265,13 @@ class MCPConnection:
                 )
             )
 
-        auth = build_auth_provider(cfg, open_browser=self.open_browser) if cfg.oauth else None
+        auth = (
+            build_auth_provider(
+                cfg, open_browser=self.open_browser, awaiting_user=self._awaiting_user
+            )
+            if cfg.oauth
+            else None
+        )
         headers = cfg.resolved_headers()
 
         if cfg.transport is Transport.SSE:
