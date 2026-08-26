@@ -82,15 +82,16 @@ providers:
   # because an agent turn costs one model round trip per tool call: a browser
   # task is a dozen or more of them in series, so latency per call matters far
   # more than it does in chat. Both speak the OpenAI API, so they need no
-  # adapter -- only a key.
-  # - name: groq
-  #   base_url: https://api.groq.com/openai/v1
-  #   api_key_ref: psok/groq
-  #   default_model: llama-3.3-70b-versatile
-  # - name: cerebras
-  #   base_url: https://api.cerebras.ai/v1
-  #   api_key_ref: psok/cerebras
-  #   default_model: llama-3.3-70b
+  # adapter -- only a key:  psok secrets set psok/groq
+  # Listed but not offered until that key exists -- see configured_providers.
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    api_key_ref: psok/groq
+    default_model: llama-3.3-70b-versatile
+  - name: cerebras
+    base_url: https://api.cerebras.ai/v1
+    api_key_ref: psok/cerebras
+    default_model: llama-3.3-70b
   # - name: openai
   #   api_key_ref: psok/openai
   #   default_model: gpt-4o
@@ -98,6 +99,39 @@ providers:
   #   api_key_ref: psok/anthropic
   #   default_model: claude-sonnet-4-20250514
 """
+
+
+def has_key(config: ProviderConfig) -> bool:
+    """Whether this provider has the credential it says it needs.
+
+    A local endpoint declares neither `api_key_ref` nor `api_key_env` and needs
+    nothing, so it is configured by definition.
+    """
+    if not config.api_key_ref and not config.api_key_env:
+        return True
+    if config.api_key_env and os.environ.get(config.api_key_env):
+        return True
+    if not config.api_key_ref:
+        return False
+    from psok.secrets import get_secret
+
+    try:
+        return bool(get_secret(config.api_key_ref))
+    except Exception:  # a keychain that will not open is not a configured key
+        return False
+
+
+def configured_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
+    """Providers that could actually answer, as against providers listed.
+
+    providers.yaml is a menu, not an inventory: an entry whose `api_key_ref`
+    points at an empty keychain slot parses perfectly and then fails on the
+    first call. Offering one in a model picker means every turn against it dies
+    at the first round trip, which reads as PSOK being broken rather than as a
+    key being absent -- so an interface asks this, and `resolve` still honours
+    any provider named explicitly.
+    """
+    return {name: cfg for name, cfg in load_providers(path).items() if has_key(cfg)}
 
 
 def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:

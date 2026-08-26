@@ -185,6 +185,48 @@ def _reject_implausible_client_id(name: str, client_id: str) -> None:
         )
 
 
+# What a Google OAuth client secret looks like: the `GOCSPX-` marker Google
+# prints in front of every one it issues, then 28 characters. Checked because
+# the alternative is finding out at the end of a sign-in, from the provider,
+# in a browser tab PSOK cannot see -- "(invalid_client) The provided client
+# secret is invalid", after the user has already chosen their account.
+GOOGLE_SECRET_PREFIX = "GOCSPX-"
+GOOGLE_SECRET_LENGTH = 35
+
+
+def reject_implausible_credential(name: str, key: str, value: str) -> None:
+    """Refuse a credential that cannot be right, before it is stored.
+
+    Deliberately narrow. This rejects what is *certainly* wrong -- an empty
+    value, stray whitespace from a copy, a Google secret that is not the shape
+    Google issues -- and says nothing about anything else, because a provider
+    changing its format must not lock a user out of their own connector.
+    """
+    if not value or not value.strip():
+        raise ValueError(f"'{key}' cannot be empty")
+    if value != value.strip():
+        raise ValueError(
+            f"'{key}' has whitespace around it, which the server will send verbatim."
+            " Paste it again without the leading or trailing space."
+        )
+
+    if key != "GOOGLE_OAUTH_CLIENT_SECRET":
+        return
+    if not value.startswith(GOOGLE_SECRET_PREFIX):
+        raise ValueError(
+            f"that does not look like a Google client secret for '{name}'. Google issues"
+            f" them starting with `{GOOGLE_SECRET_PREFIX}` -- copy the *client secret*"
+            " from the credential's page, not the client id or the API key."
+        )
+    if len(value) != GOOGLE_SECRET_LENGTH:
+        raise ValueError(
+            f"that Google client secret is {len(value)} characters;"
+            f" Google issues {GOOGLE_SECRET_LENGTH}. It looks truncated -- copy it again"
+            " with the copy button on the credential's page rather than selecting the"
+            " text, which is easy to clip."
+        )
+
+
 def _write_credentials_file(
     name: str, entry: cat.CatalogueEntry, client_id: str, client_secret: str | None
 ) -> None:
@@ -226,7 +268,55 @@ def _write_credentials_file(
     path.chmod(0o600)
 
 
-def set_oauth_client(name: str, client_id: str, client_secret: str | None = None) -> ServerConfig:
+class CredentialLocked(ValueError):
+    """A stored credential was not replaced, because replacing it is not safe here."""
+
+
+def credential_is_set(name: str, key: str) -> bool:
+    """Whether this server already holds a value for one environment credential."""
+    config = load_servers().get(name)
+    if config is None:
+        return False
+    value = config.env.get(key)
+    if not isinstance(value, str) or not value.startswith(KEYCHAIN_PREFIX):
+        return bool(value)
+    return bool(get_secret(value[len(KEYCHAIN_PREFIX) :]))
+
+
+def _guard_stored_credential(name: str, key: str, *, force: bool) -> None:
+    """Refuse to overwrite a working credential from a casual surface.
+
+    One OAuth client backs every connector in an account group, so overwriting
+    it is not a per-connector edit -- it takes all of them down at once, and the
+    only symptom is the provider refusing to exchange a token at the *end* of a
+    sign-in. That is a long way from the text field that caused it.
+
+    Replacing one is a deliberate act, so it needs a deliberate surface: the
+    CLI, which passes `force`. The API does not offer the flag, which is what
+    makes this a guarantee rather than a hidden button.
+    """
+    if force or not credential_is_set(name, key):
+        return
+    shared = [other.name for other in _sharing_account_with(name)]
+    reach = (
+        f" It is shared with {', '.join(sorted(shared))}, so replacing it here would"
+        f" change all of them."
+        if shared
+        else ""
+    )
+    raise CredentialLocked(
+        f"'{name}' already has a stored {key} and it is not editable from here.{reach}"
+        f" To replace it deliberately: psok mcp env {name} {key} <value> --secret --force"
+    )
+
+
+def set_oauth_client(
+    name: str,
+    client_id: str,
+    client_secret: str | None = None,
+    *,
+    force: bool = False,
+) -> ServerConfig:
     """Attach a hand-registered OAuth client to a server.
 
     Where the credentials belong depends on who runs the flow. PSOK's OAuth
@@ -240,6 +330,10 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
     if config is None:
         raise ValueError(f"no server named '{name}' in mcp.yaml")
     _reject_implausible_client_id(name, client_id)
+
+    entry_now = entry_for(config)
+    if client_secret and entry_now is not None and entry_now.client_secret_env:
+        _guard_stored_credential(name, entry_now.client_secret_env, force=force)
 
     if config.transport is Transport.STDIO:
         entry = entry_for(config)
@@ -267,7 +361,15 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
                 continue
             set_env(target, target_entry.client_id_env, client_id, secret=False)
             if client_secret and target_entry.client_secret_env:
-                set_env(target, target_entry.client_secret_env, client_secret, secret=True)
+                # Guarded once above, for the connector the caller named; these
+                # are that same decision being carried to its siblings.
+                set_env(
+                    target,
+                    target_entry.client_secret_env,
+                    client_secret,
+                    secret=True,
+                    force=True,
+                )
         return load_servers()[name]
 
     config.oauth = True
@@ -283,28 +385,103 @@ def set_oauth_client(name: str, client_id: str, client_secret: str | None = None
     return config
 
 
-def set_env(name: str, key: str, value: str, *, secret: bool = False) -> ServerConfig:
+def env_secret_ref(name: str, key: str) -> str:
+    """Where one server's environment credential lives in the keychain.
+
+    Keyed on the *account group* where there is one, so the entry is named for
+    the account it belongs to rather than for whichever connector happened to be
+    edited first. What actually keeps siblings in step is `set_env` writing the
+    reference onto all of them; this is the naming that makes that legible.
+
+    Nine Google connectors are
+    one Google OAuth client -- the catalogue says so, and its setup hint promises
+    "you only do this once, every Google app then shares it" -- but the
+    credential was stored per connector, so updating it on the Calendar panel
+    left the other eight on the old value. Regenerating a client secret then
+    fixed Calendar and broke Gmail, which failed at token exchange with Google's
+    `invalid_client`: a stale copy of a credential the user believed they had
+    already replaced.
+    """
+    config = load_servers().get(name)
+    entry = entry_for(config) if config is not None else None
+    group = entry.shares_account_with if entry is not None else None
+    return f"psok-mcp/{group or name}.env.{key}"
+
+
+def _legacy_env_secret_ref(name: str, key: str) -> str:
+    """Where it used to live: one entry per connector, never shared."""
+    return f"psok-mcp/{name}.env.{key}"
+
+
+def set_env(
+    name: str, key: str, value: str, *, secret: bool = False, force: bool = False
+) -> ServerConfig:
     """Set one environment variable for a stdio server.
 
     With `secret`, the value goes to the OS keychain and mcp.yaml keeps only a
     `keychain:` reference -- the same rule every other credential in PSOK
     follows, extended to the servers that take theirs through the environment
     (ADR-0012).
+
+    A credential shared with sibling connectors is written once and pointed at
+    by all of them, so there is one value to keep correct rather than nine to
+    keep in step.
     """
     servers = load_servers()
     config = servers.get(name)
     if config is None:
         raise ValueError(f"no server named '{name}' in mcp.yaml")
 
+    reject_implausible_credential(name, key, value)
     if secret:
-        ref = f"psok-mcp/{name}.env.{key}"
+        # Secrets only. A client id is a public identifier and correcting one is
+        # harmless; a secret is the thing that takes every connector in the
+        # account group down at once when it is replaced with the wrong value.
+        _guard_stored_credential(name, key, force=force)
+
+    if secret:
+        ref = env_secret_ref(name, key)
         set_secret(ref, value)
-        config.env[key] = f"{KEYCHAIN_PREFIX}{ref}"
+        reference = f"{KEYCHAIN_PREFIX}{ref}"
+        for sibling in _sharing_account_with(name):
+            sibling.env[key] = reference
+            # A per-connector copy left behind would be dead weight that still
+            # looks authoritative to anyone reading the keychain.
+            delete_secret(_legacy_env_secret_ref(sibling.name, key))
+            add_server(sibling)
+        config = load_servers()[name]
+        config.env[key] = reference
     else:
+        for sibling in _sharing_account_with(name):
+            sibling.env[key] = value
+            add_server(sibling)
+        config = load_servers()[name]
         config.env[key] = value
 
     add_server(config)
     return config
+
+
+def _sharing_account_with(name: str) -> list[ServerConfig]:
+    """Every *other* configured server that shares this one's account.
+
+    Empty unless the catalogue says they share, so a connector with its own
+    credentials is never touched by a change to somebody else's.
+    """
+    servers = load_servers()
+    config = servers.get(name)
+    entry = entry_for(config) if config is not None else None
+    group = entry.shares_account_with if entry is not None else None
+    if not group:
+        return []
+    out = []
+    for other_name, other in servers.items():
+        if other_name == name:
+            continue
+        other_entry = entry_for(other)
+        if other_entry is not None and other_entry.shares_account_with == group:
+            out.append(other)
+    return out
 
 
 def unset_env(name: str, key: str) -> bool:
@@ -445,15 +622,43 @@ def sign_out(name: str) -> list[str]:
         if directory.is_file():
             directory.unlink()
         else:
-            # Everything else in there is flow bookkeeping for a sign-in that is
-            # now being abandoned, so it goes too rather than being left to
-            # confuse the next one. A browser profile keeps its state in
-            # subdirectories, so those go with it.
-            shutil.rmtree(directory, ignore_errors=True)
+            _clear_credentials_dir(directory)
         if accounts:
             noun = "account" if len(accounts) == 1 else "accounts"
             cleared.append(f"{len(accounts)} signed-in {noun} held by the server itself")
     return cleared
+
+
+# Files in a server's credential store that belong to a sign-in *in progress*
+# rather than to an account, and so must survive somebody else's sign-out.
+#
+# `oauth_states.json` is workspace-mcp's shared CSRF store: the `state` it minted
+# for an authorization URL, which it checks when the provider redirects back.
+# Nine Google connectors share one directory, so deleting it signed the user out
+# of Gmail *and* destroyed the in-flight state of a Calendar sign-in happening at
+# the same moment -- which surfaced at the end of a successful Google login as
+# "Invalid or expired OAuth state parameter", pointing at the provider when the
+# cause was PSOK. `login(force=True)` signs out first, so "switch account" did
+# this to itself.
+IN_FLIGHT_FILES = frozenset({"oauth_states.json"})
+
+
+def _clear_credentials_dir(directory: Path) -> None:
+    """Empty a server's credential store without disturbing a sign-in in flight.
+
+    Everything here is either an account or bookkeeping for a sign-in being
+    abandoned, and both should go -- except the state store, which belongs to
+    whatever sign-in is happening *now*, possibly for a different connector
+    sharing this directory.
+    """
+    for child in directory.iterdir():
+        if child.name in IN_FLIGHT_FILES:
+            continue
+        if child.is_dir():
+            # A browser profile keeps its session in subdirectories.
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def _authorization_url_in(text: str) -> str | None:
@@ -461,6 +666,30 @@ def _authorization_url_in(text: str) -> str | None:
     if match is None:
         return None
     return match.group(0).rstrip(").,'\"")
+
+
+# A device code as the servers that use one actually present it: the word
+# "code", then the value. Deliberately anchored on the word rather than hunting
+# for anything code-shaped, because a bare pattern matches parts of URLs, tenant
+# ids and hex fragments -- and showing the wrong string to type is worse than
+# showing none and falling back to the server's own text.
+_DEVICE_CODE_RE = re.compile(
+    r"\bcode\b[^A-Za-z0-9]{0,12}?([A-Z0-9][A-Z0-9-]{3,11})\b"
+)
+
+
+def _device_code_in(text: str) -> str | None:
+    """The short code a device-code flow expects the user to type, if there is one.
+
+    Returns None for a flow that has no code, which is every flow that hands
+    back only a URL.
+    """
+    for candidate in _DEVICE_CODE_RE.findall(text or ""):
+        # All digits is a length, a port or a count far more often than a code.
+        if candidate.isdigit():
+            continue
+        return candidate
+    return None
 
 
 def always_ask_which_account(url: str) -> str:
@@ -515,6 +744,75 @@ def _auth_arguments(connection, entry: cat.CatalogueEntry, config: ServerConfig,
     return {key: value for key, value in candidates.items() if key in declared}
 
 
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+
+
+async def check_google_client(config: ServerConfig) -> str | None:
+    """Ask Google whether this client id and secret are usable, before using them.
+
+    A wrong secret is only discovered at the very end of the flow, by the
+    provider, in a browser tab PSOK cannot see -- the user picks their account,
+    approves the scopes, and *then* gets "(invalid_client) The provided client
+    secret is invalid" with nothing in PSOK to explain it. Asking first turns
+    that into a sentence on the connector's own page before anything opens.
+
+    The probe is a token request with a deliberately invalid code. Google checks
+    the client before the code, so `invalid_client` means the credentials are
+    wrong and `invalid_grant` means they are right and only the code was bad --
+    which is the answer this wants.
+
+    Returns a message to show the user, or None when there is nothing to say.
+    Unreachable, slow, or unexpected answers return None: a network problem must
+    not be reported as a bad credential, and must never block a sign-in that
+    would have worked.
+    """
+    import httpx2
+
+    resolved = config.resolved_env()
+    client_id = resolved.get("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = resolved.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return (
+            "Google needs both a client id and a client secret before it can sign in."
+            " Add them on this connector's page."
+        )
+
+    try:
+        response = await httpx2.AsyncClient(timeout=8.0).post(
+            GOOGLE_TOKEN_ENDPOINT,
+            data={
+                "code": "psok-preflight-not-a-real-code",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+        )
+        body = response.json()
+    except Exception as exc:  # offline, blocked, or an answer that is not JSON
+        log.debug("Google client preflight could not run: %s", exc)
+        return None
+
+    error = body.get("error")
+    if error != "invalid_client":
+        # `invalid_grant` is the expected answer and means the client is fine.
+        return None
+
+    detail = str(body.get("error_description") or "").lower()
+    if "secret" in detail:
+        return (
+            "Google rejected the client secret for this connector. Regenerate it at"
+            " console.cloud.google.com -> APIs & Services -> Credentials -> your OAuth"
+            " client -> Add secret, then paste the new one below. Use the copy button:"
+            " a secret selected by hand is easy to clip, and a short one fails exactly"
+            " like a wrong one."
+        )
+    return (
+        "Google does not recognise the OAuth client id for this connector. Check it"
+        " against console.cloud.google.com -> APIs & Services -> Credentials."
+    )
+
+
 async def _server_side_login(
     config: ServerConfig, entry: cat.CatalogueEntry, account_hint: str | None
 ) -> str:
@@ -536,6 +834,13 @@ async def _server_side_login(
     ownership of the manager passes to `_watch_server_side_login`, which tears
     it down when the sign-in lands, times out, or the server is asked to stop.
     """
+    if entry.client_secret_env == "GOOGLE_OAUTH_CLIENT_SECRET":
+        # Before the subprocess, before the browser: a credential the provider
+        # will refuse is worth one second now rather than a consent screen and a
+        # dead end.
+        if (problem := await check_google_client(config)) is not None:
+            return _finish(config.name, "failed", problem)
+
     await end_auth_session(config.name)
     manager = _manager(open_browser=False)
     try:
@@ -561,8 +866,13 @@ async def _server_side_login(
             )
         url = always_ask_which_account(url)
 
+        instructions = result.content.strip()
         PENDING[config.name] = PendingAuthorization(
-            server_name=config.name, authorization_url=url
+            server_name=config.name,
+            authorization_url=url,
+            ttl_seconds=AUTH_SESSION_TIMEOUT_SECONDS,
+            user_code=_device_code_in(instructions),
+            instructions=instructions[:600],
         )
         webbrowser.open(url)
 
@@ -913,6 +1223,9 @@ def status(*, with_accounts: bool = False) -> list[dict]:
                 # start it, where it cannot start without being told.
                 "account_hint_label": entry.account_hint_label if entry else None,
                 "client_id_env": entry.client_id_env if entry else None,
+                # So an interface can tell whether the *secret* is stored, which is
+                # the credential that is not editable once it is working.
+                "client_secret_env": entry.client_secret_env if entry else None,
                 "shares_account_with": shares_account_with(name),
                 "account": account(name) if with_accounts and signed_in else None,
                 # Kept for older callers; `signed_in` is the one to read.

@@ -56,12 +56,51 @@ rail.
   real sign-in (44 tools). Its token needed the `Accept: application/json`
   fix-up in `psok/mcp/oauth.py` to survive: GitHub's token endpoint answers
   form-encoded without it, which the SDK's `OAuthToken.model_validate_json`
-  cannot parse.
-- **Google Workspace is configured but the redirect URI is the thing to check
-  first.** `workspace-mcp` runs its own OAuth on `http://localhost:8765/oauth2callback`
-  — *not* PSOK's `:33418` callback, which is GitHub's. That exact URI has to be
+  cannot parse. It also needed `auth_timeout_seconds`: `connect` gave the whole
+  browser sign-in the *server's* 60s deadline, so a user still on the consent
+  page was abandoned mid-flow — while the loopback callback went on to render
+  "Connected" in the browser. `ServerConfig` now separates how long a server
+  gets to answer from how long a person gets to sign in, and a slow person no
+  longer trips the circuit breaker.
+- **Google's client secret is stored and accepted.** A previous one was 34
+  characters where Google issues 35 (`GOCSPX-` plus 28) — clipped on copy — and
+  the token endpoint refused it with `(invalid_client) The provided client
+  secret is invalid`, at the end of an otherwise perfect sign-in. Replaced, and
+  verified against Google's token endpoint with a throwaway code (Google checks
+  the *client* before the code, which is what makes that a safe probe).
+  **The secret in the transcript that delivered it should be rotated** — it was
+  pasted in plain text into a chat log.
+- **A stored client secret is not editable from the Connectors menu.** One
+  OAuth client backs all nine Google connectors, so overwriting it is not a
+  per-connector edit: it takes every one of them down at once, and the only
+  symptom is a token exchange failing at the *end* of a sign-in, a long way
+  from the field that caused it. The panel shows it as stored and says what it
+  is shared with; `POST …/env` and `POST …/oauth-client` answer **409**, and
+  neither accepts a force flag. Replacing one is deliberate and lives in the
+  terminal:
+
+      psok mcp env <server> GOOGLE_OAUTH_CLIENT_SECRET <value> --secret --force
+
+  A client *id* stays editable — it is a public identifier, and refusing to
+  correct one would be friction with nothing behind it.
+- **Google needs one client secret, and PSOK now checks it before using it.**
+  The secret is stored once per *account group*, not once per connector -- nine
+  Google entries share one Google OAuth client, and storing nine copies meant
+  rotating it fixed one connector and broke eight. It is also validated on entry
+  (`GOCSPX-` plus 28 characters) and verified against Google's token endpoint
+  before a browser opens, because a wrong or clipped secret is otherwise only
+  discovered by the provider, after account selection, in a tab PSOK cannot see.
+- **Google Workspace signs in through the server's own callback**, `http://localhost:8765/oauth2callback`
+  — *not* PSOK's `:33418`, which is GitHub's. That exact URI has to be
   registered on the Google Cloud OAuth client or sign-in ends in
-  `redirect_uri_mismatch`.
+  `redirect_uri_mismatch`. Two things about this were broken and are now fixed:
+  PSOK killed the `workspace-mcp` subprocess the instant the browser opened, so
+  the port the redirect lands on was held by nothing (the browser's "Unable to
+  connect to localhost:8765"); and all nine Google entries pin `8765`, which
+  `workspace-mcp` silently walks to 8766–8769 when it is busy, composing a
+  redirect URI Google then rejects naming a port the user never chose.
+  `WORKSPACE_MCP_PORT_FALLBACK_COUNT: "0"` makes that fail loudly instead, and
+  it is backfilled into servers added before the fix (`_fill_catalogue_env`).
 - **Vercel, Microsoft To Do, LinkedIn and Spotify were added and each was
   started before it shipped.** Verified: Vercel accepts PSOK's *dynamic*
   registration (`POST …/login/oauth/register` → 201), so unlike GitHub it needs
@@ -82,6 +121,46 @@ rail.
   `npm run lint`, `npm run build`, `npm run smoke` (needs a running
   `psok serve` and a configured provider — see `frontend/tests/smoke.mjs`'s
   header comment for `SMOKE_SHELL=0` etc.).
+
+## Traps found by using it, not by reading it
+
+Each of these was reproduced against a running server. They are recorded because
+every one produced a *plausible* error that pointed somewhere other than the
+cause.
+
+- **`sign_out` deleted the shared OAuth state store.** Nine Google connectors
+  share one credentials directory, and `oauth_states.json` in it is
+  workspace-mcp's CSRF store. `rmtree` on the directory destroyed the state a
+  concurrent sign-in was about to have checked, which the provider then refused
+  as "Invalid or expired OAuth state parameter" — pointing at Google for a bug
+  in PSOK. `IN_FLIGHT_FILES` is now preserved.
+- **A published sign-in link outlived its state.** `PENDING` offered a clickable
+  URL forever while the state inside it expired in five to ten minutes.
+  `PendingAuthorization` now has a TTL, and the API sends no URL once it lapses.
+- **The connect deadline was shorter than the human.** 60s covered a browser
+  sign-in the callback allowed 300s for, so a user still on the consent screen
+  was abandoned mid-flow while the browser said "Connected".
+  `auth_timeout_seconds` separates the two.
+- **A server running its own OAuth was killed mid-flow**, by `manager.shutdown()`
+  in a `finally`. Google's redirect then reached a port nothing held. The
+  session is now owned by a watcher task.
+- **The context budget counted tool calls as zero.** `content` is null on
+  exactly the messages whose payload is a tool call, so a browser step carrying
+  a page snapshot went in as 32 tokens. History silently exceeded the window and
+  the provider failed part-way through generating — "errors out of nowhere
+  between generating". `message_tokens` counts the serialized calls.
+- **A provider error inside the stream was dropped.** An OpenAI-compatible API
+  can fail over an already-open 200 by sending `{"error": …}`; that frame
+  matched nothing and was discarded, so a stated refusal became a turn with no
+  text and no reason.
+- **A dropped MCP connection never recovered.** A stdio server that exits leaves
+  the serving task alive on a dead pipe, so `connected` stays true and every
+  later call answers "Connection closed" — three in a row in one observed turn,
+  none retried. A transport failure now reconnects once and retries the call.
+- **`login` blocked for the whole flow**, up to five minutes, which nothing in a
+  browser or a dev proxy waits for; the abort surfaced as a bare network error
+  over a sign-in that was going fine. It now answers `202` in milliseconds and
+  reports through `GET /api/mcp/authorizations`.
 
 ## The GitHub repository
 
@@ -125,14 +204,31 @@ fifteen-step browser task multiplies that variance by fifteen.
   alternated, so **every automation tick tore down and respawned every MCP
   subprocess**, killing the live browser with them.
 
-**Still open — the 77%.** `providers.yaml` now carries commented Groq and
-Cerebras entries; both are OpenAI-compatible (no adapter needed) and free.
-Adding a key and pointing the automations at one is the remaining lever, and
-the number above is the baseline to beat.
+**Still open — the 77%.** `providers.yaml` now carries Groq and Cerebras
+entries, uncommented; both are OpenAI-compatible (no adapter needed) and free.
+The Automations composer finally *sends* `provider` and `model` — the columns
+have existed since automations shipped and the frontend never populated them,
+so every run went to the machine default however slow it was. Adding a key and
+pointing an automation at one is the remaining lever, and the number above is
+the baseline to beat.
+
+`DEFAULT_PROVIDERS` is only written when `providers.yaml` is absent, so an
+existing file never gains an entry PSOK adds later — `psok doctor` now prints
+what to add. It also names any provider listed with no key: `load_providers`
+parses a menu, `configured_providers` reports what could actually answer, and
+only the latter reaches `/api/health` and the model pickers. A provider offered
+without a key fails on its first round trip, which reads as PSOK being broken
+rather than as a credential being absent.
 
 ## Planned next steps, roughly in the order they pay for themselves
 
-1. **Rotate the NVIDIA key.** It's the single highest-consequence loose end —
+0. **Finish the Google sign-in.** The client secret is in place and Google
+   accepts it; what is left is the human half — press Connect on a Google
+   connector and approve in the browser. Verified as far as a machine can take
+   it: the preflight passes, the authorization URL is published with a live
+   TTL, and `workspace-mcp` holds `localhost:8765` waiting for the redirect.
+1. **Rotate the NVIDIA key**, and the Google client secret with it — both have
+   touched a transcript. It's the single highest-consequence loose end —
    a real credential known to have touched a shell transcript. Generate a new
    one, `set_secret("psok/nvidia", "...")`, revoke the old one at NVIDIA's end.
 2. **Verify Anthropic and/or OpenAI against the real API**, once a key exists.
@@ -198,13 +294,14 @@ does not.
 
 ## Endpoints
 
-47 endpoints, all verified against a running server.
+51 endpoints, all verified against a running server.
 
 | Need | Endpoint |
 |---|---|
 | Conversation list / create | `GET,POST /api/conversations` (scheduled runs excluded; `?include_automations=true` for all) |
 | **Rename, or switch provider/model** | `PATCH /api/conversations/{id}` |
 | **Delete one** | `DELETE /api/conversations/{id}` (409 while its turn runs) |
+| **Delete every one** | `DELETE /api/conversations` (409 if *any* turn runs) |
 | History | `GET /api/conversations/{id}/messages` |
 | **Pin a message, and list what is pinned** | `POST /api/conversations/{id}/messages/{message_id}/pin`, `GET /api/conversations/{id}/pins` |
 | **Streamed turn** | `POST /api/conversations/{id}/turn` → SSE |
@@ -221,16 +318,19 @@ does not.
 | **Browse installable skills** | `GET /api/skills/catalogue` |
 | **Every tool the agent can reach** | `GET /api/tools` |
 | **A file from the browser, as a path** | `POST /api/attachments` |
-| Tasks and calendar, read-only | `GET /api/tasks`, `GET /api/calendar` |
+| Tasks and calendar | `GET /api/tasks`, `GET /api/calendar` |
+| **Add, change or cancel a task by hand** | `POST /api/tasks`, `PATCH,DELETE /api/tasks/{id}` (date hints resolved by the scheduling engine; `POST` writes through to Microsoft To Do when it is connected) |
+| **Abandon a sign-in in progress** | `DELETE /api/mcp/servers/{name}/login` |
+| **Pull Microsoft To Do into `tasks` now** | `POST /api/tasks/sync` |
 | Connector catalogue | `GET /api/mcp/catalogue` |
 | Configured connectors | `GET /api/mcp/servers` |
 | Add / remove a connector | `POST,DELETE /api/mcp/servers` |
 | Attach a hand-registered OAuth app | `POST /api/mcp/servers/{name}/oauth-client` |
 | **Credentials a stdio server takes through the environment** | `POST /api/mcp/servers/{name}/env`, `DELETE /api/mcp/servers/{name}/env/{key}` |
-| **Sign in, or switch account** | `POST /api/mcp/servers/{name}/login` `{force, account_hint}`, `GET /api/mcp/authorizations` |
+| **Sign in, or switch account** | `POST /api/mcp/servers/{name}/login` `{force, account_hint}` → **202, does not block**; watch `GET /api/mcp/authorizations` for `status` (`connecting`/`waiting`/`done`/`failed`/`cancelled`/`expired`), `authorization_url` (null once dead) and `expires_in` |
 | **Sign out, so the next sign-in asks which account** | `POST /api/mcp/servers/{name}/logout` |
 | Connect one now | `POST /api/mcp/servers/{name}/connect` |
-| **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}` |
+| **Remembered facts, and the memory switch** | `GET /api/memory`, `POST /api/memory/toggle`, `DELETE /api/memory/{id}`, `DELETE /api/memory` (all) |
 | **Automations (beta): list, create, retime, delete** | `GET,POST /api/automations`, `PATCH,DELETE /api/automations/{id}` |
 | **Run one now, on the scheduler's path** | `POST /api/automations/{id}/run` |
 | **Every kept run of one automation** | `GET /api/automations/{id}/runs` |
@@ -408,7 +508,30 @@ expect two prompts the first time someone uses a new connector.
     (`GET /api/automations/{id}/runs`), which is also the only way earlier runs
     were ever reachable. Twenty are kept per automation. Unattended runs stream
     and get 30 iterations rather than 12.
-11. **Pins** — a message header's pin, or `⌘P` on the newest one, with a strip
+11. **Reminders** — the first thing PSOK says without being asked. `due_at` has
+    existed since the first schema and nothing read it; a 30s tick now scans
+    `COALESCE(reminder_at, due_at)` and fires a desktop notification
+    (`notify-send`, `osascript`, PowerShell). `reminded_at` is claimed with a
+    conditional update *before* the notification, so a restart mid-tick cannot
+    repeat one and a machine with no notifier cannot loop. Same rule as
+    automations: **reminders fire while PSOK is open.** Timestamps are local
+    naive throughout, matching what `resolve_date_hint` writes — comparing them
+    against UTC delivered every reminder late by the machine's offset.
+12. **Microsoft To Do is where tasks go**, not a place they are copied to.
+    `create_task` — the agent's tool and the Tasks page alike — writes to the
+    connected To Do list first and keeps the local row as its mirror, carrying
+    the Graph id. A local row beside a signed-in account is a second list nobody
+    reads: it never reaches the phone, never appears in My Day, and drifts from
+    the list the user actually opens. With no connector signed in it stays
+    local and says so; if the write fails the task is still created locally and
+    the answer says it did not reach To Do, because losing what the user asked
+    for over a blip is the worst outcome available. Pulled back every 15 minutes
+    through the live registry (no second process, no second sign-in), upserted
+    on `(external_source, external_id)` behind a partial unique index.
+13. **Settings → Data** — clear every conversation, or every remembered fact,
+    each behind the rail's two-click confirm and each showing its count first.
+    Tasks, the audit trail, indexed documents and credentials are untouched.
+14. **Pins** — a message header's pin, or `⌘P` on the newest one, with a strip
     above the transcript that jumps to any of them. Deliberately inert: not sent
     to the model, does not change recall, does not reorder history. A column on
     `messages`, written against the database row id, so a message still
@@ -434,8 +557,16 @@ expect two prompts the first time someone uses a new connector.
 - **Anything multi-user.** Out of scope by design (ADR-0001).
 - **Automations that can answer a permission prompt.** They deny instead, and
   say what they denied. Changing that needs its own design, not a flag.
-- **Recurring tasks and background jobs.** See item 7 in the plan above —
-  these are the two most likely to get built next, once designed.
+- **Recurring tasks.** `tasks.recurrence_rule` is a column nothing writes or
+  expands. Reminders are not recurrence: a reminder fires once, off a timestamp.
+- **Two-way task sync.** Microsoft To Do is pulled, never pushed. A local edit
+  stays local, and a task that disappears from To Do is marked `cancelled`
+  rather than deleted, because an empty response and an emptied account are
+  indistinguishable and only one of them is recoverable.
+- **Notification delivery guarantees.** A reminder is one `notify-send`, best
+  effort. No queue, no retry, no history — a notification daemon that is not
+  running drops the message, and the honest answer is that reminders arrive
+  while a desktop session is there to receive them.
 
 ## Ground rules from previous sessions
 

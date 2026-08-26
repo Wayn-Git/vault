@@ -83,6 +83,28 @@ def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+class ProviderStreamError(RuntimeError):
+    """The provider reported a failure part-way through a streamed response."""
+
+
+def _describe_provider_error(error: object) -> str:
+    """The provider's own words, however it chose to shape them.
+
+    `{"error": {"message": ...}}` is the common form; some send a bare string,
+    and at least one sends `{"error": {"detail": ...}}`. Anything unrecognised
+    is stringified rather than dropped -- an unhelpful message beats a silent
+    stall.
+    """
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        for key in ("message", "detail", "description", "reason"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(error)
+
+
 class OpenAICompatClient:
     def __init__(
         self,
@@ -216,6 +238,17 @@ class OpenAICompatClient:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+
+            # An OpenAI-compatible provider can report a failure *inside* the
+            # stream rather than as an HTTP status: the connection is already
+            # open and 200, so the only sign is a frame carrying `error`. This
+            # matched nothing below and was dropped, which turned a stated
+            # provider failure into a turn that produced no text and no reason
+            # -- the loop then spent its continuations asking a model that had
+            # already refused. Raising puts the provider's own words in front of
+            # the user instead.
+            if error := chunk.get("error"):
+                raise ProviderStreamError(_describe_provider_error(error))
 
             if chunk.get("usage"):
                 usage = chunk["usage"]

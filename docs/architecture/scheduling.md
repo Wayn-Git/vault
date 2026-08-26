@@ -35,7 +35,11 @@ See [data-model.md](data-model.md) for the full schema. The detail that matters 
 
 `tasks.calendar_event_id` links a task to a calendar event once the task has been materialized onto the calendar (which may not happen for every task — a task can exist with no calendar presence at all).
 
-There is no recurrence support: no column, no expansion logic, and nothing in the schema pretending otherwise.
+There is no recurrence support: `tasks.recurrence_rule` exists as a column but nothing writes or expands it, and nothing in the engine pretends otherwise.
+
+`tasks.reminder_at` and `tasks.reminded_at` are a different thing from either. A reminder is one timestamp and one notification, not a schedule: `psok/reminders.py` scans `COALESCE(reminder_at, due_at)` every thirty seconds while `psok serve` runs, claims `reminded_at` with a conditional update, and then notifies — in that order, so a machine with no notification daemon misses one reminder rather than repeating it forever. It fires while PSOK is open, the same rule automations state, and for the same reason.
+
+Both columns are local naive time, like every other timestamp the engine resolves. That is load-bearing and not obvious: SQLite compares these as strings, so a UTC clock on one side of the comparison delivers every reminder late by the machine's offset.
 
 ## How the loop interacts with scheduling
 

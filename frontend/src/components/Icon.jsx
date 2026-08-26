@@ -31,6 +31,7 @@ import {
   Terminal,
   Trash,
   X,
+  WarningCircle,
 } from '@phosphor-icons/react'
 
 /* One icon set, one stroke weight, one grid.
@@ -46,6 +47,7 @@ import {
    called upstream, so swapping the family again would touch this file only. */
 
 const MARKS = {
+  alert: WarningCircle,
   book: Books,
   chat: ChatTeardropText,
   check: Check,

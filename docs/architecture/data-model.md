@@ -104,9 +104,13 @@ tasks
   due_at          TIMESTAMP   -- the deadline
   scheduled_at    TIMESTAMP   -- when work happens (distinct!)
   duration_estimate_minutes, status (todo|in_progress|done|cancelled),
-  priority, source (user|agent),
+  priority, source (user|agent|sync),
   calendar_event_id → calendar_events,
+  reminder_at     TIMESTAMP   -- when to notify; NULL means "at due_at"
+  reminded_at     TIMESTAMP   -- claimed before notifying, so never twice
+  external_source, external_id, external_etag, last_synced_at
   created_at, updated_at
+  UNIQUE (external_source, external_id) WHERE external_id IS NOT NULL
 
 calendar_events
   id, title, starts_at, ends_at, all_day, location,
@@ -116,6 +120,8 @@ calendar_events
 ```
 
 `due_at` and `scheduled_at` being separate columns is the load-bearing detail for scheduling. "Due tomorrow" and "I will work on it at 2pm today" are different facts, and collapsing them makes conflict detection impossible. See [scheduling.md](scheduling.md).
+
+`reminder_at` is a third such fact — "tell me an hour before" — and `reminded_at` is the claim that stops one being delivered twice. The external columns mirror the pattern `calendar_events` already declares, and are written by the one-way Microsoft To Do pull in `psok/sync/`. The partial unique index is what makes that pull idempotent; without it a second pull duplicates every task.
 
 ### Audit log
 

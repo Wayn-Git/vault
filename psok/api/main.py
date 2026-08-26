@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import shutil
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +28,16 @@ from psok.automation import (
     AutomationRepository,
     AutomationRunner,
 )
-from psok.config import load_providers, paths
+from psok.config import configured_providers, paths
 from psok.db.connection import get_connection
 from psok.db.repositories import (
     ConversationRepository,
     ExecutionLogRepository,
     MessageRepository,
 )
+from psok.mcp import live
 from psok.mcp.manager import MCPManager
+from psok.reminders import ReminderRunner
 from psok.runtime.http import close_clients
 from psok.runtime.registry import is_known_provider
 from psok.security.confirmation import ConfirmationRequest, ConfirmationService
@@ -119,6 +121,59 @@ async def _unattended_director(callback):
 _runner = AutomationRunner(lambda callback: _LazyDirector(callback))
 
 
+async def _live_manager():
+    """The running MCP manager, building one if no turn has needed it yet.
+
+    Only for work the user has just asked for, and only off the request path:
+    building the registry starts every switched-on connector serially, which on
+    a machine with a dozen of them is minutes, not seconds.
+    """
+    if _mcp["manager"] is None:
+        await _registry_for(None)
+    return _mcp["manager"]
+
+
+async def _connect_into_live_registry(name: str) -> None:
+    """Bring a just-signed-in connector into the registry turns run against.
+
+    Signing in stores a token; it does not make the connector reachable.
+    Without this the interface goes on listing a connector it has a valid
+    account for under "added, not running", which is what made a successful
+    sign-in look like a failed one.
+    """
+    from psok.mcp.config import load_servers
+
+    config = load_servers().get(name)
+    if config is None:
+        return
+    manager = await _live_manager()
+    async with _registry_lock:
+        manager.forget_error(name)
+        try:
+            await manager.connect_server(config)
+            _mcp["errors"].pop(name, None)
+        except Exception as exc:
+            # The account is good even if the connection is not; say so rather
+            # than reporting the sign-in itself as failed.
+            log.warning("signed in to %s but could not connect it: %s", name, exc)
+            _mcp["errors"][name] = str(exc)
+
+
+async def _started_manager():
+    """The manager if connectors are already running, otherwise None.
+
+    The counterpart to `_live_manager`, for background work and for anything
+    answering a request. A sync is not worth starting twelve subprocesses for:
+    if nothing has reconciled yet there is nothing signed in to sync from, and
+    saying so at once beats a request that hangs for minutes and then reports
+    that the connector is not running anyway.
+    """
+    return _mcp["manager"]
+
+
+_reminders = ReminderRunner(_started_manager)
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     paths().ensure()
@@ -128,7 +183,13 @@ async def _lifespan(_: FastAPI):
     # permission prompt, which is a worse promise than "they run while PSOK is
     # open" -- a rule that fits in a sentence and is true.
     _runner.start()
+    # Reminders take the same rule, for the same reason. Deliberately a second
+    # runner rather than another job on the first: the automation loop
+    # serializes model turns that can take five minutes, and a reminder queued
+    # behind one of those is not a reminder.
+    _reminders.start()
     yield
+    await _reminders.stop()
     await _runner.stop()
     if _mcp["manager"] is not None:
         await _mcp["manager"].shutdown()
@@ -262,6 +323,10 @@ async def _registry_for(workspace: str | None, *, reuse_any: bool = False):
         _mcp.update(
             {"manager": manager, "registry": registry, "workspace": root, "errors": errors}
         )
+        # Published so anything that is not the API can reach a connected server
+        # -- the task tools write to Microsoft To Do through this rather than
+        # spawning a second copy of it with a second sign-in.
+        live.set_manager(manager)
         return registry, root
 
 
@@ -298,7 +363,10 @@ def health() -> dict[str, Any]:
     registry = _mcp["registry"] or build_default_registry()
     skills, errors = scan()
     connector_errors = dict(_mcp["errors"])
-    providers = load_providers()
+    # Only providers that could answer. An entry with no key parses fine and
+    # then fails on the first round trip, and a model picker offering one turns
+    # a missing credential into "PSOK is broken".
+    providers = configured_providers()
     return {
         "status": "degraded" if connector_errors else "ok",
         "providers": sorted(providers),
@@ -371,6 +439,27 @@ def update_conversation(conversation_id: str, body: UpdateConversation) -> dict[
     ):
         raise HTTPException(404, "no such conversation")
     return dict(repo.get(conversation_id))
+
+
+@app.delete("/api/conversations")
+def delete_all_conversations(include_automations: bool = False) -> dict[str, Any]:
+    """Delete every conversation and every transcript.
+
+    Refused outright while any turn is streaming, rather than skipping the busy
+    one: "clear everything" that quietly left one conversation behind would be a
+    worse answer than "stop that turn first".
+
+    Extracted memories survive this, exactly as they survive a single delete --
+    a fact learned in a conversation outlives it. Clearing those is
+    `DELETE /api/memory`, deliberately a separate decision.
+    """
+    if _active_turns:
+        raise HTTPException(
+            409,
+            f"{len(_active_turns)} turn(s) still running; stop them before clearing",
+        )
+    deleted = ConversationRepository().delete_all(include_automations=include_automations)
+    return {"status": "deleted", "deleted": deleted}
 
 
 @app.delete("/api/conversations/{conversation_id}")
@@ -768,6 +857,9 @@ def mcp_set_oauth_client(name: str, body: OAuthClient) -> dict[str, str]:
 
     try:
         mcp.set_oauth_client(name, body.client_id, body.client_secret)
+    except mcp.CredentialLocked as exc:
+        # Already working, and shared. Replacing it is a CLI decision.
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         # A rejected client id is the caller's mistake, not a missing route. A
         # 404 here sent "that is not a client id" back as "no such server".
@@ -793,13 +885,24 @@ _ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def mcp_set_env(name: str, body: ServerEnv) -> dict[str, Any]:
     """Set one environment variable for a stdio server."""
     from psok.mcp import commands as mcp
+    from psok.mcp.config import load_servers
 
     if not _ENV_KEY.match(body.key):
         raise HTTPException(400, f"'{body.key}' is not a valid environment variable name")
+    if load_servers().get(name) is None:
+        raise HTTPException(404, f"no server named '{name}' in mcp.yaml")
     try:
+        # No `force` here, and deliberately no way to pass one: a stored secret
+        # is replaced from the CLI, which is a decision someone had to go and
+        # make rather than a field they were already looking at.
         config = mcp.set_env(name, body.key, body.value, secret=body.secret)
+    except mcp.CredentialLocked as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(404, str(exc)) from exc
+        # A credential PSOK can already tell is wrong is a bad request, not a
+        # missing server -- and the message says what to do about it, which is
+        # the whole point of checking before the provider does.
+        raise HTTPException(400, str(exc)) from exc
     return {
         "status": "set",
         "name": name,
@@ -845,39 +948,98 @@ async def mcp_login(name: str, body: LoginRequest | None = None) -> dict[str, An
     from psok.capabilities import CapabilityService, Kind
     from psok.mcp import commands as mcp
     from psok.mcp.config import load_servers
+    from psok.mcp.oauth import PENDING, PendingAuthorization
 
     request = body or LoginRequest()
     config = load_servers().get(name)
     if config is None:
         raise HTTPException(404, f"no server named '{name}' in mcp.yaml")
 
+    # A sign-in already running is a reason to refuse a second one -- two flows
+    # race for one callback port, and the loser's state is never accepted. But
+    # only while it is genuinely live: an abandoned attempt used to block every
+    # retry until its own deadline passed, which left the user with a dead link
+    # and no way to ask for a new one.
     existing = _login_tasks.get(name)
     if existing is not None and not existing.done():
-        raise HTTPException(409, f"a sign-in to '{name}' is already in progress")
+        pending = PENDING.get(name)
+        if pending is not None and not pending.live:
+            existing.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await existing
+            _login_tasks.pop(name, None)
+            await mcp.end_auth_session(name)
+        else:
+            raise HTTPException(409, f"a sign-in to '{name}' is already in progress")
+
+    # Replace whatever an earlier attempt left behind, and say straight away
+    # that this one is running. Without an entry here the interface has nothing
+    # to show between "accepted" and the outcome -- and a sign-in that needs no
+    # browser (a token already stored, being reconnected) never publishes a URL
+    # at all, so that gap was the whole flow. `redirect_handler` overwrites this
+    # with the real link if the provider does need the user.
+    PENDING[name] = PendingAuthorization(server_name=name, authorization_url="")
 
     # Signing in means "and now use it": without this the token is stored, the
-    # connector stays switched off, and nothing ever starts it.
+    # connector stays switched off, and nothing ever starts it. Cheap, and it
+    # must happen before the task so the answer already reflects it.
     CapabilityService().set_enabled(Kind.CONNECTOR, name, True)
-    if _mcp["manager"] is None:
-        await _registry_for(None)
 
     async def run() -> None:
+        # Whatever a previous attempt recorded is about to be settled either
+        # way. Cleared here rather than at the end, where it would also erase
+        # what *this* attempt just found out.
+        _mcp["errors"].pop(name, None)
         try:
+            # The manager only if one is already running. Building it starts
+            # every switched-on connector serially -- minutes on a machine with
+            # a dozen -- and the user is waiting for a browser tab, not for
+            # Chrome DevTools to boot. The sign-in has to begin now.
+            started = await _started_manager()
             await mcp.login(
                 name,
                 force=request.force,
                 account_hint=request.account_hint,
-                manager=_mcp["manager"],
+                manager=started,
             )
+            # Only when the sign-in did not already run against the live
+            # registry. When it did, the connector is in it -- connecting again
+            # would tear down the session that had just been established and
+            # pay for a second handshake, which took a sign-in from three
+            # seconds to twenty-four.
+            if started is None and mcp.is_signed_in(load_servers()[name]) is not False:
+                await _connect_into_live_registry(name)
         except Exception as exc:  # a failed sign-in is a reported outcome, not a crash
             log.warning("sign-in to %s failed: %s", name, exc)
             mcp.report_login_failure(name, str(exc))
         finally:
-            _mcp["errors"].pop(name, None)
             _login_tasks.pop(name, None)
 
     _login_tasks[name] = asyncio.create_task(run(), name=f"mcp-login:{name}")
     return {"status": "started", "server": name}
+
+
+@app.delete("/api/mcp/servers/{name}/login")
+async def mcp_cancel_login(name: str) -> dict[str, Any]:
+    """Abandon a sign-in in progress.
+
+    A sign-in holds real resources while it waits -- the fixed callback port for
+    PSOK's own flow, and a whole subprocess for a server that runs its own --
+    and a user who has closed the browser tab has no other way to say so. They
+    expire on their own, but "wait five minutes" is not an answer to "I did not
+    mean to start this".
+    """
+    from psok.mcp import commands as mcp
+    from psok.mcp.oauth import PENDING
+
+    task = _login_tasks.pop(name, None)
+    if task is not None and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+    await mcp.end_auth_session(name)
+    existed = PENDING.pop(name, None) is not None
+    return {"status": "cancelled" if existed or task else "nothing in progress", "server": name}
 
 
 @app.post("/api/mcp/servers/{name}/logout")
@@ -912,16 +1074,40 @@ def mcp_pending_authorizations() -> list[dict[str, Any]]:
     that started the flow, so it is how an interface learns a sign-in landed.
     """
     from psok.mcp import commands as mcp
+    from psok.mcp.config import load_servers
     from psok.mcp.oauth import PENDING, prune_finished
 
     prune_finished()
+
+    # A card saying "finish signing in" for a connector that is already signed
+    # in is simply wrong, and the user cannot dismiss it. It happens whenever a
+    # sign-in lands by a route the watcher did not see -- another window, a
+    # server-side flow that completed after its deadline, a stale entry across a
+    # reconnect. Cheap to check, and it makes the list self-correcting.
+    servers = load_servers()
+    for pending_name, pending in list(PENDING.items()):
+        if pending.status != "waiting":
+            continue
+        config = servers.get(pending_name)
+        if config is not None and mcp.is_signed_in(config) is True:
+            pending.finish("done", f"signed in to {pending_name}")
+
     return [
         {
             "server": name,
-            "authorization_url": p.authorization_url,
+            # Only offered while the link can still be used. A dead one is worse
+            # than none: it fails at the provider with a message about a state
+            # parameter, which reads as PSOK being broken.
+            "authorization_url": p.authorization_url if p.live else None,
             "status": p.status,
             "message": p.message,
             "finished_at": p.finished_at,
+            "expires_in": max(0, round(p.ttl_seconds - p.age())) if p.live else 0,
+            # The short code a device-code flow expects to be typed at the
+            # provider. Without it that sign-in cannot be completed: the page
+            # asks for a code the user was never shown.
+            "user_code": p.user_code,
+            "instructions": p.instructions,
             "account": mcp.account(name) if p.status == "done" else None,
         }
         for name, p in PENDING.items()
@@ -1330,6 +1516,161 @@ def list_tasks(limit: int = 50, include_done: bool = False) -> list[dict[str, An
     return [dict(row) for row in TaskRepository().upcoming(limit, include_done)]
 
 
+class CreateTask(BaseModel):
+    title: str
+    notes: str | None = None
+    # Natural language, resolved by the scheduling engine against the real
+    # clock -- the same path the agent's tools take, so a task typed by hand and
+    # one created in a turn cannot disagree about what "tomorrow" means.
+    due_date_hint: str | None = None
+    reminder_hint: str | None = None
+    priority: str | None = None
+
+
+class UpdateTask(BaseModel):
+    title: str | None = None
+    notes: str | None = None
+    status: str | None = None
+    priority: str | None = None
+    due_date_hint: str | None = None
+    reminder_hint: str | None = None
+
+
+TASK_STATUSES = frozenset({"todo", "in_progress", "done", "cancelled"})
+
+
+def _resolve_hints(body: BaseModel, fields: dict[str, Any]) -> None:
+    """Turn the date hints on a request body into resolved columns.
+
+    Raises HTTPException(400) with the engine's own words when a hint is
+    ambiguous, rather than guessing -- the same refusal the tools make, for the
+    same reason (ADR-0010).
+    """
+    from psok.scheduling.engine import AmbiguousDate, resolve_date_hint
+
+    for hint_field, column in (("due_date_hint", "due_at"), ("reminder_hint", "reminder_at")):
+        hint = getattr(body, hint_field, None)
+        if not hint:
+            continue
+        try:
+            fields[column] = resolve_date_hint(hint).isoformat()
+        except AmbiguousDate as exc:
+            raise HTTPException(400, f"{exc}") from exc
+
+
+@app.post("/api/tasks", status_code=201)
+async def create_task(body: CreateTask) -> dict[str, Any]:
+    """Add a task by hand.
+
+    Tasks were readable and not writable from the interface: the only way to
+    add one was to ask the model to, which is a model call and a permission
+    prompt to write a line of text the user had already typed.
+
+    Goes to the connected task service where there is one, for the same reason
+    the agent's `create_task` does: a local row beside a signed-in To Do account
+    is a second list nobody asked for.
+    """
+    from psok.db.repositories import TaskRepository
+    from psok.sync.microsoft_todo import SOURCE, create_remote_task
+
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(400, "a task needs a title")
+
+    fields: dict[str, Any] = {}
+    _resolve_hints(body, fields)
+
+    external = None
+    try:
+        external = await create_remote_task(
+            title,
+            notes=(body.notes or None),
+            due_at=fields.get("due_at"),
+            reminder_at=fields.get("reminder_at"),
+            priority=body.priority,
+        )
+    except Exception as exc:
+        # Never fatal: losing what the user typed because their task service was
+        # briefly unreachable is worse than a local row the next sync reconciles.
+        log.info("could not create %r upstream: %s", title, exc)
+
+    repo = TaskRepository()
+    task_id = repo.create(
+        title,
+        notes=(body.notes or None),
+        due_at=fields.get("due_at"),
+        priority=body.priority,
+        reminder_at=fields.get("reminder_at"),
+        external_source=SOURCE if external else None,
+        external_id=external["external_id"] if external else None,
+        external_etag=(external.get("external_etag") or None) if external else None,
+    )
+    return dict(repo.get(task_id))
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task(task_id: int, body: UpdateTask) -> dict[str, Any]:
+    """Change a task: mark it done, retime it, or edit what it says."""
+    from psok.db.repositories import TaskRepository
+
+    repo = TaskRepository()
+    if repo.get(task_id) is None:
+        raise HTTPException(404, f"no task with id {task_id}")
+
+    fields: dict[str, Any] = {}
+    for key in ("title", "notes", "priority"):
+        value = getattr(body, key)
+        if value is not None:
+            fields[key] = value
+    if body.status is not None:
+        if body.status not in TASK_STATUSES:
+            raise HTTPException(400, f"status must be one of {', '.join(sorted(TASK_STATUSES))}")
+        fields["status"] = body.status
+    _resolve_hints(body, fields)
+
+    if not fields:
+        raise HTTPException(400, "nothing to update")
+
+    # Retiming makes an already-delivered reminder stale: without this, pushing
+    # a task to tomorrow means never hearing about it again.
+    if "reminder_at" in fields or "due_at" in fields:
+        fields["reminded_at"] = None
+
+    repo.update(task_id, **fields)
+    return dict(repo.get(task_id))
+
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: int) -> dict[str, str]:
+    from psok.db.repositories import TaskRepository
+
+    repo = TaskRepository()
+    if repo.get(task_id) is None:
+        raise HTTPException(404, f"no task with id {task_id}")
+    # Cancelled, not deleted: a task mirrored from To Do would come straight
+    # back on the next sync, and a row that reappears is worse than one that
+    # stays and says it was dropped.
+    repo.update(task_id, status="cancelled")
+    return {"status": "cancelled", "id": str(task_id)}
+
+
+@app.post("/api/tasks/sync")
+async def sync_tasks() -> dict[str, Any]:
+    """Pull Microsoft To Do into the local task store, now.
+
+    The same pull the background loop runs every fifteen minutes, exposed so a
+    user who has just signed in does not have to wait for the next one.
+    """
+    from psok.sync.microsoft_todo import SyncUnavailable
+    from psok.sync.microsoft_todo import sync as sync_microsoft_todo
+
+    try:
+        report = await sync_microsoft_todo(await _started_manager())
+    except SyncUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"status": "ok", "summary": report.summary(), **report.as_dict()}
+
+
 @app.get("/api/calendar")
 def list_calendar(days: int = 14) -> list[dict[str, Any]]:
     from datetime import datetime, timedelta
@@ -1387,6 +1728,19 @@ def toggle_memory(body: MemoryToggle) -> dict[str, Any]:
         "enabled": store.is_enabled(body.conversation_id),
         "scope": body.conversation_id or "global",
     }
+
+
+@app.delete("/api/memory")
+def forget_all_memories() -> dict[str, Any]:
+    """Retire every remembered fact at once.
+
+    Superseded rather than deleted, like the single-fact path: the row stays so
+    that what PSOK believed, and when it stopped, remains answerable. Nothing
+    recalls a superseded fact, so from the model's side this is forgetting.
+    """
+    from psok.memory import MemoryStore
+
+    return {"status": "superseded", "superseded": MemoryStore().supersede_all()}
 
 
 @app.delete("/api/memory/{memory_id}")

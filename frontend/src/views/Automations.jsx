@@ -108,6 +108,13 @@ function Composer({ onDone, onCancel }) {
   const [minutes, setMinutes] = useState(1440)
   const [busy, setBusy] = useState(false)
   const providers = health?.providers ?? []
+  /* An automation is one model round trip per tool call, and a fifteen-step
+     task multiplies whatever the model's latency is by fifteen. The columns for
+     this have existed since automations shipped; nothing ever sent them, so
+     every run went to the machine default however slow it was. */
+  const [provider, setProvider] = useState('')
+  const [model, setModel] = useState('')
+  const defaultModel = health?.provider_defaults?.[provider] || ''
 
   const ready = name.trim() && prompt.trim()
 
@@ -115,7 +122,14 @@ function Composer({ onDone, onCancel }) {
     if (!ready) return
     setBusy(true)
     try {
-      await api.createAutomation({ name, prompt, every_minutes: minutes })
+      await api.createAutomation({
+        name,
+        prompt,
+        every_minutes: minutes,
+        // Omitted, not blanked: the runner then picks the machine default at
+        // run time rather than freezing today's default into the row.
+        ...(provider ? { provider, model: model.trim() || defaultModel || null } : {}),
+      })
       toast(`“${name.trim()}” will run ${describe(minutes)}`, 'ok')
       onDone()
     } catch (err) {
@@ -158,9 +172,31 @@ function Composer({ onDone, onCancel }) {
         <select id="auto-every" value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
           {EVERY.map((e) => <option key={e.minutes} value={e.minutes}>{e.label}</option>)}
         </select>
+        <span className="field-note">First run is one interval from now, not immediately.</span>
+      </div>
+      <div className="field">
+        <label htmlFor="auto-provider">Model</label>
+        <select
+          id="auto-provider"
+          value={provider}
+          onChange={(e) => { setProvider(e.target.value); setModel('') }}
+        >
+          <option value="">
+            {providers.length ? `Machine default (${providers[0]})` : 'Machine default'}
+          </option>
+          {providers.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        {provider && (
+          <input
+            value={model}
+            placeholder={defaultModel || 'model name'}
+            onChange={(e) => setModel(e.target.value)}
+            style={{ marginTop: 8 }}
+          />
+        )}
         <span className="field-note">
-          First run is one interval from now, not immediately.
-          {providers.length ? ` Uses ${providers[0]} unless the conversation says otherwise.` : ''}
+          Most of a run is spent waiting on the model, not on tools — a run is one round trip
+          per tool call. A faster provider is the shortest way to make this quicker.
         </span>
       </div>
       <div className="cap-composer-foot">

@@ -287,16 +287,19 @@ async def run_once(
     without a server: it takes the deny-everything confirmation callback and
     returns something with `.run(conversation_id, prompt)`.
     """
-    from psok.config import load_providers
+    from psok.config import configured_providers
     from psok.db.repositories import ConversationRepository
 
     repo = repo or AutomationRepository()
     repo.mark_running(automation.id)
 
+    # Only providers with a key. An automation runs with nobody watching, so
+    # picking one that cannot answer costs a failed run every interval until
+    # someone reads the record.
+    providers = configured_providers()
     provider = automation.provider
     model = automation.model
     if not provider:
-        providers = load_providers()
         if not providers:
             repo.record(
                 automation.id,
@@ -307,7 +310,12 @@ async def run_once(
             )
             return {"status": "error", "summary": "no provider is configured"}
         provider = "nvidia" if "nvidia" in providers else sorted(providers)[0]
-        model = model or providers[provider].default_model or "default"
+
+    # Outside the branch above on purpose: an automation created with a provider
+    # but no model wrote the literal string "default" onto its conversation, and
+    # the provider's own declared model is right there in providers.yaml.
+    if not model and (chosen := providers.get(provider)) is not None:
+        model = chosen.default_model
 
     conversation_id = ConversationRepository().create(
         provider,

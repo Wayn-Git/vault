@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -41,6 +41,25 @@ CALLBACK_HOST = "127.0.0.1"
 CALLBACK_PORT = 33418
 REDIRECT_URI = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}/oauth/callback"
 CLIENT_NAME = "PSOK"
+
+# How long a person gets to finish at the provider. Every deadline in the
+# sign-in path is derived from this one so none of them can be shorter than it
+# by accident -- a connect deadline that expired first is what abandoned
+# sign-ins the user was still completing.
+CALLBACK_TIMEOUT_SECONDS = 300.0
+
+# How long an authorization *link* is worth offering. A published URL carries a
+# state the provider will only accept for a while: PSOK's own flow stops
+# listening at CALLBACK_TIMEOUT_SECONDS, and a server running its own flow
+# (workspace-mcp) expires its state after ten minutes. Past this the link is
+# dead, and offering it produces "Invalid or expired OAuth state parameter" --
+# the provider is right to refuse it, so PSOK must stop presenting it as
+# something to click.
+AUTHORIZATION_LINK_TTL_SECONDS = 300.0
+
+
+class AuthorizationDenied(RuntimeError):
+    """The provider came back without a code: cancelled, denied, or refused."""
 
 _SUCCESS_PAGE = b"""<!doctype html><meta charset="utf-8">
 <title>PSOK - connected</title>
@@ -122,11 +141,43 @@ class PendingAuthorization:
     status: str = "waiting"
     message: str | None = None
     finished_at: str | None = None
+    started_at: str = field(
+        default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
+    )
+    ttl_seconds: float = AUTHORIZATION_LINK_TTL_SECONDS
+    # A device-code flow hands the user a short code to type at the provider.
+    # Without it the sign-in cannot be completed at all -- the page asks for a
+    # code the user was never shown. Microsoft To Do is the one that does this.
+    user_code: str | None = None
+    # The server's own wording, kept verbatim as the fallback: whatever it said
+    # is more reliable than a summary that might drop the part that mattered.
+    instructions: str | None = None
 
     def finish(self, status: str, message: str | None = None) -> None:
         self.status = status
         self.message = message
         self.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
+
+    def age(self, now: datetime | None = None) -> float:
+        started = datetime.fromisoformat(self.started_at)
+        return ((now or datetime.now(UTC)) - started).total_seconds()
+
+    @property
+    def live(self) -> bool:
+        """Whether this link is still worth offering.
+
+        A `waiting` entry that has outlived its state is not waiting for
+        anything: the provider will refuse the code it comes back with. Saying
+        so is the difference between "sign in again" and a link that fails with
+        an error about a parameter the user has never heard of.
+        """
+        return self.status == "waiting" and self.age() < self.ttl_seconds
+
+    def expire(self) -> None:
+        self.finish(
+            "expired",
+            "the sign-in link timed out before it was used. Start it again.",
+        )
 
 
 # Authorizations this process started, keyed by server name, so the API can
@@ -140,8 +191,17 @@ FINISHED_TTL_SECONDS = 120.0
 
 
 def prune_finished(now: datetime | None = None) -> None:
-    """Drop authorizations that finished long enough ago to have been seen."""
+    """Expire dead links, then drop outcomes that have had time to be seen.
+
+    A `waiting` entry is not evidence that anything is still waiting -- the
+    process behind it may have been shut down, or its state may simply have
+    aged out. Marking it `expired` here is what stops the interface offering a
+    link that can only fail.
+    """
     moment = now or datetime.now(UTC)
+    for pending in list(PENDING.values()):
+        if pending.status == "waiting" and not pending.live:
+            pending.expire()
     for name, pending in list(PENDING.items()):
         if pending.status == "waiting" or not pending.finished_at:
             continue
@@ -152,18 +212,29 @@ def prune_finished(now: datetime | None = None) -> None:
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
-    result: dict | None = None
+    """One request on the loopback callback.
+
+    The result is written onto the *server* rather than onto the class. It used
+    to be a class attribute, which made it process-global: two sign-ins running
+    at once wrote into the same slot, and each flow's `result = None` reset
+    could erase a redirect the other was about to read. State validation would
+    then reject a code that was perfectly valid, for the wrong flow.
+    """
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         parsed = urlparse(self.path)
         if parsed.path != "/oauth/callback":
+            # Not the redirect. Browsers ask for /favicon.ico unprompted, and
+            # answering 404 is right -- but this must not count as the callback,
+            # or an unrelated request ends a sign-in that has not happened yet.
             self.send_response(404)
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
         params = parse_qs(parsed.query)
         code = (params.get("code") or [None])[0]
-        _CallbackHandler.result = {
+        self.server.callback_result = {  # type: ignore[attr-defined]
             "code": code,
             "state": (params.get("state") or [None])[0],
             "iss": (params.get("iss") or [None])[0],
@@ -174,6 +245,9 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # The page carries a code in its URL. Nothing should keep a copy.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
@@ -190,9 +264,26 @@ class CallbackPortUnavailable(RuntimeError):
     """
 
 
-async def _wait_for_callback(timeout: float = 300.0) -> AuthorizationCodeResult:
-    """Serve exactly one request on the loopback callback and return its code."""
-    _CallbackHandler.result = None
+async def _wait_for_callback(timeout: float = CALLBACK_TIMEOUT_SECONDS) -> AuthorizationCodeResult:
+    """Hold the loopback callback open until the provider redirects back.
+
+    Three things this has to get right, each of which was wrong:
+
+    **Serve until the redirect arrives, not until the first request.** A single
+    `handle_request()` is consumed by whatever knocks first -- a browser asking
+    for `/favicon.ico` is enough -- and the real callback then finds nothing
+    listening. Requests that are not the callback are answered 404 and the
+    server keeps waiting.
+
+    **Keep the result with the server, not with the class.** Two sign-ins at
+    once shared one slot, so each could read the other's redirect.
+
+    **Give the port back the moment the wait ends.** The port is fixed, because
+    it is baked into the redirect URI registered with the provider, so a wait
+    that lingers after the user has given up blocks every retry until it
+    expires -- which is what turned one abandoned sign-in into five minutes of
+    "another PSOK sign-in may already be in progress".
+    """
     try:
         server = HTTPServer((CALLBACK_HOST, CALLBACK_PORT), _CallbackHandler)
     except OSError as exc:
@@ -201,30 +292,50 @@ async def _wait_for_callback(timeout: float = 300.0) -> AuthorizationCodeResult:
             f" ({exc}). Another PSOK sign-in may already be in progress, or another"
             f" program holds the port. Close it and try again."
         ) from exc
-    server.timeout = timeout
+
+    server.callback_result = None  # type: ignore[attr-defined]
+    # Short, so the serving thread notices `stop` promptly rather than sitting
+    # in accept() for the whole timeout after the wait has been abandoned.
+    server.timeout = 0.5
 
     loop = asyncio.get_running_loop()
-    done = loop.create_future()
+    done: asyncio.Future = loop.create_future()
+    stop = threading.Event()
 
     def serve() -> None:
         try:
-            server.handle_request()
+            while not stop.is_set():
+                # Returns on timeout with nothing served, which is the tick that
+                # lets `stop` be seen.
+                server.handle_request()
+                if getattr(server, "callback_result", None) is not None:
+                    break
         finally:
             server.server_close()
             if not done.done():
-                loop.call_soon_threadsafe(done.set_result, True)
+                loop.call_soon_threadsafe(
+                    lambda: None if done.done() else done.set_result(True)
+                )
 
-    threading.Thread(target=serve, daemon=True).start()
+    thread = threading.Thread(target=serve, daemon=True, name="psok-oauth-callback")
+    thread.start()
     try:
-        await asyncio.wait_for(done, timeout=timeout)
-    except TimeoutError as exc:
-        server.server_close()
+        await asyncio.wait_for(asyncio.shield(done), timeout=timeout)
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        stop.set()
+        # Joined, so the next sign-in finds the port free rather than racing a
+        # thread that is still shutting down.
+        await asyncio.to_thread(thread.join, 3.0)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         raise TimeoutError("timed out waiting for the authorization callback") from exc
+    finally:
+        stop.set()
 
-    result = _CallbackHandler.result
+    result = getattr(server, "callback_result", None)
     if not result or not result.get("code"):
         detail = (result or {}).get("error_description") or (result or {}).get("error")
-        raise RuntimeError(f"authorization was not granted: {detail or 'no code returned'}")
+        raise AuthorizationDenied(f"authorization was not granted: {detail or 'no code returned'}")
     return AuthorizationCodeResult(
         code=result["code"], state=result.get("state"), iss=result.get("iss")
     )
@@ -289,7 +400,14 @@ def build_auth_provider(
             server_name=config.name,
             authorization_url=authorization_url,
             state=(parse_qs(urlparse(authorization_url).query).get("state") or [None])[0],
+            # The link is only worth offering for as long as this flow is still
+            # listening for it.
+            ttl_seconds=config.auth_timeout_seconds,
         )
+        # Replaces whatever was here. A previous attempt's link is dead the
+        # moment a new one is issued -- its state will never be accepted again
+        # -- and leaving it listed is how a user ends up clicking the older of
+        # two links and being told the state is invalid.
         PENDING[config.name] = pending
         if awaiting_user is not None:
             awaiting_user.set()
@@ -300,7 +418,18 @@ def build_auth_provider(
 
     async def callback_handler() -> AuthorizationCodeResult:
         try:
-            result = await _wait_for_callback()
+            result = await _wait_for_callback(timeout=config.auth_timeout_seconds)
+        except TimeoutError:
+            if (pending := PENDING.get(config.name)) is not None:
+                pending.expire()
+            raise
+        except AuthorizationDenied as exc:
+            # Cancelled or refused at the provider. A distinct outcome from a
+            # failure: there is nothing wrong and nothing to debug, the user
+            # simply said no.
+            if (pending := PENDING.get(config.name)) is not None:
+                pending.finish("cancelled", str(exc))
+            raise
         except Exception:
             # Leave the record behind saying what happened; the login task
             # replaces the message with the classified cause it can see.

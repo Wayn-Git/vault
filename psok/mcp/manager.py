@@ -70,6 +70,31 @@ def normalize_result(result: Any) -> ToolResult:
     )
 
 
+# What a dead transport looks like coming back out of the SDK. Matched on the
+# message because the exception types are anyio's and vary by transport, and
+# because a `TaskGroup` wrapper hides them anyway.
+_TRANSPORT_FAILURES = (
+    "connection closed",
+    "closedresourceerror",
+    "brokenresourceerror",
+    "broken pipe",
+    "server has been shut down",
+    "transport is closed",
+    "endofstream",
+)
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    """Whether this failure means the session died, rather than the call failing.
+
+    The distinction matters: a tool that raises is information for the model,
+    while a dead session makes every later call in the turn fail identically
+    until something reconnects.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _TRANSPORT_FAILURES)
+
+
 class MCPManager:
     """Owns every MCP connection and keeps the registry in step with them."""
 
@@ -182,8 +207,44 @@ class MCPManager:
             except TimeoutError:
                 return ToolResult.error(f"'{tool_name}' on '{server_name}' timed out.")
             except Exception as exc:
-                connection.breaker.record_failure()
-                return ToolResult.error(f"[{server_name}] {tool_name} failed: {exc}")
+                if not _is_transport_failure(exc):
+                    connection.breaker.record_failure()
+                    return ToolResult.error(f"[{server_name}] {tool_name} failed: {exc}")
+
+                # The session is gone, not the tool. A stdio server that exited
+                # -- restarted, killed, crashed -- leaves the serving task alive
+                # on a dead pipe, so `connected` stays true and every call from
+                # here on answers "Connection closed" forever. Nothing retried,
+                # and the model spent its turn calling three tools that could
+                # not have worked. Reconnect once and try the call again.
+                log.info(
+                    "%s lost its connection during %s; reconnecting once",
+                    server_name,
+                    tool_name,
+                )
+                config = load_servers().get(server_name)
+                if config is None:
+                    return ToolResult.error(
+                        f"[{server_name}] {tool_name} failed: {exc}"
+                        f" (and '{server_name}' is no longer configured)"
+                    )
+                try:
+                    self.forget_error(server_name)
+                    await self.connect_server(config)
+                    revived = self.connections.get(server_name)
+                    if revived is None:
+                        raise MCPConnectionError("reconnect produced no connection")
+                    raw = await revived.call(tool_name, arguments)
+                except Exception as retry_exc:
+                    # Deliberately not a third attempt: a server that cannot be
+                    # brought back is a fact to report, not one to keep paying a
+                    # connect timeout for on every tool call in the turn.
+                    return ToolResult.error(
+                        f"[{server_name}] {tool_name} failed: the connection dropped and"
+                        f" could not be re-established ({retry_exc}). Reconnect it from"
+                        " Connectors, or ask the user to sign in again."
+                    )
+                connection = revived
             connection.breaker.record_success()
             return normalize_result(raw)
 

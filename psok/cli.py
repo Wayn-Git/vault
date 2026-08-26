@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from psok.agent.director import Director
-from psok.config import load_providers, paths
+from psok.config import configured_providers, load_providers, paths
 from psok.db.connection import get_connection
 from psok.db.repositories import ConversationRepository, ExecutionLogRepository
 from psok.security.confirmation import ConfirmationRequest, ConfirmationService
@@ -53,13 +53,39 @@ def cmd_init(_: argparse.Namespace) -> int:
     return 0
 
 
+# Open-weights providers fast enough to matter for agent work, and what to add
+# to providers.yaml for each. Both speak the OpenAI API, so neither needs an
+# adapter -- only a key.
+FAST_PROVIDERS = {
+    "groq": (
+        "Add it with base_url https://api.groq.com/openai/v1,"
+        " api_key_ref psok/groq, default_model llama-3.3-70b-versatile."
+    ),
+    "cerebras": (
+        "Add it with base_url https://api.cerebras.ai/v1,"
+        " api_key_ref psok/cerebras, default_model llama-3.3-70b."
+    ),
+}
+
+
 def cmd_doctor(_: argparse.Namespace) -> int:
     p = paths()
     print(f"home:      {p.home} ({'exists' if p.home.exists() else 'MISSING -- run psok init'})")
     print(f"database:  {p.db} ({'exists' if p.db.exists() else 'missing'})")
 
     providers = load_providers()
-    print(f"providers: {', '.join(providers) or 'none configured'}")
+    usable = configured_providers()
+    print(f"providers: {', '.join(usable) or 'none configured'}")
+    for name in sorted(set(providers) - set(usable)):
+        ref = providers[name].api_key_ref or providers[name].api_key_env
+        print(f"           ! {name} is listed but has no key ({ref}); it is not offered")
+
+    # DEFAULT_PROVIDERS is only written when the file is absent, so an existing
+    # providers.yaml never gains an entry PSOK adds later. Say so rather than
+    # leaving the fast options to be found by reading the source.
+    for name, hint in FAST_PROVIDERS.items():
+        if name not in providers:
+            print(f"           - {name} is not in providers.yaml. {hint}")
 
     registry = build_default_registry()
     print(f"tools:     {len(registry.list())} registered")
@@ -236,6 +262,11 @@ def cmd_memory(args: argparse.Namespace) -> int:
         print(f"forgot memory {args.forget}")
         return 0
 
+    if args.forget_all:
+        held = store.supersede_all()
+        print(f"forgot {held} remembered fact{'s' if held != 1 else ''}")
+        return 0
+
     facts = store.live(args.limit)
     state = "on" if store.is_enabled(args.conversation) else "off"
     scope = args.conversation or "global"
@@ -244,6 +275,29 @@ def cmd_memory(args: argparse.Namespace) -> int:
         print(f"  [{m.id}] {m.created_at[:10]}  {_brief(m.fact, 90)}")
     if not facts:
         print("  (nothing remembered yet)")
+    return 0
+
+
+def cmd_conversations(args: argparse.Namespace) -> int:
+    from psok.db.repositories import ConversationRepository
+
+    get_connection()
+    repo = ConversationRepository()
+
+    if args.delete_all:
+        # Automation runs are left alone here for the same reason the API leaves
+        # them: they are the record of what a rule did, and each automation
+        # already prunes its own.
+        gone = repo.delete_all()
+        print(f"deleted {gone} conversation{'s' if gone != 1 else ''}")
+        return 0
+
+    rows = repo.list(limit=args.limit)
+    if not rows:
+        print("no conversations yet")
+        return 0
+    for row in rows:
+        print(f"  {row['id'][:8]}  {row['updated_at'][:16]}  {_brief(row['title'] or '', 60)}")
     return 0
 
 
@@ -418,7 +472,7 @@ def cmd_mcp_env(args: argparse.Namespace) -> int:
         print("expected KEY=VALUE", file=sys.stderr)
         return 1
     try:
-        mcp.set_env(args.name, key.strip(), value, secret=args.secret)
+        mcp.set_env(args.name, key.strip(), value, secret=args.secret, force=args.force)
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -534,6 +588,12 @@ def _add_mcp_commands(sub) -> None:
     env.add_argument("name")
     env.add_argument("assignment", metavar="KEY=VALUE", nargs="?")
     env.add_argument("--unset", metavar="KEY", help="forget a variable, and its keychain entry")
+    env.add_argument(
+        "--force",
+        action="store_true",
+        help="replace a stored secret. Deliberate on purpose: one client backs every\n"
+        "connector in an account group, so replacing it changes all of them.",
+    )
     env.add_argument(
         "--secret",
         action="store_true",
@@ -705,11 +765,21 @@ def main(argv: list[str] | None = None) -> int:
 
     memory = sub.add_parser("memory", help="list, forget, or switch off long-term memory")
     memory.add_argument("--forget", type=int, metavar="ID", help="retire one remembered fact")
+    memory.add_argument(
+        "--forget-all", action="store_true", help="retire every remembered fact"
+    )
     memory.add_argument("--on", action="store_true", help="switch memory on")
     memory.add_argument("--off", action="store_true", help="switch memory off")
     memory.add_argument("--conversation", help="scope the change to one conversation")
     memory.add_argument("--limit", type=int, default=50)
     memory.set_defaults(func=cmd_memory)
+
+    conversations = sub.add_parser("conversations", help="list or clear conversations")
+    conversations.add_argument(
+        "--delete-all", action="store_true", help="delete every conversation and its transcript"
+    )
+    conversations.add_argument("--limit", type=int, default=20)
+    conversations.set_defaults(func=cmd_conversations)
 
     index = sub.add_parser("index", help="index a folder of notes for retrieval")
     index.add_argument("path", nargs="?", help="folder to index")

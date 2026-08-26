@@ -70,6 +70,28 @@ class MemoryStore:
         self._drop_vectors(memory_ids)
         return cursor.rowcount
 
+    def supersede_all(self) -> int:
+        """Retire every live fact. Returns how many there were.
+
+        Not `supersede([m.id for m in live()])`: `live` takes a limit, so that
+        spelling silently leaves everything past it behind and reports success.
+        The ids are collected here without one, and the vectors go with them.
+        """
+        ids = [
+            int(row[0])
+            for row in self.conn.execute(
+                "SELECT id FROM memories WHERE superseded_at IS NULL"
+            )
+        ]
+        if not ids:
+            return 0
+        self.conn.execute(
+            "UPDATE memories SET superseded_at = datetime('now') WHERE superseded_at IS NULL"
+        )
+        self.conn.commit()
+        self._drop_vectors(ids)
+        return len(ids)
+
     def live(self, limit: int = 200) -> list[Memory]:
         rows = self.conn.execute(
             "SELECT * FROM memories WHERE superseded_at IS NULL"

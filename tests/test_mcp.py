@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import GOOGLE_CLIENT_ID, GOOGLE_SECRET
 
 from psok.mcp import catalogue as cat
 from psok.mcp import commands as mcp_commands
@@ -381,17 +382,17 @@ def test_an_env_secret_lives_in_the_keychain_not_the_config(psok_home):
     ref = "psok-mcp/google.env.GOOGLE_OAUTH_CLIENT_SECRET"
     try:
         add_custom("google", "stdio", command="uvx", args=["workspace-mcp"])
-        set_env("google", "GOOGLE_OAUTH_CLIENT_SECRET", "s3cret-value", secret=True)
-        set_env("google", "GOOGLE_OAUTH_CLIENT_ID", "1234.apps.googleusercontent.com")
+        set_env("google", "GOOGLE_OAUTH_CLIENT_SECRET", GOOGLE_SECRET, secret=True)
+        set_env("google", "GOOGLE_OAUTH_CLIENT_ID", GOOGLE_CLIENT_ID)
 
         on_disk = config_path().read_text()
-        assert "s3cret-value" not in on_disk, "the secret must never be written to mcp.yaml"
+        assert GOOGLE_SECRET not in on_disk, "the secret must never be written to mcp.yaml"
         assert f"keychain:{ref}" in on_disk
-        assert "1234.apps.googleusercontent.com" in on_disk, "a public id is not a secret"
+        assert GOOGLE_CLIENT_ID in on_disk, "a public id is not a secret"
 
         env = load_servers()["google"].resolved_env()
-        assert env["GOOGLE_OAUTH_CLIENT_SECRET"] == "s3cret-value", "resolved at spawn time"
-        assert env["GOOGLE_OAUTH_CLIENT_ID"] == "1234.apps.googleusercontent.com"
+        assert env["GOOGLE_OAUTH_CLIENT_SECRET"] == GOOGLE_SECRET, "resolved at spawn time"
+        assert env["GOOGLE_OAUTH_CLIENT_ID"] == GOOGLE_CLIENT_ID
     finally:
         delete_secret(ref)  # the keychain outlives the tmp_path home
 
@@ -435,14 +436,14 @@ def test_a_stdio_servers_client_goes_to_the_env_its_process_reads(psok_home):
     mcp_commands.add_from_catalogue("google-gmail")
 
     mcp_commands.set_oauth_client(
-        "google-gmail", "1234-abc.apps.googleusercontent.com", "GOCSPX-secret"
+        "google-gmail", GOOGLE_CLIENT_ID, GOOGLE_SECRET
     )
 
     config = load_servers()["google-gmail"]
-    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
+    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == GOOGLE_CLIENT_ID
     # The secret is a reference, never the value itself (ADR-0012).
     assert config.env["GOOGLE_OAUTH_CLIENT_SECRET"].startswith("keychain:")
-    assert config.resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == "GOCSPX-secret"
+    assert config.resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == GOOGLE_SECRET
     # `oauth: true` on a stdio server is a claim the transport never honours.
     assert config.oauth is False
     assert config.oauth_client_id is None
@@ -450,20 +451,22 @@ def test_a_stdio_servers_client_goes_to_the_env_its_process_reads(psok_home):
 
 def test_an_email_is_refused_as_a_client_id(psok_home):
     mcp_commands.add_from_catalogue("google-gmail")
-    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com")
+    mcp_commands.set_oauth_client("google-gmail", GOOGLE_CLIENT_ID)
 
     with pytest.raises(ValueError, match="not an OAuth client id"):
         mcp_commands.set_oauth_client("google-gmail", "dadad@gmail.com")
 
     # The working client survives the rejected one.
     config = load_servers()["google-gmail"]
-    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
+    assert config.env["GOOGLE_OAUTH_CLIENT_ID"] == GOOGLE_CLIENT_ID
 
 
 def test_a_connector_is_not_signed_in_just_because_it_has_credentials(psok_home, monkeypatch):
     """Configuring a client is not signing in, and connecting is not either."""
     mcp_commands.add_from_catalogue("google-gmail")
-    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com", "s")
+    mcp_commands.set_oauth_client(
+        "google-gmail", GOOGLE_CLIENT_ID, GOOGLE_SECRET
+    )
 
     credentials = psok_home / "google-credentials"
     monkeypatch.setattr(
@@ -499,12 +502,16 @@ def test_signing_out_forgets_the_account_the_server_itself_holds(psok_home, monk
         cat.get("google-gmail"), "credentials_path", str(credentials), raising=False
     )
 
+    (credentials / "nested").mkdir()
+    (credentials / "nested" / "session").write_bytes(b"x")
+
     cleared = mcp_commands.sign_out("google-gmail")
 
     assert cleared and "1 signed-in account" in cleared[0]
-    # The whole store goes, not just the files at its top level: a browser
-    # profile keeps its session in subdirectories.
-    assert not credentials.exists()
+    # Emptied, not removed: everything the store held goes, subdirectories
+    # included, because a browser profile keeps its session in one.
+    assert not (credentials / "someone@gmail.com.json").exists()
+    assert not (credentials / "nested").exists()
     assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is False
 
 
@@ -576,9 +583,15 @@ def test_an_abandoned_sign_in_is_not_mistaken_for_an_account(psok_home, monkeypa
     assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is True
     assert mcp_commands.account("google-gmail") == "someone@gmail.com"
 
-    # Signing out clears the bookkeeping as well, so the next flow starts clean.
+    # Signing out clears the account, and leaves the CSRF state store alone.
+    # Nine Google connectors share this directory, so deleting it signed the
+    # user out of Gmail *and* destroyed the state of a Calendar sign-in in
+    # progress -- which the provider then rejected as an invalid state, on a
+    # login that had gone perfectly.
     mcp_commands.sign_out("google-gmail")
-    assert not credentials.exists()
+    assert not (credentials / "someone@gmail.com.json").exists()
+    assert (credentials / "oauth_states.json").exists(), "an in-flight sign-in must survive"
+    assert mcp_commands.is_signed_in(load_servers()["google-gmail"]) is False
 
 
 def test_google_apps_are_separate_connectors_sharing_one_account(psok_home):
@@ -631,13 +644,15 @@ def test_one_google_client_covers_every_google_app(psok_home):
         mcp_commands.add_from_catalogue(app)
     mcp_commands.add_from_catalogue("github")
 
-    mcp_commands.set_oauth_client("google-gmail", "1234-abc.apps.googleusercontent.com", "GOCSPX-s")
+    mcp_commands.set_oauth_client(
+        "google-gmail", GOOGLE_CLIENT_ID, GOOGLE_SECRET
+    )
 
     servers = load_servers()
     for app in ("google-gmail", "google-calendar", "google-drive"):
         env = servers[app].env
-        assert env["GOOGLE_OAUTH_CLIENT_ID"] == "1234-abc.apps.googleusercontent.com"
-        assert servers[app].resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == "GOCSPX-s"
+        assert env["GOOGLE_OAUTH_CLIENT_ID"] == GOOGLE_CLIENT_ID
+        assert servers[app].resolved_env()["GOOGLE_OAUTH_CLIENT_SECRET"] == GOOGLE_SECRET
 
     # GitHub authorizes a different account and must not be written to.
     assert "GOOGLE_OAUTH_CLIENT_ID" not in servers["github"].env
@@ -689,7 +704,8 @@ def test_signing_out_removes_a_nested_profile_not_just_its_top_level(psok_home, 
 
     mcp_commands.sign_out("linkedin")
 
-    assert not profile.exists()
+    assert not (profile / "Default").exists()
+    assert not (profile / "Cookies").exists()
     assert mcp_commands.is_signed_in(load_servers()["linkedin"]) is False
 
 

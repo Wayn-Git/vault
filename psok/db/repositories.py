@@ -170,6 +170,25 @@ class ConversationRepository:
         self.conn.commit()
         return cursor.rowcount > 0
 
+    def delete_all(self, *, include_automations: bool = False) -> int:
+        """Delete every conversation, one at a time. Returns how many went.
+
+        Row by row rather than one `DELETE FROM conversations`, because the
+        scoped rows in `capability_state` and `memory_state` key on the id as a
+        plain string and no foreign key will take them with it. A bulk statement
+        would leave those behind for every conversation at once -- the same leak
+        `delete` exists to prevent, multiplied.
+
+        Automation runs are excluded by default for the same reason they are
+        excluded from the rail: they are the record of what a rule did, not a
+        conversation anyone had, and they are already pruned per automation.
+        """
+        sql = "SELECT id FROM conversations"
+        if not include_automations:
+            sql += " WHERE automation_id IS NULL"
+        rows = self.conn.execute(sql).fetchall()
+        return sum(1 for row in rows if self.delete(row["id"]))
+
     def touch(self, conversation_id: str) -> None:
         self.conn.execute(
             "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",

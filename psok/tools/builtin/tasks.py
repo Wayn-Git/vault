@@ -7,12 +7,15 @@ the loop rather than guessing (ADR-0010).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
 from psok.db.repositories import CalendarRepository, TaskRepository
 from psok.scheduling.engine import AmbiguousDate, find_conflicts, find_free_slot, resolve_date_hint
 from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+
+log = logging.getLogger(__name__)
 
 # Assumed length of a work block when the model gives no duration estimate.
 DEFAULT_WORK_BLOCK_MINUTES = 60
@@ -60,6 +63,19 @@ async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
                 " (find_free_slot can suggest one) or confirm with the user before overlapping."
             )
 
+    # Where the task belongs, if the user keeps their tasks somewhere. A local
+    # row beside a connected To Do account is a second list nobody asked for:
+    # it does not reach the user's phone, does not appear in My Day, and drifts
+    # from the list they actually read. So the connected list is the default and
+    # the local row becomes its mirror.
+    external, routed_to = await _create_upstream(
+        title,
+        notes=args.get("notes"),
+        due_at=due_at,
+        reminder_at=reminder_at,
+        priority=args.get("priority"),
+    )
+
     task_id = TaskRepository().create(
         title,
         notes=args.get("notes"),
@@ -69,6 +85,9 @@ async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
         priority=args.get("priority"),
         source="agent",
         reminder_at=reminder_at.isoformat() if reminder_at else None,
+        external_source=MICROSOFT_TODO if external else None,
+        external_id=external["external_id"] if external else None,
+        external_etag=(external.get("external_etag") or None) if external else None,
     )
     parts = [f"created task {task_id}: {title}"]
     if due_at:
@@ -79,7 +98,52 @@ async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
         parts.append(f"reminding at {reminder_at:%Y-%m-%d %H:%M}")
     elif due_at:
         parts.append("reminding at the deadline")
+    parts.append(routed_to)
     return ToolResult.ok(", ".join(parts))
+
+
+MICROSOFT_TODO = "microsoft-todo"
+
+
+async def _create_upstream(
+    title: str,
+    *,
+    notes: str | None,
+    due_at,
+    reminder_at,
+    priority: str | None,
+) -> tuple[dict[str, str] | None, str]:
+    """Put the task in the user's real task list, where there is one.
+
+    Returns the identity to mirror and a phrase saying where it went, so the
+    model reports the truth rather than "created" for a row only PSOK can see.
+
+    A failure here is never fatal. Losing what the user asked for because their
+    task service was briefly unreachable would be a far worse outcome than a
+    local row that the next sync reconciles, so the task is always written
+    locally and the answer says the upstream write did not happen.
+    """
+    from psok.sync.microsoft_todo import create_remote_task
+
+    try:
+        external = await create_remote_task(
+            title,
+            notes=notes,
+            due_at=due_at.isoformat(sep=" ", timespec="seconds") if due_at else None,
+            reminder_at=(
+                reminder_at.isoformat(sep=" ", timespec="seconds") if reminder_at else None
+            ),
+            priority=priority,
+        )
+    except Exception as exc:
+        # SyncUnavailable and a transport failure land here alike: the user
+        # cares that it did not reach their list, not which layer said so.
+        log.info("could not create %r in Microsoft To Do: %s", title, exc)
+        return None, "kept locally only — Microsoft To Do could not be written to"
+
+    if external is None:
+        return None, "kept in PSOK (no task connector is signed in)"
+    return external, "added to Microsoft To Do"
 
 
 async def update_task(args: dict[str, Any], _: ToolContext) -> ToolResult:

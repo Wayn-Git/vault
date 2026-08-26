@@ -20,6 +20,7 @@ const SECTIONS = [
   { id: 'general', label: 'General', icon: 'sliders' },
   { id: 'models', label: 'Models', icon: 'cpu' },
   { id: 'permissions', label: 'Permissions', icon: 'key' },
+  { id: 'data', label: 'Data', icon: 'trash' },
 ]
 
 // Every one of these is a full view in the rail. The nav links to them so that
@@ -174,10 +175,98 @@ function Permissions() {
   )
 }
 
+/* A destructive row that asks by asking again.
+ *
+ * Same shape as the rail's delete: the second click is the confirmation. A
+ * modal here would be friction on a button nobody presses by accident, and an
+ * undo this interface cannot honour would be a lie. The count is shown before
+ * the click so "clear everything" is never a guess about how much everything
+ * is. */
+function DangerRow({ label, note, count, confirmLabel, onConfirm }) {
+  const [armed, setArmed] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  // Disarm as soon as attention moves, so a click primed minutes ago cannot be
+  // completed by a stray one later.
+  useEffect(() => {
+    if (!armed) return undefined
+    const timer = setTimeout(() => setArmed(false), 6000)
+    return () => clearTimeout(timer)
+  }, [armed])
+
+  return (
+    <div className="set-row">
+      <span>
+        {label}
+        <span className="set-note" style={{ display: 'block', margin: 0 }}>{note}</span>
+      </span>
+      <span className="set-row-tail">
+        <span className="badge">{count == null ? '—' : count}</span>
+        <button
+          type="button"
+          className={armed ? 'btn btn--danger btn--small' : 'btn btn--ghost btn--small'}
+          disabled={busy || count === 0}
+          onClick={async () => {
+            if (!armed) { setArmed(true); return }
+            setBusy(true)
+            try { await onConfirm() } finally { setBusy(false); setArmed(false) }
+          }}
+        >
+          {busy ? 'Clearing…' : armed ? confirmLabel : 'Clear'}
+        </button>
+      </span>
+    </div>
+  )
+}
+
+function Data() {
+  const { toast, conversations, refreshConvs, deleteAllConversations } = useApp()
+  const [facts, setFacts] = useState(null)
+
+  const load = useCallback(async () => {
+    try { setFacts((await api.memory()).facts.length) } catch { setFacts(null) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  return (
+    <div className="set-panel">
+      <h3>Clear stored data</h3>
+      <p className="set-note">
+        Both are immediate and cannot be undone. Tasks, the activity trail, indexed documents
+        and your signed-in accounts are not touched by either.
+      </p>
+      <div className="set-rows">
+        <DangerRow
+          label="Conversations"
+          note="Every conversation and its transcript. Automation runs are kept."
+          count={conversations.length}
+          confirmLabel="Click again to delete all"
+          onConfirm={async () => { await deleteAllConversations(); refreshConvs() }}
+        />
+        <DangerRow
+          label="Memories"
+          note="Every fact PSOK has remembered about you. It stops recalling them."
+          count={facts}
+          confirmLabel="Click again to forget all"
+          onConfirm={async () => {
+            try {
+              const { superseded } = await api.forgetAllMemories()
+              toast(`Forgot ${superseded} fact${superseded === 1 ? '' : 's'}`, 'ok')
+              load()
+            } catch (err) { toast(err.message, 'bad') }
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
 const PANELS = {
   general: General,
   models: Models,
   permissions: Permissions,
+  data: Data,
 }
 
 export default function Settings() {

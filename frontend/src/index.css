@@ -905,18 +905,144 @@ a { color: inherit; }
 .server-target { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); margin-top: 3px; overflow-wrap: anywhere; }
 .server-actions { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 
+/* ------------------------------------------------- sign-in status cards
+
+   One card per sign-in, in whatever state it is actually in. This used to be a
+   single amber strip listing every "waiting" flow as a link, which was wrong in
+   two ways: it offered links whose state had expired -- clicking one produced
+   the provider's "Invalid or expired OAuth state parameter" -- and it had
+   nothing to say about a sign-in that finished, failed, or was cancelled.
+
+   The accent is the state, so the colour is never decoration: amber is waiting
+   on you, green landed, red needs another go. */
+
+.auth-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
 .auth-banner {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  border: 1px solid rgba(240, 183, 100, 0.3);
+  gap: 12px;
+  padding: 13px 15px;
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--accent, var(--confirm));
   border-radius: var(--r-md);
-  background: var(--confirm-soft);
+  background: var(--tint, var(--confirm-soft));
   font-size: 13px;
   color: var(--text-dim);
-  flex-wrap: wrap;
+  animation: auth-in var(--pop) var(--ease-out) both;
+}
+
+@keyframes auth-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-banner { animation: none; }
+}
+
+.auth-banner--waiting   { --accent: var(--confirm); --tint: var(--confirm-soft); }
+.auth-banner--done      { --accent: var(--live);    --tint: var(--live-soft); }
+.auth-banner--failed,
+.auth-banner--expired   { --accent: var(--stop);    --tint: var(--stop-soft); }
+.auth-banner--cancelled { --accent: var(--text-faint); --tint: rgba(255, 255, 255, 0.03); }
+
+/* Fixed box so a spinner swapping for a tick cannot shift the text beside it. */
+.auth-banner-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  color: var(--accent);
+}
+
+.auth-banner-body { min-width: 0; flex: 1; }
+
+.auth-banner-title {
+  color: var(--text);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+
+.auth-banner-note {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  /* A provider's own guidance arrives as several lines -- GitHub's "register an
+     app once" is five -- so the breaks it was written with are kept. */
+  white-space: pre-wrap;
+}
+
+/* The device code, which the user has to reproduce by hand at the provider.
+   Monospaced and spaced out because a code is read character by character, and
+   `1`/`l` and `0`/`O` are exactly where that goes wrong. */
+.auth-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color var(--press) var(--ease-out), background var(--press) var(--ease-out);
+}
+
+.auth-code:hover { border-color: var(--accent); background: var(--surface); }
+.auth-code:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.auth-code-value {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  /* The trailing letter-space would otherwise sit inside the border. */
+  margin-right: -0.16em;
+}
+
+.auth-banner-meta {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.auth-spinner {
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: auth-spin 720ms linear infinite;
+}
+
+@keyframes auth-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-spinner { animation-duration: 2.4s; }
+}
+
+/* Below this the actions cannot sit beside the text without truncating it. */
+@media (max-width: 560px) {
+  .auth-banner { flex-wrap: wrap; }
+  .auth-banner-body { flex-basis: 100%; }
+  .auth-banner-actions { width: 100%; }
+  .auth-banner-actions .btn { flex: 1; justify-content: center; }
 }
 
 /* ----------------------------------------------------------- mcp tiles */
@@ -2947,3 +3073,115 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 }
 .auto-run-list li button:hover { background: rgba(255, 255, 255, 0.03); color: var(--text); }
 .auto-run-empty { padding: 6px 10px; font-size: 12px; color: var(--text-faint); }
+
+
+/* ------------------------------------------------------------ tasks
+
+   A task list you can act on. The rows were read-only: ticking one off meant
+   asking the model to, which is a model call and a permission prompt to change
+   one column. */
+
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.task-check {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  /* Optically aligned to the title's cap height rather than its line box. */
+  margin-top: 2px;
+  padding: 0;
+  border: 1.5px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--canvas);
+  cursor: pointer;
+  transition: border-color var(--press) var(--ease-out), background var(--press) var(--ease-out);
+}
+
+.task-check:hover { border-color: var(--live); }
+.task-check:focus-visible { outline: none; box-shadow: var(--focus); }
+.task-check:disabled { opacity: 0.5; cursor: default; }
+
+.task-check--on {
+  border-color: var(--live);
+  background: var(--live);
+}
+
+.task-title { white-space: normal; }
+
+.task-row--done .task-title {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-faint);
+}
+
+/* Revealed on hover, and always present for the keyboard -- an action that
+   appears only on hover is unreachable without a pointer. */
+.task-drop {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--press) var(--ease-out);
+}
+
+.task-row:hover .task-drop,
+.task-drop:focus-visible { opacity: 1; }
+
+@media (hover: none) {
+  .task-drop { opacity: 1; }
+}
+
+.task-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px;
+  margin-bottom: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--canvas-deep);
+}
+
+.task-composer-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-composer-row input { flex: 1 1 180px; min-width: 0; }
+.task-composer .field-note { margin: 0; }
+
+@media (max-width: 560px) {
+  .task-composer-row .btn { flex: 1; justify-content: center; }
+}
+
+
+/* A credential that is set and shared: shown, not offered for editing. */
+.conn-locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--live-soft);
+  color: var(--live);
+}
+
+.conn-locked-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.conn-locked .mono {
+  display: inline-block;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}

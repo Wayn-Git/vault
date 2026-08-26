@@ -7,6 +7,7 @@ they are tested here as requests rather than as units.
 from __future__ import annotations
 
 import pytest
+from conftest import GOOGLE_SECRET
 from fastapi.testclient import TestClient
 
 from psok.api.main import _DIST, app
@@ -70,15 +71,15 @@ def test_a_secret_environment_variable_is_stored_outside_mcp_yaml(client, stdio_
     value belongs in the keychain; mcp.yaml gets a reference (ADR-0012)."""
     response = client.post(
         "/api/mcp/servers/envtest/env",
-        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": "hunter2", "secret": True},
+        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": GOOGLE_SECRET, "secret": True},
     )
     assert response.status_code == 200
     assert response.json()["stored"] == "keychain"
 
     stored = load_servers()["envtest"].env["GOOGLE_OAUTH_CLIENT_SECRET"]
     assert stored.startswith(KEYCHAIN_PREFIX)
-    assert "hunter2" not in config_path().read_text()
-    assert get_secret(stored[len(KEYCHAIN_PREFIX):]) == "hunter2"
+    assert GOOGLE_SECRET not in config_path().read_text()
+    assert get_secret(stored[len(KEYCHAIN_PREFIX):]) == GOOGLE_SECRET
 
 
 def test_a_plain_environment_variable_is_written_to_mcp_yaml(client, stdio_server):
@@ -92,17 +93,17 @@ def test_a_plain_environment_variable_is_written_to_mcp_yaml(client, stdio_serve
 def test_the_server_list_names_variables_but_never_returns_their_values(client, stdio_server):
     client.post(
         "/api/mcp/servers/envtest/env",
-        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": "hunter2", "secret": True},
+        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": GOOGLE_SECRET, "secret": True},
     )
     row = next(s for s in client.get("/api/mcp/servers").json() if s["name"] == "envtest")
     assert row["env"] == {"GOOGLE_OAUTH_CLIENT_SECRET": True}
-    assert "hunter2" not in client.get("/api/mcp/servers").text
+    assert GOOGLE_SECRET not in client.get("/api/mcp/servers").text
 
 
 def test_unsetting_forgets_the_variable_and_its_keychain_entry(client, stdio_server):
     client.post(
         "/api/mcp/servers/envtest/env",
-        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": "hunter2", "secret": True},
+        json={"key": "GOOGLE_OAUTH_CLIENT_SECRET", "value": GOOGLE_SECRET, "secret": True},
     )
     ref = load_servers()["envtest"].env["GOOGLE_OAUTH_CLIENT_SECRET"][len(KEYCHAIN_PREFIX):]
 

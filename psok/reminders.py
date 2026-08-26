@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from psok.db.repositories import TaskRepository
 from psok.notify import notify
@@ -49,7 +49,16 @@ SYNC_EVERY_SECONDS = 15 * 60
 
 
 def _now() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    """Local wall-clock time, naive -- the same clock `due_at` was written on.
+
+    Load-bearing, and not obvious. `resolve_date_hint` resolves "tomorrow at
+    five" against `datetime.now()`, so every `due_at` and `reminder_at` in the
+    database is local naive. Comparing those against UTC delivers every reminder
+    late by the machine's offset -- five and a half hours, silently, on the
+    machine this was found on. Timestamps here are compared as strings by
+    SQLite, so the two have to be the same clock or nothing lines up.
+    """
+    return datetime.now()
 
 
 def _describe(due: str, now: datetime) -> str:

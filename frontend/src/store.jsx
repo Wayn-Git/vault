@@ -145,6 +145,25 @@ export function AppProvider({ children }) {
     return true
   }, [activeId, refreshConvs, setActiveId, toast])
 
+  /** Delete every conversation.
+   *
+   *  Unlike the single delete there is never a next row to fall back to, so
+   *  Chat has to be told to start fresh: re-pointing `activeId` at null leaves
+   *  the transcript it already rendered on screen, under an empty rail. */
+  const deleteAllConversations = useCallback(async () => {
+    try {
+      const { deleted } = await api.deleteAllConversations()
+      await refreshConvs()
+      setActiveId(null)
+      chatRef.current.startFresh?.()
+      toast(`Deleted ${deleted} conversation${deleted === 1 ? '' : 's'}`, 'ok')
+      return deleted
+    } catch (err) {
+      toast(err.message, 'bad')
+      return null
+    }
+  }, [refreshConvs, setActiveId, toast])
+
   const refreshCaps = useCallback(async (scope = activeId) => {
     try {
       const next = await api.capabilities(scope || null)
@@ -207,7 +226,7 @@ export function AppProvider({ children }) {
     overlay, setOverlay,
     conversations, refreshConvs,
     activeId, setActiveId,
-    renaming, setRenaming, renameConversation, deleteConversation,
+    renaming, setRenaming, renameConversation, deleteConversation, deleteAllConversations,
     caps, refreshCaps, setCapEnabled, busyCap,
     workspace, setWorkspace,
     sidebar, setSidebar,
@@ -219,7 +238,7 @@ export function AppProvider({ children }) {
     conversations, refreshConvs, activeId, setActiveId, caps, refreshCaps,
     setCapEnabled, busyCap, workspace, setWorkspace, sidebar, setSidebar,
     capabilitiesTab, setCapabilitiesTab,
-    renaming, renameConversation, deleteConversation,
+    renaming, renameConversation, deleteConversation, deleteAllConversations,
   ])
 
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>

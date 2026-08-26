@@ -37,6 +37,7 @@ export const api = {
     j('/conversations', json('POST', { provider, model, title })),
   updateConversation: (id, patch) => j(`/conversations/${id}`, json('PATCH', patch)),
   deleteConversation: (id) => j(`/conversations/${id}`, json('DELETE')),
+  deleteAllConversations: () => j('/conversations', json('DELETE')),
   messages: (id) => j(`/conversations/${id}/messages`),
   pinMessage: (id, messageId, pinned) =>
     j(`/conversations/${id}/messages/${messageId}/pin`, json('POST', { pinned })),
@@ -103,6 +104,7 @@ export const api = {
   toggleMemory: (enabled, conversationId) =>
     j('/memory/toggle', json('POST', { enabled, conversation_id: conversationId || null })),
   forgetMemory: (id) => j(`/memory/${id}`, json('DELETE')),
+  forgetAllMemories: () => j('/memory', json('DELETE')),
 
   skills: () => j('/skills'),
   skillCatalogue: (refresh = false) => j(`/skills/catalogue${refresh ? '?refresh=true' : ''}`),
@@ -114,6 +116,10 @@ export const api = {
   tools: () => j('/tools'),
   tasks: (includeDone = false) => j(`/tasks?include_done=${includeDone ? 'true' : 'false'}`),
   calendar: (days = 14) => j(`/calendar?days=${days}`),
+  syncTasks: () => j('/tasks/sync', json('POST')),
+  createTask: (body) => j('/tasks', json('POST', body)),
+  updateTask: (id, patch) => j(`/tasks/${id}`, json('PATCH', patch)),
+  deleteTask: (id) => j(`/tasks/${id}`, json('DELETE')),
 
   // A browser cannot hand the agent a path, so the file is uploaded first and
   // the message carries where it landed.
@@ -154,6 +160,7 @@ export const api = {
   mcpLogin: (name, { force = false, accountHint = null } = {}) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/login`,
       json('POST', { force, account_hint: accountHint })),
+  mcpCancelLogin: (name) => j(`/mcp/servers/${name}/login`, json('DELETE')),
   mcpLogout: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/logout`, json('POST', {})),
   mcpAuthorizations: () => j('/mcp/authorizations'),
   // Start every switched-on connector now, the way the first turn would.

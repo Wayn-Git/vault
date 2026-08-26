@@ -7,6 +7,7 @@ run the same loop.
 
 from __future__ import annotations
 
+import json
 import platform
 import re
 from datetime import datetime
@@ -146,8 +147,31 @@ def _inline_skill(skill) -> str:
     )
 
 
+# Roles, delimiters and the framing every provider adds around a message.
+PER_MESSAGE_OVERHEAD = 32
+
+
 def estimate_tokens(text: str | None) -> int:
     return len(text or "") // CHARS_PER_TOKEN
+
+
+def message_tokens(message: dict) -> int:
+    """What one wire message really costs, envelope and tool calls included.
+
+    Budgeting on `content` alone counted an assistant turn whose entire payload
+    is a tool call as the empty string -- `content` is null on exactly those
+    messages, and the arguments live in `tool_calls`. A browser step carrying a
+    page snapshot, or a task created with a long body, went into the budget as
+    32 tokens and came out of the provider as an over-length request that failed
+    mid-generation with nothing in the transcript to explain it.
+    """
+    cost = estimate_tokens(message.get("content")) + PER_MESSAGE_OVERHEAD
+    calls = message.get("tool_calls")
+    if calls:
+        # Serialized rather than walked: the provider is billed for the JSON it
+        # receives, whatever shape the adapter gives it.
+        cost += estimate_tokens(json.dumps(calls, default=str))
+    return cost
 
 
 def to_wire_messages(history: list[Message]) -> list[dict]:
@@ -187,14 +211,14 @@ def budget_history(
     if available <= 0:
         return drop_leading_orphans(messages[-2:])
 
-    total = sum(estimate_tokens(m.get("content")) + 32 for m in messages)
+    total = sum(message_tokens(m) for m in messages)
     if total <= available:
         return messages
 
     kept: list[dict] = []
     running = 0
     for message in reversed(messages):
-        cost = estimate_tokens(message.get("content")) + 32
+        cost = message_tokens(message)
         if running + cost > available and kept:
             break
         kept.append(message)

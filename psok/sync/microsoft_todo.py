@@ -52,6 +52,7 @@ STATUS = {
 }
 
 PRIORITY = {"high": "high", "normal": "medium", "low": "low"}
+REVERSE_PRIORITY = {"high": "high", "medium": "normal", "low": "low"}
 
 
 class SyncUnavailable(RuntimeError):
@@ -143,6 +144,76 @@ def _items(payload: Any, *keys: str) -> list[dict]:
         if isinstance(found, list):
             return [item for item in found if isinstance(item, dict)]
     return []
+
+
+async def default_list_id(connection: Any) -> str | None:
+    """The list a task belongs in when nobody said which.
+
+    Microsoft marks one list `defaultList` -- it is "Tasks", the one To Do opens
+    on -- and that is where a task the user did not file belongs. Falling back to
+    the first list would put things in whichever list happened to sort first,
+    which is not a default so much as a coin toss.
+    """
+    payload = _payload(await connection.call("list_task_lists", {}))
+    lists = _items(payload, "lists", "taskLists")
+    for task_list in lists:
+        if task_list.get("wellknownListName") == "defaultList":
+            return task_list.get("id")
+    return lists[0].get("id") if lists else None
+
+
+async def create_remote_task(
+    title: str,
+    *,
+    notes: str | None = None,
+    due_at: str | None = None,
+    reminder_at: str | None = None,
+    priority: str | None = None,
+) -> dict[str, str] | None:
+    """Create this task in Microsoft To Do, if To Do is connected.
+
+    Returns the identity to mirror locally, or None when there is no connector
+    to write to -- which is the ordinary case on a machine that has not added
+    one, and not an error.
+
+    Timestamps go over as ISO-8601 local strings, which is what the server's own
+    schema documents for the host timezone. They are stored locally in exactly
+    that form, so no conversion happens on the way out and none is needed on the
+    way back.
+    """
+    from psok.mcp import live
+
+    connection = live.connection(SERVER)
+    if connection is None:
+        return None
+
+    list_id = await default_list_id(connection)
+    if not list_id:
+        raise SyncUnavailable("Microsoft To Do returned no lists to put a task in")
+
+    arguments: dict[str, Any] = {"listId": list_id, "title": title}
+    if notes:
+        arguments["body"] = notes
+    if due_at:
+        arguments["dueDateTime"] = due_at.replace(" ", "T")
+    if reminder_at:
+        arguments["reminderDateTime"] = reminder_at.replace(" ", "T")
+    if priority:
+        arguments["importance"] = REVERSE_PRIORITY.get(priority, "normal")
+
+    created = _payload(await connection.call("create_task", arguments))
+    if not isinstance(created, dict):
+        raise SyncUnavailable("Microsoft To Do did not describe the task it created")
+    # Some builds wrap the created item; accept either shape rather than failing
+    # over a nesting difference.
+    item = created.get("task") if isinstance(created.get("task"), dict) else created
+    external_id = item.get("id")
+    if not external_id:
+        raise SyncUnavailable("Microsoft To Do created the task but returned no id")
+    return {
+        "external_id": str(external_id),
+        "external_etag": item.get("lastModifiedDateTime") or item.get("@odata.etag") or "",
+    }
 
 
 async def sync(manager: Any) -> SyncReport:

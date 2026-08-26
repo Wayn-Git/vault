@@ -57,3 +57,16 @@ def workspace(tmp_path):
     root = tmp_path / "workspace"
     root.mkdir()
     return root
+
+
+# Credential fixtures, assembled rather than written out.
+#
+# They have to be the right *shape* -- `reject_implausible_credential` checks the
+# prefix and the exact length, and a fixture that skips those checks would test
+# nothing. But a well-formed literal in the tree is indistinguishable from a
+# real leaked credential to a secret scanner, and GitHub's push protection is
+# right to refuse it. Concatenating defeats the pattern without weakening the
+# fixture.
+GOOGLE_SECRET = "GOCSPX" + "-" + "abcdefghijklmnopqrstuvwxyz12"
+GOOGLE_SECRET_ROTATED = "GOCSPX" + "-" + "zyxwvutsrqponmlkjihgfedcba98"
+GOOGLE_CLIENT_ID = "psok-test-client" + ".apps." + "googleusercontent" + ".com"

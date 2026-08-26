@@ -156,6 +156,38 @@ function CredentialsForm({ server, onDone }) {
     }
   }
 
+  /* Once a secret is stored it is not editable here.
+     One OAuth client backs every connector in an account group, so overwriting
+     it is not a per-connector edit -- it takes all of them down at once, and
+     the only symptom is the provider refusing to exchange a token at the *end*
+     of a sign-in, a long way from the field that caused it. The backend refuses
+     the write too; this is the half that stops anyone reaching for it. */
+  const secretKey = server.client_secret_env
+  const locked = Boolean(secretKey && server.env?.[secretKey])
+  const sharedWith = server.shares_account_with || []
+
+  if (locked) {
+    return (
+      <div className="conn-setup-block">
+        <div className="conn-setup-title"><Icon name="key" size={13} /> Credentials</div>
+        <div className="conn-locked">
+          <Icon name="check" size={14} />
+          <div>
+            <div className="conn-locked-title">Client secret stored</div>
+            <div className="conn-setup-note" style={{ margin: 0 }}>
+              Held in the OS keychain
+              {sharedWith.length > 0
+                ? ` and shared with ${sharedWith.length} other connector${sharedWith.length === 1 ? '' : 's'}, so replacing it changes all of them.`
+                : '.'}
+              {' '}Replacing it is deliberate, from the terminal:
+              <span className="mono"> psok mcp env {server.name} {secretKey} &lt;value&gt; --secret --force</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="conn-setup-block">
       <div className="conn-setup-title"><Icon name="key" size={13} /> Credentials</div>
@@ -467,6 +499,154 @@ function CatalogueRow({ entry, busy, onAdd }) {
 
 const FEATURED = 8
 
+/* One sign-in, in the state it is actually in.
+
+   Every state is spelled out here because every one of them happened and none
+   of them had a screen. A link is only offered while it can still be used: an
+   expired one fails at the provider with a message about a state parameter,
+   which reads as PSOK being broken when the honest answer is "that took too
+   long, go again". */
+
+const AUTH_STATES = {
+  waiting: {
+    accent: 'waiting',
+    title: (name) => `Finish signing in to ${name}`,
+    note: 'A browser tab is open at the provider. This page updates itself when you are done.',
+  },
+  /* A flow that has started but has not asked for the user yet -- discovery,
+     token refresh, or a reconnect that needs no browser at all. Without a state
+     of its own the card only appeared once a URL existed, so a silent re-auth
+     looked like nothing happening. */
+  connecting: {
+    accent: 'waiting',
+    title: (name) => `Connecting to ${name}…`,
+    note: 'Checking the account already stored. This only needs you if the provider asks.',
+  },
+  done: {
+    accent: 'done',
+    icon: 'check',
+    title: (name) => `Connected to ${name}`,
+  },
+  failed: {
+    accent: 'failed',
+    icon: 'alert',
+    title: (name) => `Could not connect to ${name}`,
+    retry: 'Try again',
+  },
+  expired: {
+    accent: 'expired',
+    icon: 'clock',
+    title: (name) => `The ${name} sign-in link expired`,
+    note: 'Sign-in links are short-lived, so the provider will refuse this one. Start a new one.',
+    retry: 'Start again',
+  },
+  cancelled: {
+    accent: 'cancelled',
+    icon: 'x',
+    title: (name) => `${name} sign-in cancelled`,
+    note: 'Nothing was changed.',
+    retry: 'Try again',
+  },
+}
+
+/* The short code a device-code sign-in expects to be typed at the provider.
+   Shown large and monospaced because it is the one thing on the card the user
+   has to reproduce by hand, and copyable because typing it wrong is the most
+   likely way this fails. */
+function DeviceCode({ code, onCopy }) {
+  return (
+    <button type="button" className="auth-code" onClick={onCopy} title="Copy the code">
+      <span className="auth-code-value">{code}</span>
+      <Icon name="copy" size={13} />
+    </button>
+  )
+}
+
+function AuthCard({ auth, title, onRetry, onCancel, onDismiss, onCopy, onCopyCode }) {
+  const linkable = auth.status === 'waiting' && Boolean(auth.authorization_url)
+  const state = linkable
+    ? AUTH_STATES.waiting
+    : (auth.status === 'waiting' ? AUTH_STATES.connecting : AUTH_STATES[auth.status]) ??
+      AUTH_STATES.failed
+  const waiting = auth.status === 'waiting'
+  const [busy, setBusy] = useState(false)
+
+  return (
+    <div className={`auth-banner auth-banner--${state.accent}`} role="status">
+      <span className="auth-banner-icon">
+        {waiting ? <span className="auth-spinner" /> : <Icon name={state.icon} size={15} />}
+      </span>
+      <div className="auth-banner-body">
+        <div className="auth-banner-title">{state.title(title)}</div>
+        {auth.user_code && (
+          <div className="auth-banner-note">
+            Enter this code at the provider, then approve:
+          </div>
+        )}
+        {auth.user_code && <DeviceCode code={auth.user_code} onCopy={onCopyCode} />}
+        {(auth.message || (!auth.user_code && state.note)) && (
+          <div className="auth-banner-note">{auth.message || state.note}</div>
+        )}
+        {waiting && auth.expires_in > 0 && (
+          <div className="auth-banner-note auth-banner-meta">
+            Expires in {Math.ceil(auth.expires_in / 60)} min
+          </div>
+        )}
+      </div>
+      <div className="auth-banner-actions">
+        {linkable && (
+          <>
+            <button
+              type="button"
+              className="btn btn--small"
+              onClick={() => window.open(auth.authorization_url, '_blank', 'noopener')}
+            >
+              <Icon name="link" size={13} /> Open
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              title="Copy the sign-in link"
+              aria-label="Copy the sign-in link"
+              onClick={onCopy}
+            >
+              <Icon name="copy" size={13} />
+            </button>
+          </>
+        )}
+        {!waiting && state.retry && (
+          <button
+            type="button"
+            className="btn btn--small"
+            disabled={busy}
+            onClick={async () => { setBusy(true); try { await onRetry() } finally { setBusy(false) } }}
+          >
+            {busy ? 'Starting…' : state.retry}
+          </button>
+        )}
+        {waiting ? (
+          /* Closing the browser tab is how most abandoned sign-ins end, and
+             nothing told PSOK. Without this the card sits there, and a whole
+             subprocess sits behind it, until the deadline passes. */
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onCancel}
+            title="Cancel this sign-in"
+            aria-label="Cancel this sign-in"
+          >
+            <Icon name="x" size={14} />
+          </button>
+        ) : (
+          <button type="button" className="icon-btn" onClick={onDismiss} aria-label="Dismiss">
+            <Icon name="x" size={14} />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health } = useApp()
   const [servers, setServers] = useState([])
@@ -476,7 +656,6 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const [tools, setTools] = useState([])
   const [busy, setBusy] = useState({})
   const [open, setOpen] = useState(null)
-  const [help, setHelp] = useState(null)
   const [starting, setStarting] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -502,30 +681,57 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   /* `login` returns as soon as the flow starts, because a sign-in takes as long
      as the person takes. This poll is how the outcome arrives: an entry stays
-     `waiting` while they are with the provider, then turns `done` or `failed`
-     with the reason. Announcing a terminal one once, and refreshing on it, is
-     what makes a connector appear under Connected without a manual reload. */
-  const announced = useRef(new Set())
+     `waiting` while they are with the provider, then turns `done`, `failed`,
+     `cancelled` or `expired`. The card renders whichever it is, so nothing is
+     toasted here -- a toast that disappears is the wrong place for a state the
+     user has to act on. */
+  const settled = useRef(new Set())
   useEffect(() => {
-    const tick = setInterval(async () => {
+    let cancelled = false
+    const tick = async () => {
       let rows
       try { rows = await api.mcpAuthorizations() } catch { return }
+      if (cancelled) return
       setAuths(rows)
       for (const row of rows) {
-        if (row.status === 'waiting' || announced.current.has(row.server + row.finished_at)) continue
-        announced.current.add(row.server + row.finished_at)
-        if (row.status === 'done') {
-          toast(row.message || `Connected ${row.server}`, 'ok')
-        } else {
-          toast(`Could not connect ${row.server}`, 'bad')
-          setHelp({ server: row.server, text: row.message || 'the sign-in did not complete' })
-        }
+        const key = `${row.server}:${row.finished_at}`
+        if (row.status === 'waiting' || settled.current.has(key)) continue
+        settled.current.add(key)
         refresh()
         refreshHealth()
       }
-    }, 3000)
-    return () => clearInterval(tick)
-  }, [refresh, refreshHealth, toast])
+    }
+    const timer = setInterval(tick, 3000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [refresh, refreshHealth])
+
+  /* Start a sign-in again after one failed, expired, or was cancelled. The
+     backend supersedes the dead attempt rather than refusing as "already in
+     progress", so this is the only thing the user has to do. */
+  const retry = useCallback(async (name) => {
+    setAuths((rows) => rows.filter((r) => r.server !== name))
+    try {
+      await api.mcpLogin(name, {})
+    } catch (err) {
+      toast(err.message, 'bad')
+    }
+  }, [toast])
+
+  const dismissAuth = useCallback((name) => {
+    setAuths((rows) => rows.filter((r) => r.server !== name))
+  }, [])
+
+  /* Abandon a sign-in still in progress. It releases the callback port and, for
+     a server that runs its own flow, the subprocess held open behind it. */
+  const cancelAuth = useCallback(async (name) => {
+    setAuths((rows) => rows.filter((r) => r.server !== name))
+    try {
+      await api.mcpCancelLogin(name)
+    } catch (err) {
+      toast(err.message, 'bad')
+    }
+    refresh()
+  }, [refresh, toast])
 
   const act = useCallback(async (server, action, options = {}) => {
     setBusy((b) => ({ ...b, [server.name]: action }))
@@ -609,9 +815,18 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     return [on, off]
   }, [servers, live, q]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A finished sign-in stays listed briefly so its outcome cannot be missed.
-  // It is not something to offer a login link for.
-  const waitingAuths = useMemo(() => auths.filter((a) => a.status !== 'done' && a.status !== 'failed'), [auths])
+  const titleOf = useCallback(
+    (name) => servers.find((srv) => srv.name === name)?.title || name,
+    [servers],
+  )
+
+  /* Newest first: if two sign-ins are on screen the one just started is the one
+     being looked at. A `done` card is kept only briefly by the backend, which
+     is what stops this growing into a log. */
+  const authCards = useMemo(
+    () => [...auths].sort((a, b) => (a.status === 'waiting' ? -1 : 0) - (b.status === 'waiting' ? -1 : 0)),
+    [auths],
+  )
 
   const configured = useMemo(() => new Set(servers.map((s) => s.name)), [servers])
   const available = useMemo(() => catalogue.filter((entry) => {
@@ -682,37 +897,28 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   return (
     <>
-      {waitingAuths.length > 0 && (
-        <div className="auth-banner" data-enter>
-          <span>{waitingAuths.length} sign-in{waitingAuths.length > 1 ? 's' : ''} waiting:</span>
-          {waitingAuths.map((a) => (
-            <span key={a.server} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-              <button type="button" className="btn btn--small" onClick={() => window.open(a.authorization_url, '_blank', 'noopener')}>
-                <Icon name="link" size={13} /> open {a.server}
-              </button>
-              <button
-                type="button"
-                className="btn btn--ghost btn--small"
-                title="Copy the sign-in link"
-                onClick={async () => toast(
-                  await copyText(a.authorization_url) ? 'Sign-in link copied' : 'Could not copy — open it instead',
-                  'info',
-                )}
-              >
-                <Icon name="copy" size={13} />
-              </button>
-            </span>
+      {authCards.length > 0 && (
+        <div className="auth-stack">
+          {authCards.map((a) => (
+            <AuthCard
+              key={a.server}
+              auth={a}
+              title={titleOf(a.server)}
+              onRetry={() => retry(a.server)}
+              onCancel={() => cancelAuth(a.server)}
+              onDismiss={() => dismissAuth(a.server)}
+              onCopyCode={async () => toast(
+                await copyText(a.user_code) ? 'Code copied' : 'Could not copy — type it instead',
+                'info',
+              )}
+              onCopy={async () => toast(
+                await copyText(a.authorization_url)
+                  ? 'Sign-in link copied'
+                  : 'Could not copy — open it instead',
+                'info',
+              )}
+            />
           ))}
-        </div>
-      )}
-
-      {help && (
-        <div className="msg-note msg-note--guard" style={{ marginBottom: 16, whiteSpace: 'pre-wrap' }} data-enter>
-          <Icon name="key" size={15} />
-          <span>{help.text}</span>
-          <button type="button" className="icon-btn" style={{ marginLeft: 'auto' }} onClick={() => setHelp(null)} aria-label="Dismiss">
-            <Icon name="x" size={14} />
-          </button>
         </div>
       )}
 
