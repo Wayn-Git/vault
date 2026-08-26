@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from psok.db.repositories import ConversationRepository, TaskRepository
+from psok.mcp import commands as mcp_commands
+from psok.mcp.config import load_servers
 from psok.memory import MemoryStore
 
 # --- sign-in: a slow human is not a dead server -----------------------------
@@ -765,3 +768,84 @@ async def test_an_unreachable_list_never_loses_the_task(db, monkeypatch):
     assert not result.is_error
     assert "kept locally only" in result.content
     assert TaskRepository().upcoming(10)[0]["title"] == "Survives an outage"
+
+
+# --- the workspace must not take the connectors with it ---------------------
+
+
+def test_rebinding_keeps_live_connections_and_re_registers_their_tools(psok_home):
+    """The workspace root belongs to the builtin file tools, not to MCP.
+
+    Rebuilding both together meant every connector was torn down and respawned
+    whenever the root changed -- and it changed constantly, because the root was
+    the registry's cache key and every caller that is not a turn passes None.
+    A browser lost its pages, a signed-in server lost its session, and tool
+    calls came back "Connection closed" for several servers at once.
+
+    Mutation check: make `rebind` call `disconnect_server` and the connection
+    identity assertion fails.
+    """
+    from psok.mcp.client import DiscoveredTool
+    from psok.mcp.manager import MCPManager
+    from psok.tools.registry import ToolRegistry
+
+    mcp_commands.add_from_catalogue("memory")
+
+    class Live:
+        connected = True
+        tools = [DiscoveredTool(name="recall", description="", input_schema={})]
+
+    first = ToolRegistry()
+    manager = MCPManager(first)
+    manager.connections["memory"] = Live()
+    manager._register_tools(load_servers()["memory"], manager.connections["memory"])
+    assert [t.name for t in first.list() if t.server_name]
+
+    original = manager.connections["memory"]
+    second = ToolRegistry()
+    manager.rebind(second)
+
+    assert manager.registry is second
+    assert manager.connections["memory"] is original, "the session must survive"
+    assert [t.name for t in second.list() if t.server_name], "its tools move across"
+
+
+@pytest.mark.asyncio
+async def test_changing_the_workspace_does_not_shut_the_manager_down(psok_home, monkeypatch):
+    """A turn carries a workspace; a reconcile, a toggle and a connect do not.
+
+    Those two roots alternate all session, so a rebuild on every change is a
+    teardown on every change.
+    """
+    from psok.api import main
+
+    class FakeManager:
+        def __init__(self):
+            self.shutdowns = 0
+            self.rebinds = 0
+            self.connections = {}
+
+        async def shutdown(self):
+            self.shutdowns += 1
+
+        def rebind(self, registry):
+            self.rebinds += 1
+            return 0
+
+        async def reconcile(self):
+            return {}
+
+        def state(self):
+            return {}
+
+    fake = FakeManager()
+    monkeypatch.setitem(main._mcp, "manager", fake)
+    monkeypatch.setitem(main._mcp, "registry", object())
+    monkeypatch.setitem(main._mcp, "workspace", "/one")
+    monkeypatch.setitem(main._mcp, "errors", {})
+
+    await main._registry_for("/two")
+
+    assert fake.shutdowns == 0, "changing the workspace must not stop the connectors"
+    assert fake.rebinds == 1, "the builtins move to the new root instead"
+    assert main._mcp["workspace"] == str(Path("/two").expanduser().resolve())

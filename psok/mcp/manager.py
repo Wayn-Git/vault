@@ -162,6 +162,30 @@ class MCPManager:
         self._clear_failure(config.name)
         return self._register_tools(config, connection)
 
+    def rebind(self, registry: ToolRegistry) -> int:
+        """Move live connections onto a new registry without reconnecting them.
+
+        The workspace root is baked into the *builtin* tools -- it is what the
+        file tools are sandboxed to -- so changing it needs a new registry. It
+        has nothing to do with MCP: a connector is a process holding a session,
+        and which folder the file tools point at is not its business.
+
+        Rebuilding both together meant every connector was torn down and
+        respawned whenever the root changed, which it did constantly, because
+        the root was the cache key and half the callers had no workspace to pass.
+        A browser lost its pages, a signed-in server lost its session, and every
+        tool call in flight came back "Connection closed".
+        """
+        self.registry = registry
+        configured = load_servers()
+        total = 0
+        for name, connection in self.connections.items():
+            config = configured.get(name)
+            if config is None or not connection.connected:
+                continue
+            total += self._register_tools(config, connection)
+        return total
+
     def _register_tools(self, config: ServerConfig, connection: MCPConnection) -> int:
         registered = 0
         for discovered in connection.tools[:MAX_TOOLS_PER_SERVER]:

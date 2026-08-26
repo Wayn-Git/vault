@@ -153,6 +153,13 @@ cause.
   can fail over an already-open 200 by sending `{"error": …}`; that frame
   matched nothing and was discarded, so a stated refusal became a turn with no
   text and no reason.
+- **The workspace root was the registry's cache key**, and every caller that is
+  not a turn passes `None` — so a turn's configured workspace and `cwd()`
+  alternated all session, and each alternation tore down the whole MCP manager
+  and respawned every connector. Three servers answering "Connection closed" in
+  one turn was one teardown, not three faults. The root belongs to the builtin
+  file tools; `MCPManager.rebind` moves live connections onto the new registry
+  instead.
 - **A dropped MCP connection never recovered.** A stdio server that exits leaves
   the serving task alive on a dead pipe, so `connected` stays true and every
   later call answers "Connection closed" — three in a row in one observed turn,

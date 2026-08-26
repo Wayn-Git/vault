@@ -287,6 +287,21 @@ async def _registry_for(workspace: str | None, *, reuse_any: bool = False):
         if reuse_any and _mcp["registry"] is not None:
             root = _mcp["workspace"]
 
+        # A different workspace root needs different *builtin* tools, and
+        # nothing else. Connectors are processes holding sessions; which folder
+        # the file tools are sandboxed to is not their business. This used to
+        # rebuild both, so every alternation between a turn's workspace and the
+        # `None` every other caller passes tore down every connector and
+        # respawned it -- which is what put "Connection closed" behind three
+        # tool calls in a row, for three different servers at once.
+        if _mcp["registry"] is not None and _mcp["workspace"] != root:
+            log.info("workspace changed to %s; rebuilding builtins, keeping connectors", root)
+            registry = build_default_registry(
+                ConfirmationService(callback=_await_confirmation), workspace_root=root
+            )
+            _mcp["manager"].rebind(registry)
+            _mcp.update({"registry": registry, "workspace": root})
+
         if _mcp["registry"] is not None and _mcp["workspace"] == root:
             # Pick up connectors switched on or off since the registry was
             # built. Without this the toggle only took effect on restart, so a
