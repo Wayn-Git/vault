@@ -16,6 +16,10 @@ from typing import Any
 
 from psok.config import ProviderConfig
 from psok.runtime.http import post_json, stream_sse
+from psok.runtime.providers.openai_compat import (
+    ProviderStreamError,
+    _describe_provider_error,
+)
 from psok.runtime.types import (
     Capabilities,
     ModelParameters,
@@ -191,6 +195,14 @@ class AnthropicClient:
 
             kind = event.get("type")
             index = event.get("index", 0)
+
+            if kind == "error":
+                # Anthropic can fail over an already-open 200 the same way an
+                # OpenAI-compatible endpoint can. This branch did not exist, so
+                # an `overloaded_error` mid-stream matched nothing and was
+                # dropped -- surfacing as a truncated answer with no message, or
+                # as a redundant non-streaming retry into the same overload.
+                raise ProviderStreamError(_describe_provider_error(event.get("error")))
 
             if kind == "content_block_start":
                 block = event.get("content_block") or {}

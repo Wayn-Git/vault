@@ -1,4 +1,5 @@
 import {
+  Archive,
   ArrowDown,
   ArrowsClockwise,
   Books,
@@ -15,6 +16,7 @@ import {
   Key,
   Keyboard,
   Link,
+  ListBullets,
   ListChecks,
   MagnifyingGlass,
   NotePencil,
@@ -27,6 +29,8 @@ import {
   SlidersHorizontal,
   SquaresFour,
   Sparkle,
+  Star,
+  Sun,
   Stop,
   Terminal,
   Trash,
@@ -48,6 +52,7 @@ import {
 
 const MARKS = {
   alert: WarningCircle,
+  archive: Archive,
   book: Books,
   chat: ChatTeardropText,
   check: Check,
@@ -62,6 +67,7 @@ const MARKS = {
   key: Key,
   keyboard: Keyboard,
   link: Link,
+  list: ListBullets,
   logs: ListChecks,
   paperclip: Paperclip,
   pin: PushPin,
@@ -73,6 +79,8 @@ const MARKS = {
   sidebar: SidebarSimple,
   sliders: SlidersHorizontal,
   spark: Sparkle,
+  star: Star,
+  sun: Sun,
   grid: SquaresFour,
   folder: FolderOpen,
   globe: GlobeHemisphereWest,

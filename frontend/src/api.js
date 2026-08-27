@@ -114,7 +114,14 @@ export const api = {
   removeSkill: (name) => j(`/skills/${encodeURIComponent(name)}`, json('DELETE')),
 
   tools: () => j('/tools'),
-  tasks: (includeDone = false) => j(`/tasks?include_done=${includeDone ? 'true' : 'false'}`),
+  tasks: ({ bucket = 'all', listId = null, limit = 200 } = {}) =>
+    j(listId
+      ? `/tasks?list_id=${listId}&limit=${limit}`
+      : `/tasks?bucket=${encodeURIComponent(bucket)}&limit=${limit}`),
+  taskBuckets: () => j('/tasks/buckets'),
+  taskLists: () => j('/task-lists'),
+  createTaskList: (name) => j('/task-lists', json('POST', { name })),
+  renameTaskList: (id, name) => j(`/task-lists/${id}`, json('PATCH', { name })),
   calendar: (days = 14) => j(`/calendar?days=${days}`),
   syncTasks: () => j('/tasks/sync', json('POST')),
   createTask: (body) => j('/tasks', json('POST', body)),

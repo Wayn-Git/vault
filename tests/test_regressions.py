@@ -1265,7 +1265,7 @@ async def test_a_connector_switched_on_mid_session_becomes_usable(api, db, tmp_p
     connected: list[str] = []
 
     class FakeManager(MCPManager):
-        async def connect_server(self, config):
+        async def connect_server(self, config, **_):
             connected.append(config.name)
 
             async def handler(args, ctx):
@@ -1521,7 +1521,7 @@ async def test_switching_a_connector_on_starts_it_and_says_what_happened(api, db
     class FakeManager(MCPManager):
         fail = False
 
-        async def connect_server(self, config):
+        async def connect_server(self, config, **_):
             # Same contract as the real one: connecting an already-connected
             # server replaces it rather than colliding with its own tools.
             await self.disconnect_server(config.name)

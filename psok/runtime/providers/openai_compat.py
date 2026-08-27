@@ -9,6 +9,7 @@ supports an open-ended provider set with four adapters.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -81,6 +82,9 @@ def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         out.append({"role": role, "content": m.get("content") or ""})
     return out
+
+
+log = logging.getLogger(__name__)
 
 
 class ProviderStreamError(RuntimeError):
@@ -228,6 +232,7 @@ class OpenAICompatClient:
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         partial: dict[int, dict[str, Any]] = {}
+        dropped = 0
         finish_reason: str | None = None
         usage: dict[str, Any] = {}
 
@@ -237,6 +242,10 @@ class OpenAICompatClient:
             try:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
+                # Counted rather than silently dropped: a provider emitting
+                # subtly broken frames otherwise produces a blank or truncated
+                # answer with nothing anywhere to say why.
+                dropped += 1
                 continue
 
             # An OpenAI-compatible provider can report a failure *inside* the
@@ -286,14 +295,28 @@ class OpenAICompatClient:
             if slot["name"]
         ]
 
-        if not text_parts and not reasoning_parts and not calls:
+        if not text_parts and not calls:
             # Plenty of OpenAI-compatible servers ignore `stream: true` and
             # answer with an ordinary JSON body, which produces no SSE frames at
             # all. Yielding an empty response for that ended the turn with a
             # blank answer and no error anywhere -- so ask again without
             # streaming rather than reporting silence as an answer.
+            #
+            # Reasoning deliberately does not count as an answer here. A
+            # thinking model that spends its whole budget in `reasoning_content`
+            # and stops produced no text and no tool call, skipped this branch
+            # because `reasoning_parts` was non-empty, and the loop then burned
+            # both continuations before ending the turn on an empty bubble.
+            # Thinking is not a reply.
             yield StreamEvent(type="done", response=await self.complete(messages, tools, params))
             return
+
+        if dropped:
+            log.warning(
+                "%s sent %d frame(s) this stream that were not valid JSON; they were skipped",
+                self.model,
+                dropped,
+            )
 
         yield StreamEvent(
             type="done",

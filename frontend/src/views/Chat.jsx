@@ -14,8 +14,15 @@ import { MOD_LABEL } from '../keys.js'
    + menu beside it or the palette above it, so the surface stays one field and
    a sentence. */
 
-const FALLBACK_PROVIDER = 'nvidia'
-const FALLBACK_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b'
+/* No provider is special. This used to name one, which made every other
+   provider a second-class citizen of the composer's own defaulting. */
+
+/* How long a turn may say nothing at all before this interface stops believing
+   in it. Generous on purpose: a single tool call can take minutes and emit
+   nothing while it does, and a watchdog that fires on slow work would be worse
+   than the hang it replaces. It exists for the case the server can no longer
+   report -- a loop wedged on a dead socket, which used to need a page reload. */
+const SILENCE_LIMIT_MS = 180_000
 
 const OPENERS = [
   'What am I meant to be doing tomorrow?',
@@ -282,10 +289,10 @@ export default function Chat() {
 
   // What to use when nothing has been chosen: the house default if this machine
   // has it configured, otherwise whatever it does have.
-  const fallbackProvider = providers.includes(FALLBACK_PROVIDER) ? FALLBACK_PROVIDER : providers[0]
+  const fallbackProvider = providers[0]
   const draftProvider = draft.provider || fallbackProvider || ''
   const draftModel =
-    draft.model || defaults[draftProvider] || (draftProvider === FALLBACK_PROVIDER ? FALLBACK_MODEL : '')
+    draft.model || defaults[draftProvider] || ''
 
   const setBuffer = useCallback((t) => { liveRef.current.buffer = t; setLiveBuffer(t) }, [])
   const setTool = useCallback((t) => { liveRef.current.tool = t; setLiveTool(t) }, [])
@@ -454,12 +461,36 @@ export default function Chat() {
     setAtBottom(true)
     const controller = new AbortController()
     abortRef.current = controller
+
+    /* A wedged stream used to be unrecoverable without reloading the page.
+       `reader.read()` has no timeout, so a server-side loop stuck on a dead
+       socket left turnState 'running' forever: the composer disabled,
+       conversation switching refused, and Stop disabled too once pressed.
+
+       The watchdog is deliberately generous and reset by *every* frame, not
+       just text -- a tool call can legitimately take minutes and say nothing
+       while it does. It fires only when the connection has gone quiet
+       entirely, which is the one case the server can no longer report. */
+    let watchdog = null
+    const beat = () => {
+      clearTimeout(watchdog)
+      watchdog = setTimeout(() => {
+        if (turnTokenRef.current !== token || settledRef.current) return
+        pushNote('error', `No response from the server for ${SILENCE_LIMIT_MS / 1000}s. The turn may still be running; reload to reconnect.`)
+        settledRef.current = true
+        setTurnState('idle')
+        setStopping(false)
+        controller.abort()
+      }, SILENCE_LIMIT_MS)
+    }
+    beat()
+
     try {
       await api.turn({
         conversationId: cid,
         message,
         workspace: workspace.trim() || null,
-        onEvent,
+        onEvent: (evt) => { beat(); onEvent(evt) },
         signal: controller.signal,
       })
     } catch (err) {
@@ -468,7 +499,15 @@ export default function Chat() {
       if (err.name === 'AbortError') { if (!settledRef.current) pushNote('warning', 'Stopped.') }
       else pushNote('error', err.message)
     } finally {
+      clearTimeout(watchdog)
       if (turnTokenRef.current === token) {
+        /* A clean close with no terminal frame used to push nothing at all:
+           the composer re-enabled, the thinking indicator vanished, and if
+           nothing had streamed the turn simply evaporated. Silence is not an
+           answer, so say so. */
+        if (!settledRef.current) {
+          pushNote('error', 'The turn ended without a result. Nothing was returned.')
+        }
         runningRef.current = null
         finish()
       }
@@ -509,9 +548,16 @@ export default function Chat() {
     try {
       if (!cid) {
         if (!draftProvider) { toast('No provider is configured in providers.yaml', 'bad'); return }
+        /* Never invent a model name. Sending 'default' as a placeholder for
+           "health has not answered yet" put that literal string on the wire:
+           NVIDIA replied 404, and every turn in that conversation failed
+           forever with no way to correct it from here. The server fills in the
+           provider's declared default when the field is empty, and refuses
+           when there is none -- which is a rejected send, not a dead
+           conversation. */
         const { id } = await api.createConversation(
           draftProvider,
-          draftModel || 'default',
+          draftModel || '',
           (typed || attachments[0]?.name || 'untitled').slice(0, 56),
         )
         cid = id

@@ -9,6 +9,7 @@ requires while letting any caller invoke it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +56,18 @@ class DiscoveredTool:
     input_schema: dict[str, Any]
 
 
+async def _cancelled(future: asyncio.Future) -> None:
+    """Resolve when the caller stops waiting for this future.
+
+    A cancelled future is `done()`, so awaiting it raises immediately -- which
+    is the signal the serving loop needs to abandon the call it is running.
+    """
+    try:
+        await asyncio.shield(future)
+    except BaseException:
+        return
+
+
 @dataclass
 class CircuitBreaker:
     """Stops hammering a server that keeps failing (ADR-0007)."""
@@ -87,9 +100,14 @@ class CircuitBreaker:
 class MCPConnection:
     """Owns the lifecycle of one server session."""
 
-    def __init__(self, config: ServerConfig, *, open_browser: bool = True):
+    def __init__(
+        self, config: ServerConfig, *, open_browser: bool = True, interactive: bool = True
+    ):
         self.config = config
         self.open_browser = open_browser
+        # Whether a person is here to finish a sign-in. False refuses at the
+        # point the browser would open rather than waiting one out.
+        self.interactive = interactive
         self.tools: list[DiscoveredTool] = []
         self.breaker = CircuitBreaker()
         self.last_error: str | None = None
@@ -243,15 +261,36 @@ class MCPConnection:
                 if not future.done():
                     future.set_result(None)
                 return
-            try:
-                result = await asyncio.wait_for(
+            call = asyncio.ensure_future(
+                asyncio.wait_for(
                     session.call_tool(tool_name, arguments), timeout=self.config.timeout_seconds
                 )
+            )
+            # Abandoning the *waiter* is not abandoning the *work*. `call()`
+            # awaits a future; cancelling that left this loop still running the
+            # tool, and because it serves one queue in order, the abandoned call
+            # then blocked the next call to this connector for its full timeout
+            # -- a stall in the following turn with nothing to explain it. So
+            # the caller's cancellation is carried through to the call itself.
+            waiter = asyncio.ensure_future(_cancelled(future))
+            try:
+                done, _ = await asyncio.wait(
+                    {call, waiter}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if waiter in done:
+                    call.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await call
+                    continue
                 if not future.done():
-                    future.set_result(result)
+                    future.set_result(call.result())
             except Exception as exc:
                 if not future.done():
                     future.set_exception(exc)
+            finally:
+                waiter.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await waiter
 
     def _transport(self):
         cfg = self.config
@@ -267,7 +306,10 @@ class MCPConnection:
 
         auth = (
             build_auth_provider(
-                cfg, open_browser=self.open_browser, awaiting_user=self._awaiting_user
+                cfg,
+                open_browser=self.open_browser,
+                awaiting_user=self._awaiting_user,
+                interactive=self.interactive,
             )
             if cfg.oauth
             else None

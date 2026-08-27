@@ -1,0 +1,74 @@
+{
+  "skill_name": "3d-website-architect",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm building an AI code review platform called CodeLens AI. It analyzes pull requests, detects bugs, and suggests improvements using machine learning. I need a landing page that looks like something from Awwwards — dark theme, futuristic feel, with a 3D hero section that has floating geometric shapes or maybe a glowing AI brain/sphere. Include a features section with 4 capabilities (Bug Detection, Code Suggestions, Security Scanning, Performance Analysis), a 'How It Works' section with 3 steps, social proof logos, pricing with 3 tiers, and a final CTA. Use Next.js, TypeScript, Tailwind, Three.js with React Three Fiber, Framer Motion for scroll animations. Make it premium.",
+      "expected_output": "A complete Next.js + TypeScript + Tailwind project with a dark-themed landing page featuring a Three.js hero scene (floating geometry or AI sphere with bloom post-processing), glass navbar, social proof section, 4 feature cards with scroll-reveal animations, 3-step how-it-works section, glassmorphism pricing cards (3 tiers), testimonials, final CTA with ambient 3D background, and responsive footer. All sections use Framer Motion scroll animations. Mobile fallback for 3D. Production-ready component architecture.",
+      "files": [],
+      "expectations": [
+        "Uses Next.js App Router with TypeScript and Tailwind CSS",
+        "Dark theme with cohesive color palette (indigo/purple accent system)",
+        "Three.js / React Three Fiber hero scene with floating 3D elements",
+        "3D scene wrapped in Suspense with loading fallback",
+        "Bloom or post-processing on 3D elements for cinematic glow",
+        "Hero section has display-size typography (48px+) with gradient text",
+        "Features section shows 4 capabilities with icons and scroll-reveal animation",
+        "How It Works section with 3 numbered steps",
+        "Social proof section with company logos",
+        "Pricing section with 3 tiers, one visually highlighted as recommended",
+        "Glassmorphism styling on cards (backdrop-blur, translucent backgrounds)",
+        "Framer Motion scroll animations (fade + slide-in reveals, stagger on grids)",
+        "Responsive design with mobile breakpoints (hamburger nav, stacked cards)",
+        "3D fallback for mobile devices (CSS animation or static visual)",
+        "Component-based architecture with separate files for sections and 3D scenes",
+        "Consistent spacing scale and typography hierarchy throughout"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Build me a portfolio website for a creative studio called 'Nebula Creative'. They do branding, web design, and motion graphics. I want it to feel like an interactive art experience — bold typography, warm color palette (copper/gold accents on dark background), and a 3D hero with morphing organic shapes or a blob that reacts to the mouse cursor. The site should have: a dramatic hero with the studio name in huge type, a project showcase gallery with hover effects, an about section, a services breakdown (3 services), client testimonials, and a contact section. Use scroll-driven GSAP animations — text reveals, parallax layers. Next.js + Tailwind + Three.js. Make it feel like an award-winning creative agency site.",
+      "expected_output": "A premium creative studio portfolio using Next.js + Tailwind with warm dark theme (copper/gold accents). Features a Three.js hero with morphing blob or organic shape responding to mouse, GSAP scroll-driven text reveals and parallax, project gallery grid with hover effects, services section, testimonials, and contact form. Bold display typography with mixed weights. Feels like a top-tier creative agency website.",
+      "files": [],
+      "expectations": [
+        "Uses Next.js with TypeScript and Tailwind CSS",
+        "Dark background with warm color palette (copper, gold, terracotta accents)",
+        "Three.js hero scene with morphing organic shape (MeshDistortMaterial or custom shader)",
+        "Mouse-reactive 3D element (follows cursor or distorts on hover)",
+        "GSAP ScrollTrigger animations — text character reveals, parallax depth",
+        "Bold display typography (64px+) with a mix of weights and possibly italic accents",
+        "Project gallery with grid layout and interactive hover effects (scale, overlay reveal)",
+        "Services section showing 3 distinct services with descriptions",
+        "Client testimonials section with realistic placeholder content",
+        "Contact section with form or contact information",
+        "Scroll-driven animations feel choreographed — proper stagger and timing",
+        "Responsive design with mobile fallback for 3D and simplified animations",
+        "Generous spacing between sections (80px+ on desktop)",
+        "The overall design feels creative, bold, and agency-caliber — not template-like"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I need a landing page for a cybersecurity product called ShieldNet. It provides real-time threat detection and network monitoring for enterprise companies. The hero should have a 3D globe showing network connections or attack vectors with glowing cyan dots and connection arcs. Dark theme with cyan/teal accents. Sections: hero with headline 'Real-Time Threat Intelligence, Global Scale', trusted-by enterprise logos (Microsoft, Google, AWS, IBM, Cisco), 3 key features (Threat Detection, Network Monitoring, Incident Response) with icons, a live stats section showing numbers like '99.9% Uptime' and '2M+ Threats Blocked', a how-it-works section, pricing for Enterprise and Pro plans, and a strong CTA. Use React Three Fiber for the globe, Framer Motion for UI animations. Next.js + Tailwind.",
+      "expected_output": "A cybersecurity-themed Next.js landing page with dark theme and cyan accents. Features a 3D globe built with React Three Fiber showing connection points and arcs, enterprise-grade social proof, 3 feature cards, animated stat counters, how-it-works section, 2-tier enterprise pricing, and final CTA. The design conveys trust, security, and technical sophistication.",
+      "files": [],
+      "expectations": [
+        "Uses Next.js with TypeScript and Tailwind CSS",
+        "Dark theme with cyan/teal accent color system",
+        "3D globe visualization built with React Three Fiber",
+        "Globe has visible dots/nodes and connection arcs or lines",
+        "Globe rotates slowly with ambient animation",
+        "Hero headline matches or closely follows the requested text",
+        "Enterprise logo bar with at least 5 company names/logos",
+        "3 feature cards (Threat Detection, Network Monitoring, Incident Response)",
+        "Animated stat counters (numbers that count up on scroll)",
+        "How-it-works section with numbered steps",
+        "Pricing section with at least 2 tiers",
+        "Framer Motion scroll-reveal animations on sections",
+        "Responsive design — globe has mobile fallback",
+        "Typography hierarchy is clear with proper heading sizes",
+        "The design conveys enterprise-grade security and trust"
+      ]
+    }
+  ]
+}

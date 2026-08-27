@@ -317,6 +317,15 @@ Stopping is a request, not an abort: `Escape` asks the server to end the turn,
 which cancels the tool call in flight and closes the stream with a `guard`
 frame. Aborting the browser's read instead would leave the loop running.
 
+It now lands in about a second rather than whenever the current model call
+happens to finish. The event was previously only read between iterations, so
+pressing Stop during a model round trip did nothing until it returned — with a
+120s timeout and three retries, up to about eight minutes of a dead interface.
+The call is raced against the stop request, and cancelling it aborts the HTTP
+request rather than waiting for a response nobody wants. The same applies one
+layer down: cancelling a tool call now abandons the work, not just the waiter,
+so an abandoned call no longer blocks the next call to that connector.
+
 ## Attachments, and what a file means here
 
 A browser has no idea where a file is on disk, and PSOK's tools work on paths.

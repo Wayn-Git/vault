@@ -84,6 +84,34 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks(document_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON document_chunks(content_hash);
 
 
+-- The lists a task can belong to. Microsoft To Do owns these when an account is
+-- signed in: `external_id` is the Graph list id, and PSOK mirrors rather than
+-- invents. A list with no `external_id` is local-only, which is what a machine
+-- with no task connector gets.
+CREATE TABLE IF NOT EXISTS task_lists (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    external_source TEXT,
+    external_id     TEXT,
+    -- The list a task goes in when nobody said which. Graph flags exactly one
+    -- `defaultList`; locally there is one too, so "no list" is never a state.
+    is_default      INTEGER NOT NULL DEFAULT 0,
+    position        INTEGER,
+    -- Set when the list is gone upstream. Kept rather than deleted, for the
+    -- same reason a vanished task is cancelled: an outage and an emptied
+    -- account look identical and only one of them is recoverable.
+    retired_at      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_lists_external
+    ON task_lists(external_source, external_id)
+    WHERE external_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_lists_local_name
+    ON task_lists(name)
+    WHERE external_id IS NULL;
+
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     title                    TEXT NOT NULL,
@@ -108,10 +136,34 @@ CREATE TABLE IF NOT EXISTS tasks (
     external_id              TEXT,
     external_etag            TEXT,
     last_synced_at           TEXT,
+    -- Which list this belongs to. NULL only while a row predates the lists
+    -- table or the account has never been synced; the service resolves it to
+    -- the default on the next write.
+    list_id                  INTEGER REFERENCES task_lists(id),
+    -- Flagged by the user, not by the model. Distinct from `priority`, which
+    -- is To Do's `importance` and is advisory: a task can be important with no
+    -- deadline and no priority, which is the whole point of the bucket.
+    important                INTEGER NOT NULL DEFAULT 0,
+    -- The local date this was put in My Day, or NULL. A date rather than a
+    -- flag, so My Day empties itself at midnight without a job to do it --
+    -- and PSOK-local, because Graph does not expose My Day membership through
+    -- the scopes this connector holds.
+    my_day_on                TEXT,
+    completed_at             TEXT,
+    -- A local change that has not reached To Do yet. The push half of the sync
+    -- reads exactly this; cleared when the upstream write returns.
+    dirty_at                 TEXT,
     created_at               TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_list ON tasks(list_id, status);
+-- The three bucket scans, each of which runs on every Tasks page load.
+CREATE INDEX IF NOT EXISTS idx_tasks_my_day ON tasks(my_day_on) WHERE my_day_on IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_important ON tasks(important, status) WHERE important = 1;
+-- What the push half walks. Partial, because the overwhelming majority of rows
+-- are clean and a full scan every fifteen minutes would be pure waste.
+CREATE INDEX IF NOT EXISTS idx_tasks_dirty ON tasks(dirty_at) WHERE dirty_at IS NOT NULL;
 -- The scan the reminder tick runs, twice a minute, forever.
 CREATE INDEX IF NOT EXISTS idx_tasks_reminder ON tasks(reminded_at, reminder_at, due_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external

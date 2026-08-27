@@ -3081,10 +3081,198 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
    asking the model to, which is a model call and a permission prompt to change
    one column. */
 
+/* Rail beside the list, not a row of filter chips above it. A bucket is a place
+   you are in, and its count belongs next to its name -- the same argument the
+   conversation rail settles, for the same reason. */
+.task-layout {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.task-rail {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.task-rail-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
+}
+
+.task-rail-row:focus-visible { outline: none; box-shadow: var(--focus); }
+.task-rail-row.is-on { background: var(--surface); color: var(--text); }
+
+@media (hover: hover) and (pointer: fine) {
+  .task-rail-row:hover { background: var(--raised); color: var(--text); }
+}
+
+.task-rail-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-rail-count {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-rail-row.is-on .task-rail-count { color: var(--text-dim); }
+
+.task-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 16px 0 4px;
+  padding: 0 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.task-rail-empty {
+  padding: 4px 9px 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.task-pane-blurb {
+  margin: -4px 0 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+@media (max-width: 820px) {
+  .task-layout { grid-template-columns: minmax(0, 1fr); }
+  .task-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .task-rail-row { width: auto; }
+  .task-rail-head { width: 100%; margin-top: 8px; }
+}
+
 .task-row {
   display: flex;
   align-items: flex-start;
   gap: 12px;
+}
+
+/* Amber is "waiting on you" everywhere else in this interface, and an overdue
+   task is exactly that -- but only the overdue fact carries it. Colouring the
+   whole metadata line made five late tasks a wall of warning, which says less
+   than one marked word does. */
+.task-late-flag { color: var(--confirm); }
+
+/* The metadata line separates itself, so a missing field leaves no stray dot
+   and nothing has to filter a list before joining it. */
+.task-row .server-target {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 6px;
+}
+
+.task-row .server-target > span + span::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--text-faint);
+}
+
+.task-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--press) var(--ease-out);
+}
+
+.task-row:hover .task-actions,
+.task-actions:focus-within { opacity: 1; }
+
+@media (hover: none) {
+  .task-actions { opacity: 1; }
+}
+
+.task-star {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--press) var(--ease-out), color var(--press) var(--ease-out);
+}
+
+.task-row:hover .task-star,
+.task-star:focus-visible,
+.task-star.is-on { opacity: 1; }
+
+.task-star.is-on { color: var(--confirm); }
+
+/* Same reveal-on-hover rule as the star: present for the keyboard, quiet until
+   the row is being worked on. Lit when the task is in today, because that is a
+   state worth seeing without hovering every row to find it. */
+.task-sun {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity var(--press) var(--ease-out), color var(--press) var(--ease-out);
+}
+
+.task-row:hover .task-sun,
+.task-sun:focus-visible,
+.task-sun.is-on { opacity: 1; }
+
+.task-sun.is-on { color: var(--live); }
+
+@media (hover: none) {
+  .task-sun { opacity: 1; }
+}
+
+/* An empty view that offers a way out of being empty. */
+.empty-state--do {
+  align-items: flex-start;
+  gap: 12px;
+  text-align: left;
+}
+
+.empty-note {
+  margin-top: 4px;
+  max-width: 46ch;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (hover: none) {
+  .task-star { opacity: 1; }
 }
 
 .task-check {
@@ -3154,6 +3342,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 }
 
 .task-composer-row input { flex: 1 1 180px; min-width: 0; }
+.task-composer-row select { flex: 0 1 160px; min-width: 0; }
 .task-composer .field-note { margin: 0; }
 
 @media (max-width: 560px) {

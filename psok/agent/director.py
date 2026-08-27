@@ -8,6 +8,7 @@ user gains almost nothing from concurrency here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -56,6 +57,61 @@ CONTINUE_AFTER_TRUNCATION = (
     "Your previous message was cut off before it finished. Continue from"
     " exactly where it stopped. Do not repeat what you already wrote."
 )
+
+
+class Stopped(Exception):
+    """The user asked to stop while a model call was in flight.
+
+    Distinct from `CancelledError`, which also arrives when the *interface*
+    hangs up: one ends the turn with a `guard` frame the reader sees, the other
+    means there is nobody left to tell.
+    """
+
+
+async def _race_cancel(awaitable, cancel: asyncio.Event | None):
+    """Await something, but give up the moment the user asks to stop.
+
+    Stop used to be checked only between iterations of the loop, so pressing it
+    during a model call did nothing until that call returned -- with a 120s
+    timeout and three retries, up to about eight minutes of a dead interface.
+    Racing here is what makes the button mean what it says: cancelling the task
+    propagates into httpx and aborts the request itself rather than waiting for
+    a response nobody wants.
+    """
+    if cancel is None:
+        return await awaitable
+
+    work = asyncio.ensure_future(awaitable)
+    waiter = asyncio.ensure_future(cancel.wait())
+    try:
+        done, _ = await asyncio.wait({work, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if work in done:
+            return work.result()
+        work.cancel()
+        # Let the cancellation actually land before unwinding, so the socket is
+        # closed rather than left to a garbage collector.
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await work
+        raise Stopped
+    finally:
+        waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiter
+
+
+async def _stream_until_cancelled(stream, cancel: asyncio.Event | None):
+    """The provider's chunks, abandoned the moment the user asks to stop.
+
+    The wait before the first byte is the long one -- and the one a per-chunk
+    check cannot see -- so every step is raced, not just the gaps between them.
+    """
+    iterator = stream.__aiter__()
+    while True:
+        try:
+            chunk = await _race_cancel(iterator.__anext__(), cancel)
+        except StopAsyncIteration:
+            return
+        yield chunk
 
 
 @dataclass
@@ -115,6 +171,16 @@ class Director:
                 yield event
         except Exception as exc:
             yield Event("error", {"message": f"{type(exc).__name__}: {exc}"})
+        except BaseException as exc:
+            # `except Exception` does not catch CancelledError, which is what a
+            # server shutdown, a reload, or Starlette dropping the task raises
+            # here -- and a generator that raises out of an already-open SSE
+            # response ends a 200 body with no terminal frame. To a browser that
+            # is indistinguishable from a truncated download, so the interface
+            # sat on "Thinking" forever. Say what happened, then let it
+            # propagate: swallowing cancellation would keep the loop alive.
+            yield Event("error", {"message": f"the turn was interrupted: {type(exc).__name__}"})
+            raise
 
     async def _run(
         self,
@@ -198,8 +264,9 @@ class Director:
                 if self.stream and model.capabilities.streaming and hasattr(model.client, "stream"):
                     # Deltas go out as they arrive so the interface can render
                     # progressively; tool calls are only actionable once assembled.
-                    async for chunk in model.client.stream(
-                        wire, tools=tool_schemas, params=self.params
+                    async for chunk in _stream_until_cancelled(
+                        model.client.stream(wire, tools=tool_schemas, params=self.params),
+                        cancel,
                     ):
                         if chunk.type == "text" and chunk.text:
                             streamed_text.append(chunk.text)
@@ -220,12 +287,32 @@ class Director:
                             {"message": "the response was cut off before it finished"},
                         )
                 else:
-                    response = await model.client.complete(
-                        wire, tools=tool_schemas, params=self.params
+                    response = await _race_cancel(
+                        model.client.complete(wire, tools=tool_schemas, params=self.params),
+                        cancel,
                     )
+            except Stopped:
+                # Whatever had already streamed is on screen and is worth
+                # keeping; the rest of the turn is not.
+                partial = "".join(streamed_text).strip()
+                if partial:
+                    self.messages.append(conversation_id, "assistant", partial)
+                yield Event("guard", {"reason": "stopped by the user"})
+                self.conversations.touch(conversation_id)
+                return
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
-                self.messages.append(conversation_id, "assistant", f"[model error] {message}")
+                # Keep whatever already reached the user. Persisting only the
+                # error meant a partial answer they could read on screen
+                # vanished the moment they reloaded -- which reads as the turn
+                # having produced nothing at all.
+                partial = "".join(streamed_text).strip()
+                noted = f"[model error] {message}"
+                self.messages.append(
+                    conversation_id,
+                    "assistant",
+                    f"{partial}\n\n{noted}" if partial else noted,
+                )
                 yield Event("error", {"message": message})
                 return
 

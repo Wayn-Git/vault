@@ -3,6 +3,11 @@
 The model passes fuzzy hints ("tomorrow"); these tools resolve them
 deterministically through the scheduling engine and hand conflicts back through
 the loop rather than guessing (ADR-0010).
+
+Everything a task tool actually does lives in `psok.tasks.service`, which the
+API and the To Do sync also call. These handlers translate arguments in and
+phrase results out; they hold no logic of their own, because the three copies
+that used to hold it drifted apart in exactly the ways you would expect.
 """
 
 from __future__ import annotations
@@ -11,191 +16,176 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from psok.db.repositories import CalendarRepository, TaskRepository
+from psok.db.repositories import CalendarRepository, TaskListRepository, TaskRepository
 from psok.scheduling.engine import AmbiguousDate, find_conflicts, find_free_slot, resolve_date_hint
+from psok.tasks.service import TaskError, TaskService, describe_task
 from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 log = logging.getLogger(__name__)
 
-# Assumed length of a work block when the model gives no duration estimate.
-DEFAULT_WORK_BLOCK_MINUTES = 60
-
-
-async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
-    title = (args.get("title") or "").strip()
-    if not title:
-        return ToolResult.error("a task needs a title")
-
-    due_at = None
-    if args.get("due_date_hint"):
-        try:
-            due_at = resolve_date_hint(args["due_date_hint"])
-        except AmbiguousDate as exc:
-            return ToolResult.error(
-                f"{exc}. Ask the user for a specific date or time rather than guessing."
-            )
-
-    scheduled_at = None
-    if args.get("scheduled_hint"):
-        try:
-            scheduled_at = resolve_date_hint(args["scheduled_hint"])
-        except AmbiguousDate as exc:
-            return ToolResult.error(f"{exc}. Ask the user to clarify when they'll work on it.")
-
-    reminder_at = None
-    if args.get("reminder_hint"):
-        try:
-            reminder_at = resolve_date_hint(args["reminder_hint"])
-        except AmbiguousDate as exc:
-            return ToolResult.error(f"{exc}. Ask the user when they want to be reminded.")
-
-    duration = args.get("duration_estimate_minutes")
-
-    if scheduled_at:
-        # Without an estimate, assume a nominal block rather than skipping the
-        # check: silently booking over an existing event is the worse failure.
-        window = timedelta(minutes=int(duration) if duration else DEFAULT_WORK_BLOCK_MINUTES)
-        conflicts = find_conflicts(scheduled_at, scheduled_at + window)
-        if conflicts:
-            listed = "; ".join(f"'{c.title}' {c.starts_at} to {c.ends_at}" for c in conflicts)
-            return ToolResult.error(
-                f"the requested work time conflicts with: {listed}. Propose another slot"
-                " (find_free_slot can suggest one) or confirm with the user before overlapping."
-            )
-
-    # Where the task belongs, if the user keeps their tasks somewhere. A local
-    # row beside a connected To Do account is a second list nobody asked for:
-    # it does not reach the user's phone, does not appear in My Day, and drifts
-    # from the list they actually read. So the connected list is the default and
-    # the local row becomes its mirror.
-    external, routed_to = await _create_upstream(
-        title,
-        notes=args.get("notes"),
-        due_at=due_at,
-        reminder_at=reminder_at,
-        priority=args.get("priority"),
-    )
-
-    task_id = TaskRepository().create(
-        title,
-        notes=args.get("notes"),
-        due_at=due_at.isoformat() if due_at else None,
-        scheduled_at=scheduled_at.isoformat() if scheduled_at else None,
-        duration_estimate_minutes=int(duration) if duration else None,
-        priority=args.get("priority"),
-        source="agent",
-        reminder_at=reminder_at.isoformat() if reminder_at else None,
-        external_source=MICROSOFT_TODO if external else None,
-        external_id=external["external_id"] if external else None,
-        external_etag=(external.get("external_etag") or None) if external else None,
-    )
-    parts = [f"created task {task_id}: {title}"]
-    if due_at:
-        parts.append(f"due {due_at:%Y-%m-%d %H:%M}")
-    if scheduled_at:
-        parts.append(f"scheduled {scheduled_at:%Y-%m-%d %H:%M}")
-    if reminder_at:
-        parts.append(f"reminding at {reminder_at:%Y-%m-%d %H:%M}")
-    elif due_at:
-        parts.append("reminding at the deadline")
-    parts.append(routed_to)
-    return ToolResult.ok(", ".join(parts))
-
-
 MICROSOFT_TODO = "microsoft-todo"
 
 
-async def _create_upstream(
-    title: str,
-    *,
-    notes: str | None,
-    due_at,
-    reminder_at,
-    priority: str | None,
-) -> tuple[dict[str, str] | None, str]:
-    """Put the task in the user's real task list, where there is one.
+def _service() -> TaskService:
+    return TaskService()
 
-    Returns the identity to mirror and a phrase saying where it went, so the
-    model reports the truth rather than "created" for a row only PSOK can see.
 
-    A failure here is never fatal. Losing what the user asked for because their
-    task service was briefly unreachable would be a far worse outcome than a
-    local row that the next sync reconciles, so the task is always written
-    locally and the answer says the upstream write did not happen.
-    """
-    from psok.sync.microsoft_todo import create_remote_task
-
+async def create_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
     try:
-        external = await create_remote_task(
-            title,
-            notes=notes,
-            due_at=due_at.isoformat(sep=" ", timespec="seconds") if due_at else None,
-            reminder_at=(
-                reminder_at.isoformat(sep=" ", timespec="seconds") if reminder_at else None
-            ),
-            priority=priority,
+        written = await _service().create(
+            args.get("title") or "",
+            notes=args.get("notes"),
+            due_hint=args.get("due_date_hint"),
+            scheduled_hint=args.get("scheduled_hint"),
+            reminder_hint=args.get("reminder_hint"),
+            duration_estimate_minutes=args.get("duration_estimate_minutes"),
+            priority=args.get("priority"),
+            important=bool(args.get("important")),
+            add_to_my_day=bool(args.get("add_to_my_day")),
+            list_name=args.get("list"),
+            source="agent",
         )
-    except Exception as exc:
-        # SyncUnavailable and a transport failure land here alike: the user
-        # cares that it did not reach their list, not which layer said so.
-        log.info("could not create %r in Microsoft To Do: %s", title, exc)
-        return None, "kept locally only — Microsoft To Do could not be written to"
+    except TaskError as exc:
+        return ToolResult.error(str(exc))
+    return ToolResult.ok(_phrase(written))
 
-    if external is None:
-        return None, "kept in PSOK (no task connector is signed in)"
-    return external, "added to Microsoft To Do"
+
+async def create_tasks(args: dict[str, Any], _: ToolContext) -> ToolResult:
+    """Several tasks, one call.
+
+    "Add milk and eggs to groceries" is one intention. As two `create_task`
+    calls it costs two model round trips, which on a slow model is most of a
+    minute of waiting for something the user said in one breath.
+    """
+    titles = [t.strip() for t in (args.get("titles") or []) if str(t).strip()]
+    if not titles:
+        return ToolResult.error("create_tasks needs at least one title")
+
+    service = _service()
+    made: list[str] = []
+    failed: list[str] = []
+    routed = ""
+    for title in titles:
+        try:
+            written = await service.create(
+                title,
+                due_hint=args.get("due_date_hint"),
+                reminder_hint=args.get("reminder_hint"),
+                priority=args.get("priority"),
+                important=bool(args.get("important")),
+                add_to_my_day=bool(args.get("add_to_my_day")),
+                list_name=args.get("list"),
+                source="agent",
+            )
+        except TaskError as exc:
+            failed.append(f"{title} ({exc})")
+            continue
+        made.append(f"#{written.task_id} {title}")
+        routed = written.routed_to
+        where = written.list_ref
+
+    if not made:
+        return ToolResult.error("nothing was created: " + "; ".join(failed))
+
+    parts = [f"created {len(made)}: {', '.join(made)}"]
+    if where.name:
+        parts.append(f"in {where.name}")
+    if routed:
+        parts.append(routed)
+    if failed:
+        parts.append(f"could not create: {'; '.join(failed)}")
+    return ToolResult.ok(", ".join(parts))
+
+
+def _phrase(written) -> str:
+    row = TaskRepository().get(written.task_id)
+    parts = [f"created task {written.task_id}: {row['title']}"]
+    if row["due_at"]:
+        parts.append(f"due {row['due_at']}")
+    if row["scheduled_at"]:
+        parts.append(f"scheduled {row['scheduled_at']}")
+    if row["reminder_at"]:
+        parts.append(f"reminding at {row['reminder_at']}")
+    elif row["due_at"]:
+        parts.append("reminding at the deadline")
+    if row["important"]:
+        parts.append("marked important")
+    if row["my_day_on"]:
+        parts.append("in My Day")
+    if written.list_ref.name:
+        parts.append(f"in {written.list_ref.name}")
+        if written.list_ref.created:
+            parts.append(f"a new list, {written.list_ref.note}")
+    parts.append(written.routed_to)
+    return ", ".join(p for p in parts if p)
 
 
 async def update_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
-    repo = TaskRepository()
-    task_id = int(args["task_id"])
-    if repo.get(task_id) is None:
-        return ToolResult.error(f"no task with id {task_id}")
+    try:
+        written = await _service().update(
+            int(args["task_id"]),
+            title=args.get("title"),
+            notes=args.get("notes"),
+            status=args.get("status"),
+            priority=args.get("priority"),
+            important=args.get("important"),
+            add_to_my_day=args.get("add_to_my_day"),
+            list_name=args.get("list"),
+            due_hint=args.get("due_date_hint"),
+            scheduled_hint=args.get("scheduled_hint"),
+            reminder_hint=args.get("reminder_hint"),
+            duration_estimate_minutes=args.get("duration_estimate_minutes"),
+        )
+    except TaskError as exc:
+        return ToolResult.error(str(exc))
+    named = ", ".join(k for k in written.changed if k not in ("dirty_at", "reminded_at"))
+    return ToolResult.ok(f"updated task {written.task_id}: {named}")
 
-    fields: dict[str, Any] = {}
-    for key in ("title", "notes", "status", "priority", "duration_estimate_minutes"):
-        if args.get(key) is not None:
-            fields[key] = args[key]
-    for hint_key, column in (
-        ("due_date_hint", "due_at"),
-        ("scheduled_hint", "scheduled_at"),
-        ("reminder_hint", "reminder_at"),
-    ):
-        if args.get(hint_key):
-            try:
-                fields[column] = resolve_date_hint(args[hint_key]).isoformat()
-            except AmbiguousDate as exc:
-                return ToolResult.error(f"{exc}. Ask the user to clarify.")
-    if not fields:
-        return ToolResult.error("nothing to update")
 
-    # Moving the time a reminder is owed makes an already-delivered one stale:
-    # without this, pushing a task to tomorrow means never hearing about it
-    # again, because it was announced today.
-    if "reminder_at" in fields or "due_at" in fields:
-        fields["reminded_at"] = None
+async def list_task_lists(args: dict[str, Any], _: ToolContext) -> ToolResult:
+    rows = TaskListRepository().all()
+    if not rows:
+        return ToolResult.ok("no lists yet; tasks go to the default list")
+    counts = TaskRepository().counts()
+    lines = []
+    for row in rows:
+        open_tasks = counts.get(f"list:{row['id']}", 0)
+        mark = " (default)" if row["is_default"] else ""
+        where = "" if row["external_id"] else " — local only, not in Microsoft To Do"
+        lines.append(f"{row['name']}{mark}: {open_tasks} open{where}")
+    return ToolResult.ok("\n".join(lines))
 
-    repo.update(task_id, **fields)
-    return ToolResult.ok(f"updated task {task_id}: {', '.join(fields)}")
+
+BUCKETS = ("my_day", "missed", "important", "general", "completed", "all")
 
 
 async def list_upcoming(args: dict[str, Any], _: ToolContext) -> ToolResult:
-    rows = TaskRepository().upcoming(limit=int(args.get("limit") or 20))
+    """Open tasks, or one named bucket, or one named list."""
+    tasks = TaskRepository()
+    lists = TaskListRepository()
+    limit = int(args.get("limit") or 20)
+
+    wanted_list = (args.get("list") or "").strip()
+    if wanted_list:
+        row = lists.by_name(wanted_list)
+        if row is None:
+            known = ", ".join(r["name"] for r in lists.all()) or "none yet"
+            return ToolResult.error(f"there is no list called '{wanted_list}'. Lists: {known}")
+        rows = tasks.bucket("list", list_id=row["id"], limit=limit)
+        heading = row["name"]
+    else:
+        bucket = (args.get("bucket") or "all").strip()
+        if bucket not in BUCKETS:
+            return ToolResult.error(f"bucket must be one of {', '.join(BUCKETS)}")
+        rows = tasks.bucket(bucket, limit=limit)
+        heading = bucket.replace("_", " ")
+
     if not rows:
-        return ToolResult.ok("no open tasks")
-    lines = []
-    for r in rows:
-        bits = [f"#{r['id']} {r['title']} [{r['status']}]"]
-        if r["due_at"]:
-            bits.append(f"due {r['due_at']}")
-        if r["scheduled_at"]:
-            bits.append(f"scheduled {r['scheduled_at']}")
-        if r["reminder_at"]:
-            bits.append(f"reminder {r['reminder_at']}")
-        if r["external_source"]:
-            bits.append(f"from {r['external_source']}")
-        lines.append(" | ".join(bits))
-    return ToolResult.ok("\n".join(lines))
+        return ToolResult.ok(f"no tasks in {heading}")
+
+    names = {row["id"]: row["name"] for row in lists.all(include_retired=True)}
+    lines = [describe_task(r, names.get(r["list_id"])) for r in rows]
+    return ToolResult.ok(f"{heading} ({len(rows)}):\n" + "\n".join(lines))
 
 
 async def find_free_slot_tool(args: dict[str, Any], _: ToolContext) -> ToolResult:
@@ -254,6 +244,11 @@ async def list_calendar(args: dict[str, Any], _: ToolContext) -> ToolResult:
 
 
 _HINT = "Natural language is fine ('tomorrow', 'next tuesday at 3pm'); it is resolved exactly."
+_LIST = (
+    "Which of the user's lists it goes in, by name -- 'Groceries', 'College'."
+    " Matched loosely against the lists they have; a name that matches none creates"
+    " a new list. Omit it and the task goes to their default list."
+)
 
 
 def tools() -> list[Tool]:
@@ -280,11 +275,50 @@ def tools() -> list[Tool]:
                     },
                     "duration_estimate_minutes": {"type": "integer"},
                     "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "list": {"type": "string", "description": _LIST},
+                    "important": {
+                        "type": "boolean",
+                        "description": "The user flagged this as important. Independent of any"
+                        " deadline: an important task with no date is a normal thing.",
+                    },
+                    "add_to_my_day": {
+                        "type": "boolean",
+                        "description": "Put it in today's My Day. Use when the user says they"
+                        " will do it today, which is different from it being due today.",
+                    },
                 },
                 "required": ["title"],
             },
             handler=create_task,
             risk=RiskLevel.MEDIUM,
+        ),
+        Tool(
+            name="create_tasks",
+            description="Create several tasks at once, sharing a list and dates. Prefer this"
+            " over repeated create_task calls when the user names more than one thing:"
+            " 'add milk and eggs to groceries' is one call, not two.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "titles": {"type": "array", "items": {"type": "string"}},
+                    "list": {"type": "string", "description": _LIST},
+                    "due_date_hint": {"type": "string", "description": f"Deadline. {_HINT}"},
+                    "reminder_hint": {"type": "string", "description": f"Reminder. {_HINT}"},
+                    "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "important": {"type": "boolean"},
+                    "add_to_my_day": {"type": "boolean"},
+                },
+                "required": ["titles"],
+            },
+            handler=create_tasks,
+            risk=RiskLevel.MEDIUM,
+        ),
+        Tool(
+            name="list_task_lists",
+            description="The user's task lists, with how many open tasks each holds.",
+            parameters={"type": "object", "properties": {}},
+            handler=list_task_lists,
+            risk=RiskLevel.LOW,
         ),
         Tool(
             name="update_task",
@@ -299,7 +333,13 @@ def tools() -> list[Tool]:
                         "type": "string",
                         "enum": ["todo", "in_progress", "done", "cancelled"],
                     },
-                    "priority": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "important": {"type": "boolean"},
+                    "add_to_my_day": {
+                        "type": "boolean",
+                        "description": "true puts it in today's My Day, false takes it out.",
+                    },
+                    "list": {"type": "string", "description": _LIST},
                     "due_date_hint": {"type": "string"},
                     "scheduled_hint": {"type": "string"},
                     "reminder_hint": {
@@ -316,8 +356,24 @@ def tools() -> list[Tool]:
         ),
         Tool(
             name="list_upcoming",
-            description="List open tasks, soonest deadline first.",
-            parameters={"type": "object", "properties": {"limit": {"type": "integer"}}},
+            description="List tasks: everything open by default, or one bucket, or one list.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "bucket": {
+                        "type": "string",
+                        "enum": list(BUCKETS),
+                        "description": "my_day is what the user means to do today; missed is"
+                        " overdue and still open; important is flagged regardless of date;"
+                        " general has no date at all.",
+                    },
+                    "list": {
+                        "type": "string",
+                        "description": "Only tasks in this list. Overrides bucket.",
+                    },
+                    "limit": {"type": "integer"},
+                },
+            },
             handler=list_upcoming,
             risk=RiskLevel.LOW,
         ),

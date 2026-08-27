@@ -1,20 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
 
-/* What the agent put in the diary.
+/* The task list, in the shape people already keep tasks in.
 
-   Tasks and calendar events are created by the scheduling tools during a turn.
-   Reading them back through a model call would be absurd, so this view reads
-   the same rows the tools wrote. */
+   Buckets are computed on the server, never stored: "missed" is a query, not a
+   flag someone has to set and something has to unset. The counts and the rows
+   come from the same predicate, so a rail saying 5 over a list of 4 is not a
+   state this can reach.
+
+   My Day is PSOK's own. Graph exposes My Day membership through fields this
+   connector's scopes do not reach, so the page says so rather than implying a
+   list that silently differs from the phone. */
+
+const BUCKETS = [
+  { id: 'my_day', label: 'My Day', icon: 'sun', blurb: 'What you mean to do today.' },
+  { id: 'missed', label: 'Missed', icon: 'clock', blurb: 'Past its deadline and still open.' },
+  { id: 'important', label: 'Important', icon: 'star', blurb: 'Flagged, whatever the date.' },
+  { id: 'general', label: 'General', icon: 'list', blurb: 'No date attached.' },
+  { id: 'all', label: 'All open', icon: 'check', blurb: 'Everything still to do.' },
+  { id: 'completed', label: 'Completed', icon: 'archive', blurb: 'Done. Cancelled is not done.' },
+]
 
 function when(value) {
   if (!value) return null
   const date = new Date(value.replace(' ', 'T'))
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function isOverdue(task) {
+  if (!task.due_at || task.status === 'done' || task.status === 'cancelled') return false
+  return new Date(task.due_at.replace(' ', 'T')) < new Date(new Date().toDateString())
 }
 
 /* What the reminder loop will do with this row, in the row's own words.
@@ -28,15 +47,22 @@ function reminder(task) {
 }
 
 /* Adding a task without a model call.
+
    The date is typed the way it is spoken -- "tomorrow", "friday 5pm" -- and
    resolved on the server by the same scheduling engine the agent's tools use,
    so a task typed here and one created in a turn cannot disagree about what
-   "tomorrow" means. */
-function Composer({ onAdded, onCancel }) {
+   "tomorrow" means. Every field the API accepts is here: the composer used to
+   offer three of them, which made the browser the least capable way to make a
+   task. */
+function Composer({ lists, presetList, onAdded, onCancel }) {
   const { toast } = useApp()
   const [title, setTitle] = useState('')
   const [due, setDue] = useState('')
   const [remind, setRemind] = useState('')
+  const [notes, setNotes] = useState('')
+  const [list, setList] = useState(presetList || '')
+  const [important, setImportant] = useState(false)
+  const [myDay, setMyDay] = useState(false)
   const [busy, setBusy] = useState(false)
   const ready = title.trim().length > 0
 
@@ -45,13 +71,17 @@ function Composer({ onAdded, onCancel }) {
     if (!ready || busy) return
     setBusy(true)
     try {
-      await api.createTask({
+      const made = await api.createTask({
         title: title.trim(),
+        notes: notes.trim() || null,
         due_date_hint: due.trim() || null,
         reminder_hint: remind.trim() || null,
+        list: list || null,
+        important,
+        add_to_my_day: myDay,
       })
-      setTitle(''); setDue(''); setRemind('')
-      toast('Task added', 'ok')
+      setTitle(''); setDue(''); setRemind(''); setNotes('')
+      toast(made.routed_to ? `Task added — ${made.routed_to}` : 'Task added', 'ok')
       onAdded()
     } catch (err) {
       toast(err.message, 'bad')
@@ -82,6 +112,34 @@ function Composer({ onAdded, onCancel }) {
           aria-label="Reminder"
           onChange={(e) => setRemind(e.target.value)}
         />
+        <select value={list} aria-label="List" onChange={(e) => setList(e.target.value)}>
+          <option value="">Default list</option>
+          {lists.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+        </select>
+      </div>
+      <div className="task-composer-row">
+        <input
+          value={notes}
+          placeholder="Notes — optional"
+          aria-label="Notes"
+          onChange={(e) => setNotes(e.target.value)}
+        />
+        <button
+          type="button"
+          className={`btn btn--small${important ? ' btn--primary' : ' btn--ghost'}`}
+          aria-pressed={important}
+          onClick={() => setImportant((v) => !v)}
+        >
+          <Icon name="star" size={13} /> Important
+        </button>
+        <button
+          type="button"
+          className={`btn btn--small${myDay ? ' btn--primary' : ' btn--ghost'}`}
+          aria-pressed={myDay}
+          onClick={() => setMyDay((v) => !v)}
+        >
+          <Icon name="sun" size={13} /> My Day
+        </button>
         <button type="submit" className="btn btn--primary btn--small" disabled={!ready || busy}>
           {busy ? 'Adding…' : 'Add'}
         </button>
@@ -100,9 +158,14 @@ function Composer({ onAdded, onCancel }) {
 export default function Tasks() {
   const rootRef = useRef(null)
   const { toast, setView, chat } = useApp()
+  const [view, setViewKey] = useState({ bucket: 'my_day', listId: null })
+  // Whether the landing view has already been settled for this mount. My Day is
+  // the right place to start a day and the wrong place to start a session that
+  // has nothing in it -- an empty default view reads as a broken page.
+  const landed = useRef(false)
   const [tasks, setTasks] = useState([])
+  const [counts, setCounts] = useState({ buckets: {}, lists: [], connected: false })
   const [events, setEvents] = useState([])
-  const [includeDone, setIncludeDone] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [busyTask, setBusyTask] = useState(null)
@@ -110,20 +173,40 @@ export default function Tasks() {
 
   const load = useCallback(async () => {
     try {
-      const [t, c] = await Promise.all([api.tasks(includeDone), api.calendar(21)])
-      setTasks(t)
-      setEvents(c)
+      const [rows, summary, cal] = await Promise.all([
+        api.tasks(view.listId ? { listId: view.listId } : { bucket: view.bucket }),
+        api.taskBuckets(),
+        api.calendar(21),
+      ])
+      setTasks(rows)
+      setCounts(summary)
+      setEvents(cal)
     } catch (err) {
       toast(err.message, 'bad')
     }
-  }, [includeDone, toast])
+  }, [view, toast])
 
   useEffect(() => { load() }, [load])
 
-  const setStatus = useCallback(async (task, status) => {
+  useEffect(() => {
+    // `counts` starts as an empty shape, and `{}` is truthy -- so guarding on
+    // its presence settled the landing view against zeroes before the first
+    // response arrived, and then refused to reconsider. Wait for real data.
+    if (landed.current || !counts.buckets || Object.keys(counts.buckets).length === 0) return
+    const { my_day: myDay = 0, missed = 0, all = 0 } = counts.buckets
+    landed.current = true
+    if (myDay > 0) return
+    // Nothing chosen for today: show the thing that most wants attention rather
+    // than an empty room.
+    if (missed > 0) setViewKey({ bucket: 'missed', listId: null })
+    else if (all > 0) setViewKey({ bucket: 'all', listId: null })
+  }, [counts])
+
+  const patch = useCallback(async (task, body, note) => {
     setBusyTask(task.id)
     try {
-      await api.updateTask(task.id, { status })
+      await api.updateTask(task.id, body)
+      if (note) toast(note, 'ok')
       await load()
     } catch (err) {
       toast(err.message, 'bad')
@@ -144,8 +227,9 @@ export default function Tasks() {
     }
   }, [load, toast])
 
-  /* Microsoft To Do is pulled on a fifteen-minute loop while PSOK is up. This
-     is the same pull on demand, for the minute after someone signs in. */
+  /* Microsoft To Do is pushed and pulled on a fifteen-minute loop while PSOK is
+     up. This is the same sync on demand, for the minute after someone signs in
+     or ticks something they want on their phone now. */
   const sync = useCallback(async () => {
     setSyncing(true)
     try {
@@ -159,24 +243,39 @@ export default function Tasks() {
     }
   }, [load, toast])
 
+  const newList = useCallback(async () => {
+    const name = window.prompt('Name the list')
+    if (!name?.trim()) return
+    try {
+      const made = await api.createTaskList(name.trim())
+      toast(made.note ? `List created — ${made.note}` : 'List created', 'ok')
+      await load()
+    } catch (err) {
+      toast(err.message, 'bad')
+    }
+  }, [load, toast])
+
+  const active = useMemo(() => {
+    if (view.listId) {
+      const found = counts.lists.find((l) => l.id === view.listId)
+      return { label: found?.name || 'List', blurb: found?.external_id ? null : LOCAL_ONLY }
+    }
+    return BUCKETS.find((b) => b.id === view.bucket) || BUCKETS[0]
+  }, [view, counts])
+
   return (
     <div className="view" ref={rootRef}>
-      <div className="view-inner">
+      <div className="view-inner view-inner--wide">
         <header className="vheader" data-enter>
           <div>
-            <h1>Tasks and calendar</h1>
+            <h1>Tasks</h1>
             <div className="vheader-sub">
-              Created by the agent during a turn, resolved against the real clock rather than guessed.
+              {counts.connected
+                ? 'Tasks, lists, dates and importance sync both ways with Microsoft To Do. My Day is PSOK\u2019s own \u2014 Microsoft does not share it.'
+                : 'Kept in PSOK. Sign in to Microsoft To Do from Connectors and these follow you.'}
             </div>
           </div>
           <div className="vheader-actions">
-            <button
-              type="button"
-              className={`btn btn--small${includeDone ? ' btn--primary' : ' btn--ghost'}`}
-              onClick={() => setIncludeDone((d) => !d)}
-            >
-              {includeDone ? 'Showing done' : 'Hiding done'}
-            </button>
             <button
               type="button"
               className="btn btn--primary btn--small"
@@ -187,98 +286,248 @@ export default function Tasks() {
             <button type="button" className="btn btn--ghost" disabled={syncing} onClick={sync}>
               <Icon name="refresh" size={15} /> {syncing ? 'Syncing…' : 'Sync To Do'}
             </button>
-            <button type="button" className="btn btn--ghost" onClick={load}>
-              <Icon name="refresh" size={15} /> Refresh
-            </button>
           </div>
         </header>
 
-        <div className="card card-pad" style={{ marginBottom: 22 }} data-enter>
-          <div className="card-title">tasks · {tasks.length}</div>
-          {adding && <Composer onAdded={load} onCancel={() => setAdding(false)} />}
-          {tasks.length === 0 && (
-            <div className="empty-state" style={{ padding: 18 }}>
-              <Icon name="check" size={20} />
-              Nothing on the list. Add one above, or ask PSOK to remember something to do.
+        <div className="task-layout" data-enter>
+          <nav className="task-rail" aria-label="Task views">
+            {BUCKETS.map((bucket) => (
+              <button
+                key={bucket.id}
+                type="button"
+                className={`task-rail-row${!view.listId && view.bucket === bucket.id ? ' is-on' : ''}`}
+                aria-current={!view.listId && view.bucket === bucket.id}
+                onClick={() => setViewKey({ bucket: bucket.id, listId: null })}
+              >
+                <Icon name={bucket.icon} size={15} />
+                <span className="task-rail-label">{bucket.label}</span>
+                <span className="task-rail-count">{counts.buckets?.[bucket.id] ?? 0}</span>
+              </button>
+            ))}
+
+            <div className="task-rail-head">
+              <span>Lists</span>
+              <button type="button" className="icon-btn" title="New list" onClick={newList}>
+                <Icon name="plus" size={13} />
+              </button>
             </div>
-          )}
-          {tasks.map((task) => {
-            const done = task.status === 'done'
-            return (
-              <div className={`server-row task-row${done ? ' task-row--done' : ''}`} key={task.id}>
-                {/* The checkbox is the whole point of a task list, and there was
-                    no way to tick one: marking something done meant asking the
-                    model to, which is a model call to change one column. */}
-                <button
-                  type="button"
-                  className={`task-check${done ? ' task-check--on' : ''}`}
-                  disabled={busyTask === task.id}
-                  aria-label={done ? `Mark ${task.title} not done` : `Mark ${task.title} done`}
-                  aria-pressed={done}
-                  onClick={() => setStatus(task, done ? 'todo' : 'done')}
-                >
-                  {done && <Icon name="check" size={12} />}
-                </button>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="server-name task-title">{task.title}</div>
-                  <div className="server-target">
-                    {[
-                      task.status,
-                      task.priority ? `${task.priority} priority` : null,
-                      task.due_at ? `due ${when(task.due_at)}` : null,
-                      task.scheduled_at ? `scheduled ${when(task.scheduled_at)}` : null,
-                      reminder(task),
-                      task.external_source ? `from ${task.external_source}` : null,
-                    ].filter(Boolean).join(' · ')}
+            {counts.lists.length === 0 && (
+              <div className="task-rail-empty">No lists yet.</div>
+            )}
+            {counts.lists.map((l) => (
+              <button
+                key={l.id}
+                type="button"
+                className={`task-rail-row${view.listId === l.id ? ' is-on' : ''}`}
+                aria-current={view.listId === l.id}
+                onClick={() => setViewKey({ bucket: 'all', listId: l.id })}
+              >
+                <Icon name={l.external_id ? 'list' : 'alert'} size={15} />
+                <span className="task-rail-label">{l.name}</span>
+                <span className="task-rail-count">{l.open}</span>
+              </button>
+            ))}
+          </nav>
+
+          <section className="task-pane">
+            <div className="card card-pad">
+              <div className="card-title">
+                {active.label} · {tasks.length}
+              </div>
+              {active.blurb && <div className="task-pane-blurb">{active.blurb}</div>}
+              {view.bucket === 'my_day' && !view.listId && (
+                <div className="task-pane-blurb">
+                  My Day is PSOK&rsquo;s own. Microsoft&rsquo;s Graph API returns no My Day
+                  field at all, so what you put here stays on this machine and what is in To
+                  Do&rsquo;s My Day cannot be read.
+                </div>
+              )}
+
+              {adding && (
+                <Composer
+                  lists={counts.lists}
+                  presetList={counts.lists.find((l) => l.id === view.listId)?.name}
+                  onAdded={load}
+                  onCancel={() => setAdding(false)}
+                />
+              )}
+
+              {tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
+                <div className="empty-state empty-state--do" style={{ padding: 18 }}>
+                  <Icon name="sun" size={20} />
+                  <div>
+                    <div>Nothing picked for today yet.</div>
+                    <div className="empty-note">
+                      A task lands here when it is due today, or when you put it here with
+                      the sun. Nothing fills it on its own — that is what makes it a choice.
+                    </div>
+                    <div className="empty-actions">
+                      {counts.buckets?.missed > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn--small"
+                          onClick={() => setViewKey({ bucket: 'missed', listId: null })}
+                        >
+                          Start with the {counts.buckets.missed} overdue
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn--small"
+                        onClick={() => setViewKey({ bucket: 'all', listId: null })}
+                      >
+                        Pick from all {counts.buckets?.all ?? 0}
+                      </button>
+                    </div>
                   </div>
-                  {task.notes && <div className="server-target">{task.notes}</div>}
                 </div>
-                <button
-                  type="button"
-                  className="icon-btn task-drop"
-                  disabled={busyTask === task.id}
-                  title="Cancel this task"
-                  aria-label={`Cancel ${task.title}`}
-                  onClick={() => drop(task)}
-                >
-                  <Icon name="x" size={14} />
-                </button>
-              </div>
-            )
-          })}
-        </div>
+              )}
 
-        <div className="card card-pad" data-enter>
-          <div className="card-title">next three weeks · {events.length}</div>
-          {events.length === 0 && (
-            <div className="empty-state" style={{ padding: 18 }}>
-              <Icon name="clock" size={20} />
-              No events. Scheduling one asks first, and checks for conflicts before it writes.
-            </div>
-          )}
-          {events.map((event) => (
-            <div className="server-row" key={event.id}>
-              <div style={{ minWidth: 0 }}>
-                <div className="server-name" style={{ whiteSpace: 'normal' }}>{event.title}</div>
-                <div className="server-target">
-                  {when(event.starts_at)}{event.ends_at ? ` → ${when(event.ends_at)}` : ''}
-                  {event.location ? ` · ${event.location}` : ''}
+              {tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
+                <div className="empty-state" style={{ padding: 18 }}>
+                  <Icon name="check" size={20} />
+                  {view.bucket === 'missed'
+                    ? 'Nothing overdue.'
+                    : 'Nothing here. Add one above, or ask PSOK to.'}
                 </div>
-              </div>
-            </div>
-          ))}
-        </div>
+              )}
 
-        <div style={{ marginTop: 18 }} data-enter>
-          <button
-            type="button"
-            className="btn btn--small"
-            onClick={() => { setView('chat'); chat.focusComposer?.() }}
-          >
-            <Icon name="chat" size={13} /> Ask PSOK to add one
-          </button>
+              {tasks.map((task) => {
+                const done = task.status === 'done'
+                const late = isOverdue(task)
+                const listName = counts.lists.find((l) => l.id === task.list_id)?.name
+                return (
+                  <div
+                    className={`server-row task-row${done ? ' task-row--done' : ''}${late ? ' task-row--late' : ''}`}
+                    key={task.id}
+                  >
+                    <button
+                      type="button"
+                      className={`task-check${done ? ' task-check--on' : ''}`}
+                      disabled={busyTask === task.id}
+                      aria-label={done ? `Mark ${task.title} not done` : `Mark ${task.title} done`}
+                      aria-pressed={done}
+                      onClick={() => patch(task, { status: done ? 'todo' : 'done' })}
+                    >
+                      {done && <Icon name="check" size={12} />}
+                    </button>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="server-name task-title">{task.title}</div>
+                      {/* Only the overdue fact is amber. Colouring the whole
+                          line turns a list of five late tasks into a wall of
+                          warning, which says less than one marked word does. */}
+                      <div className="server-target">
+                        {listName && <span>{listName}</span>}
+                        {task.due_at && (
+                          <span className={late ? 'task-late-flag' : undefined}>
+                            {late ? 'was due' : 'due'} {when(task.due_at)}
+                          </span>
+                        )}
+                        {task.scheduled_at && <span>scheduled {when(task.scheduled_at)}</span>}
+                        {reminder(task) && <span>{reminder(task)}</span>}
+                        {task.my_day_on && <span>my day</span>}
+                      </div>
+                      {task.notes && <div className="server-target">{task.notes}</div>}
+                    </div>
+
+                    {/* Missed rows carry their answer. Rescheduling by hand is
+                        the step people skip, which is how a list of overdue
+                        tasks becomes a list nobody opens. */}
+                    {late && (
+                      <div className="task-actions">
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--small"
+                          disabled={busyTask === task.id}
+                          onClick={() => patch(task, { due_date_hint: 'tomorrow' }, 'Due tomorrow')}
+                        >
+                          Tomorrow
+                        </button>
+                      </div>
+                    )}
+
+                    {/* My Day is the one bucket nothing fills on its own, so
+                        every row offers it. Putting it only on overdue rows
+                        meant a machine with nothing overdue and nothing due
+                        today had an empty My Day and no way to change that --
+                        which reads as the page being broken, not empty. */}
+                    <button
+                      type="button"
+                      className={`icon-btn task-sun${task.my_day_on ? ' is-on' : ''}`}
+                      disabled={busyTask === task.id}
+                      title={task.my_day_on ? 'Take out of My Day' : 'Add to My Day'}
+                      aria-pressed={Boolean(task.my_day_on)}
+                      aria-label={`Add ${task.title} to My Day`}
+                      onClick={() => patch(
+                        task,
+                        { add_to_my_day: !task.my_day_on },
+                        task.my_day_on ? 'Taken out of My Day' : 'Added to My Day',
+                      )}
+                    >
+                      <Icon name="sun" size={14} />
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`icon-btn task-star${task.important ? ' is-on' : ''}`}
+                      disabled={busyTask === task.id}
+                      title={task.important ? 'Not important' : 'Mark important'}
+                      aria-pressed={Boolean(task.important)}
+                      aria-label={`Mark ${task.title} important`}
+                      onClick={() => patch(task, { important: !task.important })}
+                    >
+                      <Icon name="star" size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn task-drop"
+                      disabled={busyTask === task.id}
+                      title="Cancel this task"
+                      aria-label={`Cancel ${task.title}`}
+                      onClick={() => drop(task)}
+                    >
+                      <Icon name="x" size={14} />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="card card-pad" style={{ marginTop: 18 }}>
+              <div className="card-title">next three weeks · {events.length}</div>
+              {events.length === 0 && (
+                <div className="empty-state" style={{ padding: 18 }}>
+                  <Icon name="clock" size={20} />
+                  No events. Scheduling one asks first, and checks for conflicts before it writes.
+                </div>
+              )}
+              {events.map((event) => (
+                <div className="server-row" key={event.id}>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="server-name" style={{ whiteSpace: 'normal' }}>{event.title}</div>
+                    <div className="server-target">
+                      {when(event.starts_at)}{event.ends_at ? ` → ${when(event.ends_at)}` : ''}
+                      {event.location ? ` · ${event.location}` : ''}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginTop: 18 }}>
+              <button
+                type="button"
+                className="btn btn--small"
+                onClick={() => { setView('chat'); chat.focusComposer?.() }}
+              >
+                <Icon name="chat" size={13} /> Ask PSOK to add one
+              </button>
+            </div>
+          </section>
         </div>
       </div>
     </div>
   )
 }
+
+const LOCAL_ONLY = 'This list is only on this machine — it has not reached Microsoft To Do yet.'

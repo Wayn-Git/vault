@@ -305,8 +305,8 @@ def test_the_pull_is_idempotent(db):
         "dueDateTime": {"dateTime": "2026-09-01T09:00:00", "timeZone": "UTC"},
     }
 
-    _apply(repo, report, {"id": "list-1"}, item)
-    _apply(repo, report, {"id": "list-1"}, dict(item))
+    _apply(repo, report, None, item)
+    _apply(repo, report, None, dict(item))
 
     rows = repo.external_ids(SOURCE)
     assert len(rows) == 1
@@ -314,29 +314,53 @@ def test_the_pull_is_idempotent(db):
     assert report.updated == 0, "an unchanged item is not an update"
 
 
-def test_the_pull_never_overwrites_a_local_field(db):
-    """`scheduled_at` has no counterpart in To Do; a full-row write erases it."""
+def test_the_pull_never_overwrites_a_psok_only_field(db):
+    """`scheduled_at` has no counterpart in To Do; a full-row write erases it.
+
+    `notes` is deliberately *not* in this set. It is To Do's `body`, PSOK seeds
+    it from there on create, and holding it back meant a note edited on the
+    phone never reached PSOK again -- a bug that read as an invariant because
+    it sat beside a real one.
+    """
     from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     item = {"id": "AAMk-2", "title": "Book flights", "status": "notStarted"}
-    _apply(repo, SyncReport(), {"id": "list-1"}, item)
+    _apply(repo, SyncReport(), None, item)
 
     row = repo.by_external(SOURCE, "AAMk-2")
-    repo.update(row["id"], scheduled_at="2026-09-02 14:00:00", notes="gate 12")
+    repo.update(
+        row["id"],
+        scheduled_at="2026-09-02 14:00:00",
+        duration_estimate_minutes=45,
+        my_day_on="2026-09-02",
+    )
 
-    _apply(repo, SyncReport(), {"id": "list-1"}, {**item, "title": "Book flights (return)"})
+    _apply(repo, SyncReport(), None, {**item, "title": "Book flights (return)"})
     after = repo.by_external(SOURCE, "AAMk-2")
     assert after["title"] == "Book flights (return)"
     assert after["scheduled_at"] == "2026-09-02 14:00:00"
-    assert after["notes"] == "gate 12"
+    assert after["duration_estimate_minutes"] == 45
+    assert after["my_day_on"] == "2026-09-02"
+
+
+def test_a_body_edited_in_to_do_reaches_psok(db):
+    """The other half of the field split above, and the reason it changed."""
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "AAMk-9", "title": "Pack", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item)
+
+    _apply(repo, SyncReport(), None, {**item, "body": {"content": "passport, charger"}})
+    assert repo.by_external(SOURCE, "AAMk-9")["notes"] == "passport, charger"
 
 
 def test_a_task_gone_from_to_do_is_cancelled_not_deleted(db):
     from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply, _retire_missing
 
     repo = TaskRepository()
-    _apply(repo, SyncReport(), {"id": "l"}, {"id": "A", "title": "Gone", "status": "notStarted"})
+    _apply(repo, SyncReport(), None, {"id": "A", "title": "Gone", "status": "notStarted"})
 
     report = SyncReport()
     _retire_missing(repo, report, seen=set())
@@ -637,7 +661,7 @@ async def test_a_dropped_connection_is_reconnected_and_the_call_retried(monkeypa
     manager = MCPManager(ToolRegistry())
     manager.connections["microsoft-todo"] = DeadConnection()
 
-    async def fake_connect(config):
+    async def fake_connect(config, **_):
         manager.connections[config.name] = RevivedConnection()
         return 1
 
@@ -678,7 +702,7 @@ async def test_a_server_that_cannot_come_back_says_so_once(monkeypatch):
     manager.connections["x"] = DeadConnection()
     attempts = []
 
-    async def refuse(config):
+    async def refuse(config, **_):
         attempts.append(config.name)
         raise MCPConnectionError("still gone")
 

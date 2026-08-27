@@ -160,5 +160,5 @@ class ReminderRunner:
         except Exception:
             log.exception("Microsoft To Do sync failed")
             return
-        if report.created or report.updated or report.cancelled:
+        if report.created or report.updated or report.cancelled or report.pushed:
             log.info("%s", report.summary())

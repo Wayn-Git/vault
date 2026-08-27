@@ -9,6 +9,7 @@ gate rather than here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -137,13 +138,37 @@ class MCPManager:
 
     # ------------------------------------------------------------------ connect
 
-    async def connect_server(self, config: ServerConfig) -> int:
-        """Connect, discover, and register. Returns the number of tools added."""
+    def needs_sign_in(self, config: ServerConfig) -> bool:
+        """Whether connecting this server would start an interactive sign-in.
+
+        Only asked of OAuth servers, and answered from the keychain rather than
+        by trying: the whole point is to avoid the attempt.
+        """
+        from psok.mcp.oauth import has_stored_token
+
+        return bool(config.oauth) and not has_stored_token(config.name)
+
+    async def connect_server(self, config: ServerConfig, *, interactive: bool = True) -> int:
+        """Connect, discover, and register. Returns the number of tools added.
+
+        `interactive=False` refuses to begin a sign-in rather than opening a
+        browser. See `needs_sign_in`.
+        """
         if not config.enabled:
             return 0
 
+        if not interactive and self.needs_sign_in(config):
+            message = (
+                f"'{config.name}' has not been signed in to. Open it in Connectors"
+                " and press Connect."
+            )
+            self.errors[config.name] = message
+            raise OAuthRequired(message)
+
         await self.disconnect_server(config.name)
-        connection = MCPConnection(config, open_browser=self.open_browser)
+        connection = MCPConnection(
+            config, open_browser=self.open_browser and interactive, interactive=interactive
+        )
 
         try:
             await connection.connect()
@@ -254,7 +279,7 @@ class MCPManager:
                     )
                 try:
                     self.forget_error(server_name)
-                    await self.connect_server(config)
+                    await self.connect_server(config, interactive=False)
                     revived = self.connections.get(server_name)
                     if revived is None:
                         raise MCPConnectionError("reconnect produced no connection")
@@ -282,23 +307,39 @@ class MCPManager:
             await connection.disconnect()
         self.registry.unregister_server(name)
 
-    async def connect_all(self, *, conversation_id: str | None = None) -> dict[str, int | str]:
-        """Connect every switched-on server. Failures are reported, never raised."""
+    async def connect_all(
+        self, *, conversation_id: str | None = None, interactive: bool = False
+    ) -> dict[str, int | str]:
+        """Connect every switched-on server. Failures are reported, never raised.
+
+        **Concurrent, and non-interactive by default.** Serially was costing
+        minutes rather than the seconds the connections themselves take: on this
+        machine seven working connectors come up in about eight seconds, while
+        two switched-on-but-unauthorised ones each blocked the whole queue for
+        `auth_timeout_seconds` (300s) waiting on a browser nobody had opened.
+        A scheduled run's entire budget went on that before it reached a model.
+
+        So: a server needing a sign-in is reported, not waited on, and the rest
+        start together. `interactive=True` is for a person pressing Connect,
+        which is the only context where opening a browser is an answer.
+        """
         from psok.capabilities import CapabilityService
 
         live = CapabilityService().enabled_connector_names(conversation_id)
+        wanted = [
+            config
+            for name, config in load_servers().items()
+            if config.enabled and name in live
+        ]
 
-        results: dict[str, int | str] = {}
-        for name, config in load_servers().items():
-            if not config.enabled:
-                continue
-            if name not in live:
-                continue  # configured but switched off
+        async def one(config: ServerConfig) -> tuple[str, int | str]:
             try:
-                results[name] = await self.connect_server(config)
+                return config.name, await self.connect_server(config, interactive=interactive)
             except Exception as exc:
-                results[name] = str(exc)
-        return results
+                return config.name, str(exc)
+
+        settled = await asyncio.gather(*(one(config) for config in wanted))
+        return dict(settled)
 
     def state(self) -> dict[str, dict[str, Any]]:
         """What is actually running, per server.
@@ -360,7 +401,7 @@ class MCPManager:
                 if name in self.errors and time.monotonic() < self.retry_after.get(name, 0.0):
                     continue
                 try:
-                    results[name] = await self.connect_server(config)
+                    results[name] = await self.connect_server(config, interactive=False)
                 except Exception as exc:
                     results[name] = str(exc)
         return results

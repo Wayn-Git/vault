@@ -169,4 +169,15 @@ async def stream_sse(
         except TRANSIENT_EXCEPTIONS as exc:
             if started or attempt == max_retries:
                 raise ProviderHTTPError(f"{url} stream failed: {exc}") from exc
+            # Nothing had arrived yet, so replaying is safe -- but it is a whole
+            # request, and the provider may well have generated a response it
+            # then failed to deliver. Unlogged, a turn could silently cost four
+            # times the tokens and four times the wall clock with no trace.
+            log.warning(
+                "%s dropped the stream before any data; retrying in full (attempt %d/%d): %s",
+                url,
+                attempt + 1,
+                max_retries,
+                exc,
+            )
             await asyncio.sleep(backoff(attempt))

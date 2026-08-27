@@ -171,7 +171,62 @@ async def _started_manager():
     return _mcp["manager"]
 
 
-_reminders = ReminderRunner(_started_manager)
+async def _manager_with(name: str):
+    """The manager, with one named connector started if it was not already.
+
+    Between "start nothing" and "start everything" there is the thing the caller
+    actually needs. Syncing tasks used to take the first branch and answer 409
+    until some unrelated turn had happened to reconcile -- so a freshly started
+    PSOK showed an empty Tasks page and "not running", with no way to fix it
+    from that page. Taking the second branch instead would spawn a dozen
+    subprocesses, and on this machine five of them contend for one port.
+
+    One connector, on demand. Still non-interactive: if it has never been signed
+    in to, that is a sentence to show the user, not a browser to open behind
+    their back.
+    """
+    manager = _mcp["manager"]
+    if manager is None:
+        await _registry_for(None, reuse_any=True, start_connectors=False)
+        manager = _mcp["manager"]
+    if manager is None:
+        return None
+
+    connection = manager.connections.get(name)
+    if connection is not None and connection.connected:
+        return manager
+
+    from psok.mcp.config import load_servers
+
+    config = load_servers().get(name)
+    if config is None:
+        return manager
+    async with _registry_lock:
+        try:
+            await manager.connect_server(config, interactive=False)
+        except Exception as exc:
+            # Reported by the caller in its own words -- SyncUnavailable for a
+            # sync, a toast for a toggle. Raising a connect error out of here
+            # would make every caller unwrap it.
+            log.info("could not start %s on demand: %s", name, exc)
+            _mcp["errors"][name] = str(exc)
+    return manager
+
+
+async def _task_sync_manager():
+    """What the background sync asks for: the To Do connector, started if need be.
+
+    The loop used to take whatever had already reconciled, which on a freshly
+    started PSOK is nothing -- so the fifteen-minute sync did nothing at all
+    until some unrelated turn happened to start connectors, and the Tasks page
+    sat empty in the meantime.
+    """
+    from psok.sync.microsoft_todo import SERVER
+
+    return await _manager_with(SERVER)
+
+
+_reminders = ReminderRunner(_task_sync_manager)
 
 
 @asynccontextmanager
@@ -212,6 +267,12 @@ _pending: dict[str, dict[str, Any]] = {}
 # concerned. `done` is followed by the memory frame, which is a second model
 # call and not part of the turn.
 TERMINAL_EVENTS = frozenset({"done", "error", "guard"})
+
+
+def _frame(event_type: str, **data: Any) -> str:
+    """One SSE frame. `default=str` so an odd value degrades rather than
+    killing the response mid-stream."""
+    return f"data: {json.dumps({'type': event_type, **data}, default=str)}\n\n"
 
 # Turns currently streaming, keyed by conversation. The event is how "stop" gets
 # from a second request into the loop: aborting the browser's read only closes
@@ -270,7 +331,9 @@ async def _await_confirmation(request: ConfirmationRequest) -> bool:
         _pending.pop(request_id, None)
 
 
-async def _registry_for(workspace: str | None, *, reuse_any: bool = False):
+async def _registry_for(
+    workspace: str | None, *, reuse_any: bool = False, start_connectors: bool = True
+):
     """The tool registry for a workspace, building or rebuilding it if needed.
 
     `reuse_any` takes whatever registry is already built, whatever root it was
@@ -284,6 +347,21 @@ async def _registry_for(workspace: str | None, *, reuse_any: bool = False):
     root = str(Path(workspace).expanduser().resolve()) if workspace else str(Path.cwd())
 
     async with _registry_lock:
+        if not start_connectors and _mcp["registry"] is None:
+            # Build the registry and the manager, and start nothing. The caller
+            # wants one named connector, not twelve subprocesses -- and on this
+            # machine five of those contend for a single port, so "start
+            # everything" is not a cheap default to fall back on.
+            registry = build_default_registry(
+                ConfirmationService(callback=_await_confirmation), workspace_root=root
+            )
+            manager = MCPManager(registry, open_browser=False)
+            _mcp.update(
+                {"manager": manager, "registry": registry, "workspace": root, "errors": {}}
+            )
+            live.set_manager(manager)
+            return registry, root
+
         if reuse_any and _mcp["registry"] is not None:
             root = _mcp["workspace"]
 
@@ -382,8 +460,21 @@ def health() -> dict[str, Any]:
     # then fails on the first round trip, and a model picker offering one turns
     # a missing credential into "PSOK is broken".
     providers = configured_providers()
+    # A connector nobody has signed in to is not a fault. It used to count as
+    # one, so a machine with one un-signed-in connector reported the whole
+    # system degraded -- which makes the word mean nothing on the day something
+    # is actually broken.
+    waiting = {
+        name: message
+        for name, message in connector_errors.items()
+        if "SignInRequired" in message or "signed in" in message
+    }
+    broken = {k: v for k, v in connector_errors.items() if k not in waiting}
     return {
-        "status": "degraded" if connector_errors else "ok",
+        "status": "degraded" if broken else "ok",
+        # Kept separate so an interface can say "sign in to Vercel" rather than
+        # colouring it the same red as a server that will not start.
+        "connectors_awaiting_sign_in": sorted(waiting),
         "providers": sorted(providers),
         # So an interface can prefill the model a provider already declares
         # rather than making the user retype what providers.yaml already says.
@@ -421,14 +512,43 @@ def list_conversations(include_automations: bool = False) -> list[dict[str, Any]
     )]
 
 
+# A model name no interface should ever send. It was a frontend fallback for
+# "health has not answered yet, so I do not know this provider's default", and
+# it went to the provider verbatim: NVIDIA answers `404 page not found`, and
+# every turn in that conversation fails forever with no way to correct it.
+PLACEHOLDER_MODELS = frozenset({"default", "", "null", "undefined", "none"})
+
+
+def _validate_model(provider: str, model: str) -> str:
+    """The model to store, or a 400 saying why not.
+
+    Checked here rather than on the first turn, where the failure lands inside
+    an already-open SSE stream and the interface has to explain a broken
+    conversation instead of a rejected form.
+    """
+    if not is_known_provider(provider):
+        raise HTTPException(400, f"provider '{provider}' is not configured")
+
+    name = (model or "").strip()
+    if name.casefold() in PLACEHOLDER_MODELS:
+        default = configured_providers().get(provider)
+        fallback = getattr(default, "default_model", None)
+        if not fallback:
+            raise HTTPException(
+                400,
+                f"no model given, and provider '{provider}' declares no default_model"
+                " in providers.yaml. Pick one in the model menu.",
+            )
+        log.info("filled in %s's declared default model for a request that sent %r",
+                 provider, model)
+        return fallback
+    return name
+
+
 @app.post("/api/conversations")
 def create_conversation(body: CreateConversation) -> dict[str, str]:
-    # Reject an unknown provider here rather than on the first turn, where the
-    # failure lands inside an already-open SSE stream and the interface has to
-    # explain a broken conversation instead of a rejected form.
-    if not is_known_provider(body.provider):
-        raise HTTPException(400, f"provider '{body.provider}' is not configured")
-    cid = ConversationRepository().create(body.provider, body.model, body.title)
+    model = _validate_model(body.provider, body.model)
+    cid = ConversationRepository().create(body.provider, model, body.title)
     return {"id": cid}
 
 
@@ -445,12 +565,21 @@ def update_conversation(conversation_id: str, body: UpdateConversation) -> dict[
     The loop resolves the adapter fresh every turn, so this write is the whole
     of "use a different model for this conversation".
     """
-    if body.provider is not None and not is_known_provider(body.provider):
-        raise HTTPException(400, f"provider '{body.provider}' is not configured")
-
     repo = ConversationRepository()
+    model = body.model
+    if body.provider is not None or body.model is not None:
+        existing = repo.get(conversation_id)
+        if existing is None:
+            raise HTTPException(404, "no such conversation")
+        # Validated together: switching provider without naming a model has to
+        # land on that provider's default, not carry the old provider's model
+        # name across to an endpoint that has never heard of it.
+        model = _validate_model(
+            body.provider or existing["provider"], body.model or existing["model"]
+        )
+
     if not repo.update(
-        conversation_id, title=body.title, provider=body.provider, model=body.model
+        conversation_id, title=body.title, provider=body.provider, model=model
     ):
         raise HTTPException(404, "no such conversation")
     return dict(repo.get(conversation_id))
@@ -550,15 +679,26 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
     if ConversationRepository().get(conversation_id) is None:
         raise HTTPException(404, "no such conversation")
 
-    director = await _director(body.workspace)
+    # Registered *before* the director is built. Building it can start
+    # connectors, which takes seconds -- and during that window the browser has
+    # an open fetch with no bytes yet, while `POST .../turn/stop` answered 404
+    # because nothing had registered. Pressing Stop on a turn that had not
+    # visibly begun was the one case Stop genuinely could not work.
     cancel = asyncio.Event()
     _active_turns[conversation_id] = cancel
+    try:
+        director = await _director(body.workspace)
+    except BaseException:
+        _active_turns.pop(conversation_id, None)
+        raise
 
     def release() -> None:
         if _active_turns.get(conversation_id) is cancel:
             del _active_turns[conversation_id]
 
     async def stream():
+        # Whether the reader has been told how the turn ended.
+        settled = False
         try:
             async for event in director.run(conversation_id, body.message, cancel):
                 # default=str so one unexpected value in a tool argument degrades
@@ -572,7 +712,21 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
                 # reply had landed -- long enough that deleting it came back a
                 # 409, and "stop" stayed armed with nothing to interrupt.
                 if event.type in TERMINAL_EVENTS:
+                    settled = True
                     release()
+            if not settled:
+                # The loop returned without saying how it ended. An interface
+                # keys its composer off a terminal frame, so a body that just
+                # stops leaves the field disabled with nothing on screen to
+                # explain it -- which is the "no response at all" this turn
+                # looks like from the outside.
+                yield _frame("error", message="the turn ended without a result")
+        except asyncio.CancelledError:
+            # A shutdown, a reload, or Starlette dropping the task. The reader
+            # is still there for one more frame.
+            if not settled:
+                yield _frame("error", message="the server stopped this turn")
+            raise
         finally:
             # A backstop for the stream that ends without a terminal frame at
             # all -- a client that hangs up, or a generator closed early.
@@ -1519,16 +1673,10 @@ async def upload_attachment(file: UploadFile) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ tasks
 #
-# The agent creates tasks and calendar events through its tools; these are the
-# read-only views of what it created, so the interface can show them without
-# spending a model call to ask.
-
-
-@app.get("/api/tasks")
-def list_tasks(limit: int = 50, include_done: bool = False) -> list[dict[str, Any]]:
-    from psok.db.repositories import TaskRepository
-
-    return [dict(row) for row in TaskRepository().upcoming(limit, include_done)]
+# Every write goes through `psok.tasks.service`, which the agent's tools and the
+# To Do sync also use. Three copies of "resolve the hints, pick a list, write the
+# row, mirror it upstream" is how this interface ended up able to express less
+# than the API it was calling.
 
 
 class CreateTask(BaseModel):
@@ -1538,8 +1686,13 @@ class CreateTask(BaseModel):
     # clock -- the same path the agent's tools take, so a task typed by hand and
     # one created in a turn cannot disagree about what "tomorrow" means.
     due_date_hint: str | None = None
+    scheduled_hint: str | None = None
     reminder_hint: str | None = None
     priority: str | None = None
+    important: bool = False
+    add_to_my_day: bool = False
+    list: str | None = None
+    duration_estimate_minutes: int | None = None
 
 
 class UpdateTask(BaseModel):
@@ -1547,140 +1700,211 @@ class UpdateTask(BaseModel):
     notes: str | None = None
     status: str | None = None
     priority: str | None = None
+    important: bool | None = None
+    add_to_my_day: bool | None = None
+    list: str | None = None
     due_date_hint: str | None = None
+    scheduled_hint: str | None = None
     reminder_hint: str | None = None
+    duration_estimate_minutes: int | None = None
 
 
-TASK_STATUSES = frozenset({"todo", "in_progress", "done", "cancelled"})
+class CreateList(BaseModel):
+    name: str
 
 
-def _resolve_hints(body: BaseModel, fields: dict[str, Any]) -> None:
-    """Turn the date hints on a request body into resolved columns.
+class RenameList(BaseModel):
+    name: str
 
-    Raises HTTPException(400) with the engine's own words when a hint is
-    ambiguous, rather than guessing -- the same refusal the tools make, for the
-    same reason (ADR-0010).
+
+TASK_BUCKETS = ("my_day", "missed", "important", "general", "completed", "all")
+
+
+def _task_row(row: Any) -> dict[str, Any]:
+    return dict(row)
+
+
+@app.get("/api/tasks")
+def list_tasks(
+    bucket: str = "all",
+    list_id: int | None = None,
+    limit: int = 200,
+    include_done: bool = False,
+) -> list[dict[str, Any]]:
+    """One bucket, or one list.
+
+    `include_done` is kept for callers that predate the buckets; it maps onto
+    the `all`/`completed` split rather than the old behaviour, which also
+    returned cancelled rows and so made "showing done" quietly mean "showing
+    everything including what you gave up on".
     """
-    from psok.scheduling.engine import AmbiguousDate, resolve_date_hint
+    from psok.db.repositories import TaskRepository
 
-    for hint_field, column in (("due_date_hint", "due_at"), ("reminder_hint", "reminder_at")):
-        hint = getattr(body, hint_field, None)
-        if not hint:
-            continue
+    repo = TaskRepository()
+    if list_id is not None:
+        return [_task_row(r) for r in repo.bucket("list", list_id=list_id, limit=limit)]
+    if include_done and bucket == "all":
+        bucket = "completed"
+    if bucket not in TASK_BUCKETS:
+        raise HTTPException(400, f"bucket must be one of {', '.join(TASK_BUCKETS)}")
+    return [_task_row(r) for r in repo.bucket(bucket, limit=limit)]
+
+
+@app.get("/api/tasks/buckets")
+def task_counts() -> dict[str, Any]:
+    """Every count the rail needs, in one call rather than six."""
+    from psok.db.repositories import TaskListRepository, TaskRepository
+
+    counts = TaskRepository().counts()
+    lists = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "is_default": bool(row["is_default"]),
+            "external_id": row["external_id"],
+            "open": counts.get(f"list:{row['id']}", 0),
+        }
+        for row in TaskListRepository().all()
+    ]
+    return {
+        "buckets": {name: counts.get(name, 0) for name in TASK_BUCKETS},
+        "lists": lists,
+        # So the interface can say "local only" honestly rather than implying a
+        # list the user made here is on their phone.
+        "connected": any(row["external_id"] for row in lists) if lists else False,
+    }
+
+
+@app.get("/api/task-lists")
+def get_task_lists() -> list[dict[str, Any]]:
+    from psok.db.repositories import TaskListRepository
+
+    return [dict(row) for row in TaskListRepository().all()]
+
+
+@app.post("/api/task-lists", status_code=201)
+async def create_task_list(body: CreateList) -> dict[str, Any]:
+    from psok.db.repositories import TaskListRepository
+    from psok.tasks.service import TaskError, TaskService
+
+    try:
+        ref = await TaskService().create_list(body.name)
+    except TaskError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    row = TaskListRepository().get(ref.id)
+    return {**dict(row), "note": ref.note}
+
+
+@app.patch("/api/task-lists/{list_id}")
+async def rename_task_list(list_id: int, body: RenameList) -> dict[str, Any]:
+    from psok.db.repositories import TaskListRepository
+    from psok.sync.microsoft_todo import rename_remote_list
+
+    repo = TaskListRepository()
+    row = repo.get(list_id)
+    if row is None:
+        raise HTTPException(404, f"no list with id {list_id}")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "a list needs a name")
+
+    if row["external_id"]:
         try:
-            fields[column] = resolve_date_hint(hint).isoformat()
-        except AmbiguousDate as exc:
-            raise HTTPException(400, f"{exc}") from exc
+            await rename_remote_list(str(row["external_id"]), name)
+        except Exception as exc:
+            # The rename is not lost -- it is applied locally and the next sync
+            # would otherwise overwrite it, so refusing here is the honest
+            # answer rather than showing a name that will silently revert.
+            raise HTTPException(502, f"Microsoft To Do refused the rename: {exc}") from exc
+    repo.update(list_id, name=name)
+    return dict(repo.get(list_id))
 
 
 @app.post("/api/tasks", status_code=201)
 async def create_task(body: CreateTask) -> dict[str, Any]:
     """Add a task by hand.
 
-    Tasks were readable and not writable from the interface: the only way to
-    add one was to ask the model to, which is a model call and a permission
-    prompt to write a line of text the user had already typed.
-
     Goes to the connected task service where there is one, for the same reason
     the agent's `create_task` does: a local row beside a signed-in To Do account
     is a second list nobody asked for.
     """
     from psok.db.repositories import TaskRepository
-    from psok.sync.microsoft_todo import SOURCE, create_remote_task
+    from psok.tasks.service import TaskError, TaskService
 
-    title = body.title.strip()
-    if not title:
-        raise HTTPException(400, "a task needs a title")
-
-    fields: dict[str, Any] = {}
-    _resolve_hints(body, fields)
-
-    external = None
     try:
-        external = await create_remote_task(
-            title,
+        written = await TaskService().create(
+            body.title,
             notes=(body.notes or None),
-            due_at=fields.get("due_at"),
-            reminder_at=fields.get("reminder_at"),
+            due_hint=body.due_date_hint,
+            scheduled_hint=body.scheduled_hint,
+            reminder_hint=body.reminder_hint,
+            duration_estimate_minutes=body.duration_estimate_minutes,
             priority=body.priority,
+            important=body.important,
+            add_to_my_day=body.add_to_my_day,
+            list_name=body.list,
         )
-    except Exception as exc:
-        # Never fatal: losing what the user typed because their task service was
-        # briefly unreachable is worse than a local row the next sync reconciles.
-        log.info("could not create %r upstream: %s", title, exc)
-
-    repo = TaskRepository()
-    task_id = repo.create(
-        title,
-        notes=(body.notes or None),
-        due_at=fields.get("due_at"),
-        priority=body.priority,
-        reminder_at=fields.get("reminder_at"),
-        external_source=SOURCE if external else None,
-        external_id=external["external_id"] if external else None,
-        external_etag=(external.get("external_etag") or None) if external else None,
-    )
-    return dict(repo.get(task_id))
+    except TaskError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    # Unlike before, the caller is told when the upstream write did not happen
+    # rather than getting a 201 with a silently null external_source.
+    return {**dict(TaskRepository().get(written.task_id)), "routed_to": written.routed_to}
 
 
 @app.patch("/api/tasks/{task_id}")
-def update_task(task_id: int, body: UpdateTask) -> dict[str, Any]:
-    """Change a task: mark it done, retime it, or edit what it says."""
+async def update_task(task_id: int, body: UpdateTask) -> dict[str, Any]:
+    """Change a task: mark it done, retime it, file it, or edit what it says."""
     from psok.db.repositories import TaskRepository
+    from psok.tasks.service import TaskError, TaskService
 
-    repo = TaskRepository()
-    if repo.get(task_id) is None:
-        raise HTTPException(404, f"no task with id {task_id}")
-
-    fields: dict[str, Any] = {}
-    for key in ("title", "notes", "priority"):
-        value = getattr(body, key)
-        if value is not None:
-            fields[key] = value
-    if body.status is not None:
-        if body.status not in TASK_STATUSES:
-            raise HTTPException(400, f"status must be one of {', '.join(sorted(TASK_STATUSES))}")
-        fields["status"] = body.status
-    _resolve_hints(body, fields)
-
-    if not fields:
-        raise HTTPException(400, "nothing to update")
-
-    # Retiming makes an already-delivered reminder stale: without this, pushing
-    # a task to tomorrow means never hearing about it again.
-    if "reminder_at" in fields or "due_at" in fields:
-        fields["reminded_at"] = None
-
-    repo.update(task_id, **fields)
-    return dict(repo.get(task_id))
+    try:
+        await TaskService().update(
+            task_id,
+            title=body.title,
+            notes=body.notes,
+            status=body.status,
+            priority=body.priority,
+            important=body.important,
+            add_to_my_day=body.add_to_my_day,
+            list_name=body.list,
+            due_hint=body.due_date_hint,
+            scheduled_hint=body.scheduled_hint,
+            reminder_hint=body.reminder_hint,
+            duration_estimate_minutes=body.duration_estimate_minutes,
+        )
+    except TaskError as exc:
+        # "no task with id N" is a 404; everything else the caller can fix.
+        status = 404 if str(exc).startswith("no task with id") else 400
+        raise HTTPException(status, str(exc)) from exc
+    return dict(TaskRepository().get(task_id))
 
 
 @app.delete("/api/tasks/{task_id}")
-def delete_task(task_id: int) -> dict[str, str]:
-    from psok.db.repositories import TaskRepository
+async def delete_task(task_id: int) -> dict[str, str]:
+    from psok.tasks.service import TaskError, TaskService
 
-    repo = TaskRepository()
-    if repo.get(task_id) is None:
-        raise HTTPException(404, f"no task with id {task_id}")
     # Cancelled, not deleted: a task mirrored from To Do would come straight
     # back on the next sync, and a row that reappears is worse than one that
     # stays and says it was dropped.
-    repo.update(task_id, status="cancelled")
+    try:
+        await TaskService().cancel(task_id)
+    except TaskError as exc:
+        raise HTTPException(404, str(exc)) from exc
     return {"status": "cancelled", "id": str(task_id)}
 
 
 @app.post("/api/tasks/sync")
 async def sync_tasks() -> dict[str, Any]:
-    """Pull Microsoft To Do into the local task store, now.
+    """Push local changes to Microsoft To Do and pull it back, now.
 
-    The same pull the background loop runs every fifteen minutes, exposed so a
+    The same sync the background loop runs every fifteen minutes, exposed so a
     user who has just signed in does not have to wait for the next one.
     """
-    from psok.sync.microsoft_todo import SyncUnavailable
+    from psok.sync.microsoft_todo import SERVER, SyncUnavailable
     from psok.sync.microsoft_todo import sync as sync_microsoft_todo
 
     try:
-        report = await sync_microsoft_todo(await _started_manager())
+        report = await sync_microsoft_todo(await _manager_with(SERVER))
     except SyncUnavailable as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"status": "ok", "summary": report.summary(), **report.as_dict()}

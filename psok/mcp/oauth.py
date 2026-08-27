@@ -84,6 +84,19 @@ def client_ref(server_name: str) -> str:
     return f"psok-mcp/{server_name}.client"
 
 
+def has_stored_token(server_name: str) -> bool:
+    """Whether a sign-in has already happened for this server.
+
+    Used to decide, *before* connecting, whether starting it would open a
+    browser. An unattended caller -- a scheduled run, a background sync, the
+    server warming connectors at boot -- must never begin an interactive flow:
+    nobody is there to finish it, and the connect blocks for the full
+    `auth_timeout_seconds` while holding the one callback port every other
+    sign-in needs.
+    """
+    return bool(get_secret(token_ref(server_name)))
+
+
 class KeychainTokenStorage:
     """TokenStorage backed by the OS keychain (ADR-0012).
 
@@ -379,12 +392,23 @@ async def seed_preregistered_client(config: ServerConfig) -> None:
     await storage.set_client_info(info)
 
 
+class SignInRequired(RuntimeError):
+    """The flow reached the point of needing a person, and nobody is there.
+
+    Raised only on a non-interactive connect. A stored token is not enough to
+    know this will not happen -- an expired one whose refresh is rejected sends
+    the SDK straight back into a full authorization -- so the refusal has to sit
+    at the moment the browser would have opened, not at the decision to try.
+    """
+
+
 def build_auth_provider(
     config: ServerConfig,
     *,
     open_browser: bool = True,
     on_authorization_url=None,
     awaiting_user: asyncio.Event | None = None,
+    interactive: bool = True,
 ) -> OAuthClientProvider:
     """Wire the SDK's OAuth client to PSOK's keychain and loopback callback.
 
@@ -392,10 +416,20 @@ def build_auth_provider(
     connect deadline reads it to tell "this server is not answering" apart from
     "this human is still reading the consent screen" -- two failures that look
     identical from the outside and want opposite responses.
+
+    `interactive=False` refuses at that same moment instead. Without it a
+    background connect with a stale token sat on the callback for the full
+    `auth_timeout_seconds` -- five minutes, holding the one loopback port every
+    other sign-in needs, for a browser nobody had opened.
     """
     storage = KeychainTokenStorage(config.name)
 
     async def redirect_handler(authorization_url: str) -> None:
+        if not interactive:
+            raise SignInRequired(
+                f"'{config.name}' needs signing in again. Open it in Connectors"
+                " and press Connect."
+            )
         pending = PendingAuthorization(
             server_name=config.name,
             authorization_url=authorization_url,
@@ -417,6 +451,11 @@ def build_auth_provider(
             webbrowser.open(authorization_url)
 
     async def callback_handler() -> AuthorizationCodeResult:
+        if not interactive:
+            raise SignInRequired(
+                f"'{config.name}' needs signing in again. Open it in Connectors"
+                " and press Connect."
+            )
         try:
             result = await _wait_for_callback(timeout=config.auth_timeout_seconds)
         except TimeoutError:

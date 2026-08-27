@@ -9,6 +9,7 @@ structured result the loop can reason about.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,14 @@ async def run_shell_command(args: dict[str, Any], ctx: ToolContext) -> ToolResul
         proc.kill()
         await proc.wait()
         return ToolResult.error(f"command timed out after {timeout}s and was killed:\n{command}")
+    except asyncio.CancelledError:
+        # The user pressed Stop. Without this the process kept running with its
+        # pipes unread -- orphaned, invisible, and still doing whatever the
+        # model asked for after the turn that asked was over.
+        proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise
 
     stdout = _clip(stdout_b.decode(errors="replace"))
     stderr = _clip(stderr_b.decode(errors="replace"))

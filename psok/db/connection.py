@@ -42,6 +42,125 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text())
     conn.commit()
     _adopt_existing_automation_runs(conn)
+    _drop_empty_legacy_tables(conn)
+    _normalise_task_timestamps(conn)
+    _repair_placeholder_models(conn)
+
+
+# Tables an older PSOK created and this one has no code for. Dropping is guarded
+# on emptiness: a table nothing references but that somehow holds rows is a
+# surprise worth keeping, not tidying away.
+LEGACY_TABLES = ("integrations", "integration_state")
+
+
+# What an interface once sent when it did not yet know a provider's default.
+PLACEHOLDER_MODELS = ("default", "", "null", "undefined", "none")
+
+
+def _repair_placeholder_models(conn: sqlite3.Connection) -> None:
+    """Point conversations stored with a placeholder model at a real one.
+
+    The composer used to send the literal string `default` when `/api/health`
+    had not answered yet. It reached the provider verbatim -- NVIDIA replies
+    `404 page not found` -- so every turn in that conversation failed forever,
+    and nothing in the interface offered a way to correct it.
+
+    The send is refused at the API now; this repairs the rows that predate that.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, provider FROM conversations WHERE model IS NULL OR lower(model) IN"
+            f" ({','.join('?' * len(PLACEHOLDER_MODELS))})",
+            PLACEHOLDER_MODELS,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return
+    if not rows:
+        return
+
+    try:
+        from psok.config import load_providers
+
+        defaults = {
+            name: config.default_model
+            for name, config in load_providers().items()
+            if config.default_model
+        }
+    except Exception as exc:
+        log.debug("could not read provider defaults to repair conversations: %s", exc)
+        return
+
+    repaired = 0
+    for conversation_id, provider in rows:
+        model = defaults.get(provider)
+        if not model:
+            continue
+        conn.execute(
+            "UPDATE conversations SET model = ?, updated_at = datetime('now') WHERE id = ?",
+            (model, conversation_id),
+        )
+        repaired += 1
+    if repaired:
+        log.info("repaired %d conversations stored with a placeholder model", repaired)
+    conn.commit()
+
+
+# Columns holding a local naive timestamp that SQLite compares as a string.
+_TASK_TIME_COLUMNS = ("due_at", "scheduled_at", "reminder_at", "reminded_at")
+
+
+def _normalise_task_timestamps(conn: sqlite3.Connection) -> None:
+    """Rewrite `YYYY-MM-DDTHH:MM:SS` to `YYYY-MM-DD HH:MM:SS`.
+
+    Two writers disagreed about the separator -- the To Do sync used a space and
+    the hand-written API path used `datetime.isoformat()`, which uses `T` -- and
+    SQLite compares both as plain strings. Sorting survives that, which is why
+    it went unnoticed, but the reminder scan does not: `T` is 0x54 and a space is
+    0x20, so `'2026-08-27T09:00:00' <= '2026-08-27 11:30:00'` is **false**, and a
+    reminder written in the `T` form is skipped every tick until the date rolls
+    over and the day digits decide the comparison instead.
+
+    One writer now produces both forms' replacement, so this only ever has rows
+    to fix once.
+    """
+    try:
+        # Safe to apply to every column of a matched row: the separator is at
+        # position 11 either way, so rewriting one that already holds a space
+        # reproduces it exactly.
+        clauses = ", ".join(
+            f"{c} = substr({c}, 1, 10) || ' ' || substr({c}, 12)" for c in _TASK_TIME_COLUMNS
+        )
+        where = " OR ".join(f"{c} LIKE '____-__-__T%'" for c in _TASK_TIME_COLUMNS)
+        cur = conn.execute(f"UPDATE tasks SET {clauses} WHERE {where}")
+    except sqlite3.OperationalError:
+        return  # no tasks table yet
+    if cur.rowcount:
+        log.info("normalised the timestamp separator on %d task rows", cur.rowcount)
+    conn.commit()
+
+
+def _drop_empty_legacy_tables(conn: sqlite3.Connection) -> None:
+    """Remove tables this version defines no code for, only while they are empty.
+
+    `schema.sql` is entirely `IF NOT EXISTS`, so a table removed from it simply
+    stays in every database that already had one -- which is how a reserved slot
+    outlives the decision to drop it. These two were left by a version that had
+    an integrations concept; `psok/` has no reference to either.
+    """
+    for table in LEGACY_TABLES:
+        try:
+            rows = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            continue  # already gone, or never created
+        if rows:
+            log.warning("legacy table %s holds %d rows; leaving it alone", table, rows)
+            continue
+        try:
+            conn.execute(f"DROP TABLE {table}")
+            log.info("dropped empty legacy table %s", table)
+        except sqlite3.OperationalError as exc:
+            log.error("could not drop legacy table %s: %s", table, exc)
+    conn.commit()
 
 
 def _adopt_existing_automation_runs(conn: sqlite3.Connection) -> None:

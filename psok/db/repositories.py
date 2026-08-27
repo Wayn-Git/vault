@@ -10,6 +10,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from psok.db.connection import get_connection
@@ -17,6 +18,34 @@ from psok.db.connection import get_connection
 
 def _conn(conn: sqlite3.Connection | None) -> sqlite3.Connection:
     return conn or get_connection()
+
+
+def _now() -> str:
+    """Local naive, to the second.
+
+    Every timestamp in this schema is local naive and compared as a string by
+    SQLite. A UTC value on one side of such a comparison is off by the machine's
+    offset and fails silently -- which is how reminders once arrived late by
+    five and a half hours.
+    """
+    return datetime.now().isoformat(sep=" ", timespec="seconds")
+
+
+def _today() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _fold_list_name(name: str | None) -> str:
+    """A list name reduced to what a person would actually type.
+
+    Leading emoji, symbols and punctuation go; case goes; surrounding space
+    goes. Only *leading* decoration is stripped, so "Q1 2026" keeps its digits
+    and "College 2026" still differs from "College Admin".
+    """
+    text = (name or "").strip()
+    while text and not text[0].isalnum():
+        text = text[1:].lstrip()
+    return text.casefold()
 
 
 # --------------------------------------------------------------------------
@@ -402,12 +431,17 @@ class TaskRepository:
         external_source: str | None = None,
         external_id: str | None = None,
         external_etag: str | None = None,
+        list_id: int | None = None,
+        important: bool = False,
+        my_day_on: str | None = None,
+        status: str | None = None,
+        dirty_at: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
             " priority, source, reminder_at, external_source, external_id, external_etag,"
-            " last_synced_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " list_id, important, my_day_on, dirty_at, status, last_synced_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
             " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
             (
                 title,
@@ -421,6 +455,11 @@ class TaskRepository:
                 external_source,
                 external_id,
                 external_etag,
+                list_id,
+                1 if important else 0,
+                my_day_on,
+                dirty_at,
+                status,
                 external_id,
             ),
         )
@@ -444,10 +483,20 @@ class TaskRepository:
             "reminded_at",
             "external_etag",
             "last_synced_at",
+            "list_id",
+            "important",
+            "my_day_on",
+            "completed_at",
+            "dirty_at",
         }
         sets = {k: v for k, v in fields.items() if k in allowed}
         if not sets:
             return
+        # `completed_at` is a fact about the status, not a field a caller should
+        # have to remember to pass -- and one that has to be cleared when a task
+        # is reopened, or a re-completed task keeps the first date.
+        if "status" in sets and "completed_at" not in sets:
+            sets["completed_at"] = _now() if sets["status"] == "done" else None
         clause = ", ".join(f"{k} = ?" for k in sets)
         self.conn.execute(
             f"UPDATE tasks SET {clause}, updated_at = datetime('now') WHERE id = ?",
@@ -502,6 +551,246 @@ class TaskRepository:
     def external_ids(self, source: str) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT id, external_id, status FROM tasks WHERE external_source = ?",
+            (source,),
+        ).fetchall()
+
+    # ---------------------------------------------------------------- buckets
+    #
+    # The five views the Tasks page is made of. They live here rather than in
+    # the view because the counts and the rows have to agree: a sidebar saying
+    # "Missed 5" over a list showing four is worse than no count at all, and the
+    # only way to guarantee they match is one predicate, used twice.
+    #
+    # Missed is computed, never stored. A stored "missed" flag needs a job to
+    # set it, a rule for unsetting it, and a migration for rows that predate
+    # both -- and it is wrong for exactly as long as that job is not running.
+
+    OPEN = "status IN ('todo', 'in_progress')"
+
+    #: `date(due_at) <= today` catches an overdue task as well as one due today.
+    #: A task explicitly put in My Day stays there for the day even if its
+    #: deadline is next week -- that is what putting it there means.
+    _MY_DAY = (
+        "(my_day_on = date('now')"
+        " OR date(scheduled_at) = date('now')"
+        " OR date(due_at) = date('now'))"
+    )
+    _MISSED = "due_at IS NOT NULL AND due_at < date('now')"
+    _IMPORTANT = "important = 1"
+    _GENERAL = "due_at IS NULL AND scheduled_at IS NULL AND my_day_on IS NULL"
+
+    def _bucket_where(self, bucket: str, list_id: int | None = None) -> tuple[str, tuple]:
+        if bucket == "my_day":
+            return f"{self.OPEN} AND {self._MY_DAY}", ()
+        if bucket == "missed":
+            return f"{self.OPEN} AND {self._MISSED}", ()
+        if bucket == "important":
+            return f"{self.OPEN} AND {self._IMPORTANT}", ()
+        if bucket == "general":
+            return f"{self.OPEN} AND {self._GENERAL}", ()
+        if bucket == "completed":
+            # Cancelled is not completed. `upcoming(include_done=True)` conflates
+            # them, which made "Showing done" quietly mean "showing everything
+            # including things you gave up on".
+            return "status = 'done'", ()
+        if bucket == "list":
+            return f"{self.OPEN} AND list_id IS ?", (list_id,)
+        if bucket == "all":
+            return self.OPEN, ()
+        raise ValueError(f"unknown task bucket '{bucket}'")
+
+    #: Overdue first, then by deadline, then undated. `id` last so the order is
+    #: total -- without it two tasks due the same minute swap places between
+    #: reads and the list appears to shuffle itself.
+    _ORDER = "ORDER BY important DESC, (due_at IS NULL), due_at, id"
+
+    def bucket(
+        self, name: str, *, list_id: int | None = None, limit: int = 200
+    ) -> list[sqlite3.Row]:
+        where, params = self._bucket_where(name, list_id)
+        order = "ORDER BY completed_at DESC, id DESC" if name == "completed" else self._ORDER
+        return self.conn.execute(
+            f"SELECT * FROM tasks WHERE {where} {order} LIMIT ?", (*params, limit)
+        ).fetchall()
+
+    def counts(self) -> dict[str, int]:
+        """Every bucket count in one pass, plus one per list.
+
+        One query per bucket would be six round trips for a sidebar that redraws
+        on every mutation.
+        """
+        out: dict[str, int] = {}
+        for name in ("my_day", "missed", "important", "general", "completed", "all"):
+            where, params = self._bucket_where(name)
+            row = self.conn.execute(
+                f"SELECT count(*) FROM tasks WHERE {where}", params
+            ).fetchone()
+            out[name] = row[0]
+        for row in self.conn.execute(
+            f"SELECT list_id, count(*) AS n FROM tasks WHERE {self.OPEN} GROUP BY list_id"
+        ):
+            out[f"list:{row['list_id']}"] = row["n"]
+        return out
+
+    def dirty(self, source: str, limit: int = 200) -> list[sqlite3.Row]:
+        """Rows changed locally since they last reached the connector."""
+        return self.conn.execute(
+            "SELECT * FROM tasks WHERE dirty_at IS NOT NULL AND external_source = ?"
+            " ORDER BY dirty_at LIMIT ?",
+            (source, limit),
+        ).fetchall()
+
+    def unsynced(self, limit: int = 200) -> list[sqlite3.Row]:
+        """Local rows that never reached the connector at all.
+
+        Created while nothing was signed in, or while the upstream write failed.
+        They are the other half of the push: `dirty` updates what exists there,
+        this creates what does not.
+        """
+        return self.conn.execute(
+            f"SELECT * FROM tasks WHERE external_id IS NULL AND {self.OPEN}"
+            " ORDER BY id LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def adopt_external(
+        self, task_id: int, *, source: str, external_id: str, external_etag: str | None
+    ) -> None:
+        """Attach an upstream identity to a row that was created locally.
+
+        `update`'s allowlist deliberately excludes these -- an identity is not a
+        field anyone edits -- so the one legitimate case has its own method.
+        """
+        self.conn.execute(
+            "UPDATE tasks SET external_source = ?, external_id = ?, external_etag = ?,"
+            " last_synced_at = ?, dirty_at = NULL, updated_at = datetime('now')"
+            " WHERE id = ?",
+            (source, external_id, external_etag, _now(), task_id),
+        )
+        self.conn.commit()
+
+    def in_list(self, list_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM tasks WHERE list_id = ?", (list_id,)
+        ).fetchall()
+
+
+class TaskListRepository:
+    """The lists tasks live in.
+
+    Mirrors Microsoft To Do when an account is signed in -- `external_id` is the
+    Graph list id -- and stands alone when none is. The two cases share one
+    table because a machine that signs in later should adopt its local lists
+    rather than growing a second set beside them.
+    """
+
+    def __init__(self, conn: sqlite3.Connection | None = None):
+        self.conn = _conn(conn)
+
+    def create(
+        self,
+        name: str,
+        *,
+        external_source: str | None = None,
+        external_id: str | None = None,
+        is_default: bool = False,
+        position: int | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO task_lists (name, external_source, external_id, is_default, position)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (name, external_source, external_id, 1 if is_default else 0, position),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get(self, list_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM task_lists WHERE id = ?", (list_id,)
+        ).fetchone()
+
+    def all(self, *, include_retired: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM task_lists"
+        if not include_retired:
+            sql += " WHERE retired_at IS NULL"
+        sql += " ORDER BY is_default DESC, (position IS NULL), position, name COLLATE NOCASE"
+        return self.conn.execute(sql).fetchall()
+
+    def by_external(self, source: str, external_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM task_lists WHERE external_source = ? AND external_id = ?",
+            (source, external_id),
+        ).fetchone()
+
+    def by_name(self, name: str) -> sqlite3.Row | None:
+        """Exact, then folded, then a unique folded prefix.
+
+        "groceries" has to find "Groceries", and "college" has to find "College
+        2026" when that is the only candidate -- but never when there are two,
+        because silently picking one of two lists is how a task ends up
+        somewhere the user cannot find it.
+
+        Folding also drops a decorative prefix. Real To Do lists are named
+        "🛒 Groceries" and "📚 College", and nobody types the emoji: without
+        this, asking for "groceries" matched nothing, made a second list called
+        "groceries", and quietly split the user's shopping across two places.
+        """
+        wanted = _fold_list_name(name)
+        if not wanted:
+            return None
+        rows = self.all()
+        for row in rows:
+            if row["name"] == (name or "").strip():
+                return row
+        folded = [r for r in rows if _fold_list_name(r["name"]) == wanted]
+        if len(folded) == 1:
+            return folded[0]
+        if folded:
+            return None  # genuinely ambiguous; asking beats guessing
+        prefixed = [r for r in rows if _fold_list_name(r["name"]).startswith(wanted)]
+        return prefixed[0] if len(prefixed) == 1 else None
+
+    def default(self) -> sqlite3.Row | None:
+        row = self.conn.execute(
+            "SELECT * FROM task_lists WHERE is_default = 1 AND retired_at IS NULL"
+        ).fetchone()
+        if row is not None:
+            return row
+        rows = self.all()
+        return rows[0] if rows else None
+
+    def update(self, list_id: int, **fields: Any) -> None:
+        allowed = {"name", "external_source", "external_id", "is_default", "position", "retired_at"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return
+        clause = ", ".join(f"{k} = ?" for k in sets)
+        self.conn.execute(
+            f"UPDATE task_lists SET {clause}, updated_at = datetime('now') WHERE id = ?",
+            (*sets.values(), list_id),
+        )
+        self.conn.commit()
+
+    def clear_default(self) -> None:
+        self.conn.execute("UPDATE task_lists SET is_default = 0 WHERE is_default = 1")
+        self.conn.commit()
+
+    def retire(self, list_id: int) -> None:
+        """Mark a list gone upstream without losing the tasks that pointed at it.
+
+        Same rule as a vanished task: an outage and a deleted list produce the
+        same empty response, and only one of them is recoverable.
+        """
+        self.conn.execute(
+            "UPDATE task_lists SET retired_at = ?, updated_at = datetime('now')"
+            " WHERE id = ? AND retired_at IS NULL",
+            (_now(), list_id),
+        )
+        self.conn.commit()
+
+    def external_rows(self, source: str) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM task_lists WHERE external_source = ? AND retired_at IS NULL",
             (source,),
         ).fetchall()
 

@@ -1,0 +1,341 @@
+A way to organise zen tabs
+Browser Automation filling forms and stuff
+Adding an extension for better connectivity
+
+
+# PSOK UX, AI Providers, Tasks, Reliability & Chat Improvements
+
+You are working on the **PSOK project**.
+
+Use these repositories **only as references** to study existing approaches and patterns:
+
+* `/home/wayne/Documents/GitHub/openhuman`
+* `/home/wayne/Documents/GitHub/khoj`
+
+**Do not modify either of these repositories.**
+
+Inspect them where useful to understand how mature AI assistants handle model providers, provider abstractions, fallbacks, chat/planning modes, and related architecture. Also use LibreChat as a reference for its broad provider support.
+
+The goal is to improve PSOK into a reliable, seamless personal AI assistant with a strong user experience.
+
+---
+
+## How to approach this
+
+First, inspect the PSOK codebase and create a complete TODO checklist covering everything below.
+
+Then work through the checklist **one task at a time**.
+
+For every task:
+
+1. Understand the existing implementation.
+2. Identify the actual problem.
+3. Look at OpenHuman/Khoj/LibreChat when relevant for reference.
+4. Implement the proper solution in PSOK.
+5. Test it thoroughly.
+6. Fix regressions.
+7. Move to the next task only after the current task works.
+
+Do not just patch the UI. Fix underlying architectural problems where necessary.
+
+---
+
+# 1. Fix model responses
+
+There is currently an issue where the model sometimes does not respond at all.
+
+Trace the complete flow:
+
+`UI → chat state → API → provider → model → streaming → response → UI`
+
+Find the root cause and fix it properly.
+
+Handle failures such as:
+
+* provider errors
+* timeouts
+* connection failures
+* malformed responses
+* interrupted streams
+* unavailable models
+* backend exceptions
+
+The user should never be left staring at a frozen interface without knowing what happened.
+
+---
+
+# 2. Improve model/provider architecture
+
+PSOK should support a much broader range of AI providers.
+
+Study the provider architecture used by **OpenHuman, Khoj and LibreChat** and use those projects as inspiration.
+
+Consider supporting providers such as:
+
+* OpenRouter
+* xAI / Grok
+* OpenAI
+* Anthropic
+* Google
+* NVIDIA
+* Ollama
+* local models
+* other OpenAI-compatible providers
+
+Design this around a clean provider abstraction so adding another provider later is straightforward.
+
+Avoid tightly coupling PSOK to a single provider.
+
+The provider/model configuration should also feel simple from the user's perspective.
+
+---
+
+# 3. Add a robust fallback system
+
+PSOK should have a reliable fallback mechanism so that one provider failure does not completely break the assistant.
+
+For example:
+
+`Primary model → retry if appropriate → fallback model/provider → response`
+
+Build proper rules around:
+
+* which errors should trigger retries
+* which errors should immediately fail
+* maximum retry attempts
+* fallback order
+* provider timeouts
+* preserving conversation context
+
+Avoid infinite retries.
+
+If a fallback is used, the user should be informed clearly but without unnecessary technical noise.
+
+The goal is:
+
+**The assistant should recover gracefully whenever possible instead of simply failing.**
+
+---
+
+# 4. Fix Stop immediately
+
+The current Stop button does not actually stop generation immediately.
+
+When the user presses Stop, the active operation should genuinely be cancelled.
+
+Cancellation needs to propagate through the entire execution chain:
+
+`UI → request → stream → provider/model → tools/agent`
+
+The UI should immediately indicate that the operation has stopped.
+
+Test stopping during:
+
+* normal generation
+* long responses
+* streaming
+* reasoning
+* planning
+* tool calls
+* slow provider responses
+* retries/fallbacks
+
+Do not implement a fake UI-only stop that waits for the backend operation to finish.
+
+---
+
+# 5. Improve connector UX
+
+Connectors should feel automatic.
+
+Currently, the user can end up navigating through different places and manually configuring basic functionality after adding a connector.
+
+The desired flow is:
+
+`Add connector → authenticate → automatic setup → sync/index → ready`
+
+Once a connector has been added, PSOK should automatically perform whatever setup is required for it to become usable.
+
+This can include:
+
+* authentication
+* configuration
+* initialization
+* capability discovery
+* tool registration
+* syncing/indexing
+* connection checks
+
+The user should not have to manually visit multiple settings pages to finish basic connector setup.
+
+Show clear progress states such as:
+
+`Connecting → Authenticating → Setting up → Syncing → Ready`
+
+If something fails:
+
+`Failed → explain why → Retry`
+
+---
+
+# 6. Build a proper task system
+
+The task system should feel closer to the original **Microsoft To Do** experience.
+
+Create clear task views/categories:
+
+### My Day
+
+Represents the user's tasks for today.
+
+Today's scheduled tasks should automatically appear here.
+
+### Missed
+
+Create a smart missed-task system.
+
+Overdue or previously scheduled incomplete tasks should automatically be recognized as missed.
+
+Do not require users to manually move them.
+
+Handle rescheduling and recurring tasks intelligently.
+
+### General
+
+Tasks that don't have a specific date.
+
+### Important
+
+Tasks that the user has marked as important.
+
+Important should be independent of due date.
+
+### Lists / Groups
+
+Allow users to create custom lists/groups.
+
+Example:
+
+`Groceries`
+
+* Milk
+* Eggs
+* Bread
+* Coffee
+
+Other examples:
+
+`College`
+
+`Projects`
+
+`Personal`
+
+The user should be able to easily create, rename and manage these lists.
+
+---
+
+# 7. Make task organization intelligent
+
+PSOK should understand natural-language task requests.
+
+For example:
+
+> "Add milk and eggs to groceries."
+
+should automatically create those tasks inside the `Groceries` list.
+
+Likewise:
+
+> "Remind me to submit my assignment tomorrow."
+
+should create a task with the appropriate date.
+
+Avoid forcing users to manually configure every property when the assistant can infer it safely.
+
+---
+
+# 8. Improve Chat Mode and Plan Mode
+
+The current Plan Mode mainly appears to modify the prompt.
+
+That is not enough.
+
+Plan Mode should represent an actual planning/reasoning workflow.
+
+Think about how the assistant should:
+
+`Understand request → determine required steps → plan → execute → report result`
+
+Chat Mode should remain optimized for fast conversational interaction.
+
+Plan Mode should be used when a task genuinely benefits from planning, tool usage, or multi-step execution.
+
+Keep the experience fast. Do not introduce unnecessary latency simply because the system is in Plan Mode.
+
+Use OpenHuman/Khoj/LibreChat as references for how they structure agentic workflows, but design the final implementation around PSOK's architecture.
+
+---
+
+# 9. Make the system transparent
+
+The user should always understand what PSOK is doing.
+
+Provide useful states such as:
+
+* Thinking
+* Planning
+* Searching
+* Using a connector
+* Running a tool
+* Generating
+* Retrying
+* Switching provider
+* Syncing
+* Completed
+* Cancelled
+* Failed
+
+The system should communicate enough information to build trust without dumping internal technical details on the user.
+
+---
+
+# 10. Overall UX goal
+
+The entire product should feel like **one continuous assistant experience**.
+
+Avoid making the user think about:
+
+* which settings page they need
+* whether a connector is initialized
+* which provider failed
+* whether a request is still running
+* where an overdue task should go
+* how to manually organize everything
+
+PSOK should handle as much of this automatically as possible.
+
+The user should primarily be able to say what they want and have PSOK take care of the underlying work.
+
+---
+
+# Final requirements
+
+Before declaring the work complete:
+
+* Verify the model actually responds reliably.
+* Verify provider failures recover through fallback.
+* Verify Stop genuinely cancels active operations.
+* Verify connectors become usable after setup without unnecessary manual steps.
+* Verify My Day works.
+* Verify Missed tasks are detected automatically.
+* Verify Important tasks work.
+* Verify General tasks work.
+* Verify custom Lists/Groups work.
+* Verify Chat Mode and Plan Mode behave meaningfully differently.
+* Verify the UI communicates system state clearly.
+* Test edge cases and failure scenarios.
+* Ensure existing PSOK functionality is not broken.
+
+**Important:** OpenHuman and Khoj are reference implementations only. Do not modify them. All implementation work must happen inside PSOK.
+
