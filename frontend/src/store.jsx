@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from './api.js'
+import { api, onServerState, serverState, wakeBackend } from './api.js'
 
 /* One store for everything that is not the transcript.
 
@@ -36,6 +36,12 @@ export function AppProvider({ children }) {
   const prefs = useRef(loadPrefs()).current
 
   const [view, setViewRaw] = useState(prefs.view || 'chat')
+  // Whether the backend is answering at all. Distinct from `health`, which is
+  // what a *reachable* backend says about itself: on a deployment where the
+  // API is a container that stops when idle, "still booting" and "up but
+  // degraded" want different frames, and conflating them showed a page full of
+  // failed-to-load errors during an ordinary cold start.
+  const [server, setServer] = useState(serverState)
   const [health, setHealth] = useState(null)
   const [healthError, setHealthError] = useState(null)
   const [toasts, setToasts] = useState([])
@@ -203,13 +209,21 @@ export function AppProvider({ children }) {
     }
   }, [activeId, refreshCaps, refreshHealth, toast])
 
-  useEffect(() => { refreshHealth() }, [refreshHealth])
-  useEffect(() => { refreshConvs() }, [refreshConvs])
-  useEffect(() => { refreshCaps() }, [refreshCaps])
+  useEffect(() => onServerState(setServer), [])
+
+  // Nothing is fetched until the backend answers. Firing the first load against
+  // a container that is still booting spends the whole cold start on requests
+  // that time out, and then the interface has to be told to try again -- so the
+  // three opening calls wait on the wake instead, and every one of them lands.
+  const ready = server.phase === 'ready'
+  useEffect(() => { if (ready) refreshHealth() }, [ready, refreshHealth])
+  useEffect(() => { if (ready) refreshConvs() }, [ready, refreshConvs])
+  useEffect(() => { if (ready) refreshCaps() }, [ready, refreshCaps])
 
   // A connector can die between messages and the API only notices at the start
   // of a turn, so the header has to keep asking.
   useEffect(() => {
+    if (!ready) return undefined
     const tick = setInterval(refreshHealth, HEALTH_INTERVAL)
     const onFocus = () => refreshHealth()
     window.addEventListener('focus', onFocus)
@@ -217,10 +231,11 @@ export function AppProvider({ children }) {
       clearInterval(tick)
       window.removeEventListener('focus', onFocus)
     }
-  }, [refreshHealth])
+  }, [ready, refreshHealth])
 
   const value = useMemo(() => ({
     view, setView,
+    server, retryServer: wakeBackend,
     health, healthError, refreshHealth,
     toasts, toast,
     overlay, setOverlay,
@@ -234,7 +249,7 @@ export function AppProvider({ children }) {
     chat: chatRef.current,
     registerChat: (actions) => Object.assign(chatRef.current, actions),
   }), [
-    view, setView, health, healthError, refreshHealth, toasts, toast, overlay,
+    view, setView, server, health, healthError, refreshHealth, toasts, toast, overlay,
     conversations, refreshConvs, activeId, setActiveId, caps, refreshCaps,
     setCapEnabled, busyCap, workspace, setWorkspace, sidebar, setSidebar,
     capabilitiesTab, setCapabilitiesTab,

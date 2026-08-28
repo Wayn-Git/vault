@@ -3,6 +3,7 @@ import Icon from '../../components/Icon.jsx'
 import ServiceIcon from '../../components/ServiceIcon.jsx'
 import { useApp } from '../../store.jsx'
 import { api } from '../../api.js'
+import { SkeletonGrid } from '../../components/Skeleton.jsx'
 
 /* Skills: the ones on this machine and the ones that could be, in one list.
 
@@ -313,7 +314,12 @@ export default function SkillsTab({ query, newOpen, setNewOpen }) {
         </div>
       )}
 
-      {loading && shown.length === 0 && <div className="dir-empty">Reading the skill sources…</div>}
+      {loading && shown.length === 0 && (
+        <>
+          <div className="dir-empty">Reading the skill sources…</div>
+          <SkeletonGrid cards={6} />
+        </>
+      )}
 
       <div className="dir-grid" data-enter>
         {shown.map((row) => {

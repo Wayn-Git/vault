@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
+import { SkeletonRows } from '../components/Skeleton.jsx'
 
 /* The task list, in the shape people already keep tasks in.
 
@@ -11,9 +12,12 @@ import { api } from '../api.js'
    come from the same predicate, so a rail saying 5 over a list of 4 is not a
    state this can reach.
 
-   My Day is PSOK's own. Graph exposes My Day membership through fields this
-   connector's scopes do not reach, so the page says so rather than implying a
-   list that silently differs from the phone. */
+   My Day travels as a category tag on the task, because To Do's own My Day is
+   not in its API at all -- verified live, not assumed: showInMyDay and
+   isInMyDay both 400 as unknown properties on todoTask, and the live beta
+   schema has no field containing "day". So the sun writes a "My Day" tag that
+   To Do shows on the task and syncs to every device. The page says exactly that
+   rather than implying it is the same list as the phone's My Day. */
 
 const BUCKETS = [
   { id: 'my_day', label: 'My Day', icon: 'sun', blurb: 'What you mean to do today.' },
@@ -169,6 +173,12 @@ export default function Tasks() {
   const [syncing, setSyncing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [busyTask, setBusyTask] = useState(null)
+  // Whether the first response has landed. Without it the empty states render
+  // against an empty array — so the page opened on "Nothing picked for today
+  // yet", complete with its explanation, and then replaced it with the day's
+  // tasks. A page that says the wrong thing first is worse than one that says
+  // nothing yet.
+  const [loaded, setLoaded] = useState(false)
   useViewEntrance(rootRef)
 
   const load = useCallback(async () => {
@@ -183,6 +193,8 @@ export default function Tasks() {
       setEvents(cal)
     } catch (err) {
       toast(err.message, 'bad')
+    } finally {
+      setLoaded(true)
     }
   }, [view, toast])
 
@@ -271,7 +283,7 @@ export default function Tasks() {
             <h1>Tasks</h1>
             <div className="vheader-sub">
               {counts.connected
-                ? 'Tasks, lists, dates and importance sync both ways with Microsoft To Do. My Day is PSOK\u2019s own \u2014 Microsoft does not share it.'
+                ? 'Tasks, lists, dates, importance and My Day sync both ways with Microsoft To Do. Mark a task for today with the sun, a #myday tag, or a To Do list called My Day.'
                 : 'Kept in PSOK. Sign in to Microsoft To Do from Connectors and these follow you.'}
             </div>
           </div>
@@ -301,7 +313,7 @@ export default function Tasks() {
               >
                 <Icon name={bucket.icon} size={15} />
                 <span className="task-rail-label">{bucket.label}</span>
-                <span className="task-rail-count">{counts.buckets?.[bucket.id] ?? 0}</span>
+                <span className="task-rail-count">{loaded ? (counts.buckets?.[bucket.id] ?? 0) : ''}</span>
               </button>
             ))}
 
@@ -311,7 +323,7 @@ export default function Tasks() {
                 <Icon name="plus" size={13} />
               </button>
             </div>
-            {counts.lists.length === 0 && (
+            {loaded && counts.lists.length === 0 && (
               <div className="task-rail-empty">No lists yet.</div>
             )}
             {counts.lists.map((l) => (
@@ -332,14 +344,16 @@ export default function Tasks() {
           <section className="task-pane">
             <div className="card card-pad">
               <div className="card-title">
-                {active.label} · {tasks.length}
+                {active.label} · {loaded ? tasks.length : '—'}
               </div>
               {active.blurb && <div className="task-pane-blurb">{active.blurb}</div>}
               {view.bucket === 'my_day' && !view.listId && (
                 <div className="task-pane-blurb">
-                  My Day is PSOK&rsquo;s own. Microsoft&rsquo;s Graph API returns no My Day
-                  field at all, so what you put here stays on this machine and what is in To
-                  Do&rsquo;s My Day cannot be read.
+                  Three ways to put something here, all of them synced: press the sun,
+                  type <span className="mono">#myday</span> in the task&rsquo;s title in To Do,
+                  or keep a To Do list called <strong>My Day</strong>. To Do&rsquo;s own My Day
+                  is not in its API &mdash; no field for it exists &mdash; so these work
+                  beside it rather than reading it.
                 </div>
               )}
 
@@ -352,14 +366,18 @@ export default function Tasks() {
                 />
               )}
 
-              {tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
+              {!loaded && <SkeletonRows rows={5} controls={3} />}
+
+              {loaded && tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
                 <div className="empty-state empty-state--do" style={{ padding: 18 }}>
                   <Icon name="sun" size={20} />
                   <div>
                     <div>Nothing picked for today yet.</div>
                     <div className="empty-note">
-                      A task lands here when it is due today, or when you put it here with
-                      the sun. Nothing fills it on its own — that is what makes it a choice.
+                      A task lands here when it is due today, when you finish it today, or
+                      when you pick it — the sun here, <span className="mono">#myday</span> in
+                      the title, or a To Do list called My Day. Nothing fills it on its own;
+                      that is what makes it a choice.
                     </div>
                     <div className="empty-actions">
                       {counts.buckets?.missed > 0 && (
@@ -383,7 +401,7 @@ export default function Tasks() {
                 </div>
               )}
 
-              {tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
+              {loaded && tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
                 <div className="empty-state" style={{ padding: 18 }}>
                   <Icon name="check" size={20} />
                   {view.bucket === 'missed'
@@ -494,8 +512,9 @@ export default function Tasks() {
             </div>
 
             <div className="card card-pad" style={{ marginTop: 18 }}>
-              <div className="card-title">next three weeks · {events.length}</div>
-              {events.length === 0 && (
+              <div className="card-title">next three weeks · {loaded ? events.length : '—'}</div>
+              {!loaded && <SkeletonRows rows={3} controls={0} />}
+              {loaded && events.length === 0 && (
                 <div className="empty-state" style={{ padding: 18 }}>
                   <Icon name="clock" size={20} />
                   No events. Scheduling one asks first, and checks for conflicts before it writes.

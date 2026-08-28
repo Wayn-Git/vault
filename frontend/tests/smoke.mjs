@@ -173,10 +173,14 @@ try {
   await page.keyboard.press('Control+3')
   await page.waitForSelector('.cap-tabs', { timeout: 6000 })
   await page.locator('.cap-tab', { hasText: 'Connectors' }).click()
-  await page.waitForSelector('.conn-table', { timeout: 8000 })
+  // The connectors page is a list of rows now, not a table -- one row opens
+  // into its own detail panel. These selectors tracked the table and so failed
+  // on markup rather than on behaviour, which is the least useful way for a
+  // browser test to fail.
+  await page.waitForSelector('.conn-list', { timeout: 8000 })
   await page.waitForTimeout(700)
   check('the connectors tab lists what is configured',
-    (await page.locator('.conn-table tbody tr').count()) > 0)
+    (await page.locator('.conn-list .conn-row').count()) > 0)
 
   // A connector that has never once worked must not sit among the ones serving
   // tools right now under a heading saying they are the same thing.
@@ -186,7 +190,7 @@ try {
     heads.map((h) => h.split('\n')[0]).join(' | '))
   check('a connected row reports live tools, not just a switch',
     !heads.some((h) => /^connected/i.test(h))
-      || /tools? live/.test(await page.locator('.conn-table').first().innerText()))
+      || /tools?\b/.test(await page.locator('.conn-list').first().innerText()))
 
   // Adding happens on this page: the catalogue opens underneath.
   await page.locator('.cap-head .btn').click()
@@ -198,12 +202,15 @@ try {
   await page.locator('.cap-head .btn').click()
   await page.waitForTimeout(200)
 
-  await page.locator('.conn-actions-inner .icon-btn').first().click()
-  await page.waitForTimeout(400)
-  check('a connector opens its credentials in place',
-    (await page.locator('.conn-setup').count()) === 1)
-  await page.locator('.conn-actions-inner .icon-btn').first().click()
-  await page.waitForTimeout(200)
+  // Opening a connector goes into its own panel, with a way back to the list.
+  await page.locator('.conn-list .conn-row').first().click()
+  await page.waitForSelector('.conn-detail', { timeout: 6000 })
+  check('a connector opens its own panel',
+    (await page.locator('.conn-detail-section').count()) > 0)
+  await page.locator('.conn-back').click()
+  await page.waitForSelector('.conn-list', { timeout: 6000 })
+  check('and there is a way back to the list',
+    (await page.locator('.conn-detail').count()) === 0)
   await page.keyboard.press('Control+1')
   await page.waitForTimeout(300)
 

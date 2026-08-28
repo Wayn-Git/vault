@@ -5,6 +5,7 @@ import CommandPalette from './components/CommandPalette.jsx'
 import Shortcuts from './components/Shortcuts.jsx'
 import Settings from './components/Settings.jsx'
 import Sidebar from './components/Sidebar.jsx'
+import { BootScreen } from './components/Skeleton.jsx'
 import { useApp } from './store.jsx'
 import { chord, isTyping, MOD_LABEL } from './keys.js'
 import Dashboard from './views/Dashboard.jsx'
@@ -166,7 +167,7 @@ function Toasts() {
 }
 
 export default function App() {
-  const { view } = useApp()
+  const { view, server, retryServer } = useApp()
   useGlobalKeys()
 
   const Active = VIEWS[view] || Chat
@@ -174,6 +175,15 @@ export default function App() {
   useEffect(() => {
     document.title = 'PSOK · personal operating system'
   }, [])
+
+  // Nothing is mounted until the backend answers. Every view here opens by
+  // fetching, so mounting them against a container that is still booting draws
+  // a page of failures and then leaves it there -- a deploy that looks broken
+  // for the fifty seconds it takes to start. The frame says what is happening
+  // instead, and the views mount into real data.
+  if (server.phase !== 'ready') {
+    return <BootScreen server={server} onRetry={retryServer} />
+  }
 
   return (
     <div className="app">

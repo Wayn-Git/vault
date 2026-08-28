@@ -3387,3 +3387,287 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   overflow-wrap: anywhere;
 }
+
+/* --- plan mode, the turn-cost line ------------------------------------- */
+
+/* The plan is a thing you act on, not a message you read past, so it gets a
+   frame and the stream's other items do not. */
+.plan-card {
+  margin: 4px 0 10px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md, 10px);
+  background: rgba(255, 255, 255, 0.02);
+}
+.plan-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.plan-count { margin-left: auto; letter-spacing: 0; text-transform: none; }
+.plan-summary { margin: 10px 0 0; font-size: 13.5px; line-height: 1.6; color: var(--text); }
+.plan-steps { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 8px; }
+.plan-steps li { font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.plan-step-title { display: block; }
+.plan-step-detail { display: block; margin-top: 2px; font-size: 12.5px; color: var(--text-dim); }
+.plan-step-tools {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.plan-hint { font-size: 12px; color: var(--text-faint); }
+.plan-settled {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+/* Deliberately quiet: interesting the first time a turn feels slow, noise
+   every other time. */
+.msg-cost {
+  margin: 2px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+}
+
+/* A provider that is configured and not answering. Dimmed rather than removed
+   or disabled: the user put it there on purpose, and picking it is still how
+   they find out why it will not work. */
+.menu-row--down .menu-label { opacity: 0.55; }
+.menu-row--down .menu-hint { color: var(--stop); opacity: 0.9; }
+
+/* Plan steps you can edit before approving, and progress through them once you
+   have. The tick and the pulse come from the model's own `begin_step` calls --
+   nothing here is inferred from which tools happened to run. */
+.plan-step-input {
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.plan-step-input:hover { border-color: var(--hairline); }
+.plan-step-input:focus {
+  outline: none;
+  border-color: var(--hairline);
+  background: var(--canvas-deep);
+}
+.plan-step--running { position: relative; }
+.plan-step--running .plan-step-title,
+.plan-step--running .plan-step-input { color: var(--text); font-weight: 500; }
+.plan-step--running::marker { color: var(--live); }
+.plan-step--done .plan-step-title,
+.plan-step--done .plan-step-input { opacity: 0.55; text-decoration: line-through; }
+.plan-step--done::marker { color: var(--live); }
+
+/* ---------------------------------------------------------------- skeletons
+
+   The shape of what is coming, while it is coming. Two rules make the
+   difference between this reading as "loading" and as "broken":
+
+   The blocks are the size of the content they stand in for, so nothing jumps
+   when the real thing arrives. And the shimmer is slow -- 1.6s, not the 0.8s
+   that is the usual default -- because a fast pulse reads as a warning light.
+
+   Under `prefers-reduced-motion` the sweep stops and the blocks sit still at a
+   contrast that still reads as absent rather than empty. A page of forty
+   pulsing rectangles is close to the worst case that rule exists for. */
+
+.skel {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  background: var(--surface);
+}
+
+.skel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.055) 42%,
+    rgba(255, 255, 255, 0.055) 58%,
+    transparent
+  );
+  animation: skel-sweep 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes skel-sweep {
+  100% { transform: translateX(100%); }
+}
+
+.skel-stack { display: flex; flex-direction: column; gap: 8px; }
+
+.skel-rows { display: flex; flex-direction: column; }
+
+.skel-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 2px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.skel-row:last-child { border-bottom: 0; }
+
+.skel-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.skel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 12px;
+}
+
+.skel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 16px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  background: var(--raised);
+}
+
+.skel-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------- boot screen
+
+   Not a skeleton. A stopped container takes tens of seconds to come back, and
+   for that long the honest thing is a sentence and a count, not a shimmer. */
+
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--canvas);
+}
+
+.boot-inner {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+}
+
+.boot-mark {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  color: var(--confirm);
+  background: var(--confirm-soft);
+  border: 1px solid var(--hairline);
+}
+
+.boot-mark.is-down { color: var(--stop); background: var(--stop-soft); }
+
+.boot-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.boot-note {
+  margin: 0;
+  max-width: 42ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+/* Indeterminate on purpose. A percentage would have to be invented, and an
+   invented one that stalls at 90% is worse than no bar at all. */
+.boot-bar {
+  width: min(280px, 80%);
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.boot-bar > span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--confirm);
+  animation: boot-slide 1.5s var(--ease-in-out) infinite;
+}
+
+@keyframes boot-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(363%); }
+}
+
+.boot-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.boot-ghost {
+  margin-top: 20px;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 18px;
+  opacity: 0.45;
+  text-align: left;
+}
+
+.boot-ghost-rail,
+.boot-ghost-main { display: flex; flex-direction: column; gap: 10px; }
+
+@media (max-width: 620px) {
+  .boot-ghost { grid-template-columns: 1fr; }
+  .boot-ghost-rail { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel::after { animation: none; }
+  .skel { background: var(--surface-2); }
+  .boot-bar > span { animation: none; width: 100%; opacity: 0.5; }
+}

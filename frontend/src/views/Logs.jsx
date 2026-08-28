@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api, fmtTime, prettyJSON } from '../api.js'
+import { SkeletonRows } from '../components/Skeleton.jsx'
 
 export default function Logs() {
   const rootRef = useRef(null)
@@ -12,6 +13,10 @@ export default function Logs() {
   const [limit, setLimit] = useState(100)
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState(false)
+  // The first response, distinct from `busy`: a reload keeps the rows on screen,
+  // but the opening render has nothing to keep and must not claim the log is
+  // empty before it has looked.
+  const [loaded, setLoaded] = useState(false)
   useViewEntrance(rootRef)
 
   const load = useCallback(async (n = limit) => {
@@ -22,6 +27,7 @@ export default function Logs() {
       toast(err.message, 'bad')
     } finally {
       setBusy(false)
+      setLoaded(true)
     }
   }, [limit, toast])
 
@@ -91,18 +97,20 @@ export default function Logs() {
             <option value={200}>last 200</option>
           </select>
           <span className="mono" style={{ alignSelf: 'center', fontSize: 11, color: 'var(--text-faint)' }}>
-            {filtered.length} row{filtered.length === 1 ? '' : 's'}
+            {loaded ? `${filtered.length} row${filtered.length === 1 ? '' : 's'}` : 'loading…'}
           </span>
         </div>
 
-        {filtered.length === 0 && (
+        {!loaded && <div className="card card-pad" data-enter><SkeletonRows rows={8} controls={1} /></div>}
+
+        {loaded && filtered.length === 0 && (
           <div className="card empty-state" data-enter>
             <Icon name="logs" size={22} />
             No execution rows yet. Ask the agent to do something in Chat — every tool call lands here.
           </div>
         )}
 
-        {filtered.length > 0 && (
+        {loaded && filtered.length > 0 && (
           <div className="card" style={{ overflow: 'auto', maxHeight: 'calc(100vh - 260px)' }} data-enter>
             <table className="log-table">
               <thead>

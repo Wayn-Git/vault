@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api, fmtDate } from '../api.js'
+import { SkeletonCard } from '../components/Skeleton.jsx'
 
 export default function Memory() {
   const rootRef = useRef(null)
@@ -102,6 +103,8 @@ export default function Memory() {
             }}
           />
         </div>
+
+        {!state && <SkeletonCard rows={5} controls={1} />}
 
         {state && facts.length === 0 && (
           <div className="card empty-state" data-enter>

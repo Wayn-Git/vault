@@ -3,6 +3,7 @@ import Icon from '../../components/Icon.jsx'
 import ServiceIcon from '../../components/ServiceIcon.jsx'
 import { useApp } from '../../store.jsx'
 import { api, copyText } from '../../api.js'
+import Skeleton, { SkeletonRows } from '../../components/Skeleton.jsx'
 
 /* Connectors: what is added, what is running, and whose account it is using.
 
@@ -447,6 +448,20 @@ function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChan
   )
 }
 
+/* The one button a row offers, per the action its state names.
+
+   `null` means the state has no button — either nothing is wrong, or the only
+   correct thing to do is wait for the provider. `credentials` deliberately has
+   none either: the fields live in the card you open, and a button here would
+   only take you there. */
+const ROW_ACTIONS = {
+  sign_in: { act: 'connect', label: 'Connect' },
+  connect: { act: 'connect', label: 'Start' },
+  retry: { act: 'connect', label: 'Retry' },
+  sync: { act: 'sync', label: 'Sync now' },
+  credentials: null,
+}
+
 /* A configured connector in the list: what it is, and how it is doing. */
 function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   const blocked = (server.missing_credentials || []).length > 0
@@ -455,9 +470,13 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   // "122 tools live" for tools that would every one of them have failed.
   const state = reason ?? `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`
   const tone = reason ? (live?.error ? 'error' : 'off') : 'live'
+  // The server's own sentence for this state. Shown on hover rather than in the
+  // row, which has no width for it — the row says *that* something is needed,
+  // and the card you open says what and offers the button.
+  const detail = server.lifecycle?.detail
 
   return (
-    <button type="button" className="conn-row" onClick={onOpen}>
+    <button type="button" className="conn-row" onClick={onOpen} title={detail || undefined}>
       <ServiceIcon name={server.name} size={30} />
       <span className="conn-row-text">
         <span className="conn-row-name">{server.title}</span>
@@ -466,17 +485,31 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
         </span>
       </span>
       <span className={`conn-status conn-status--${tone}`}>{state}</span>
-      {server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
-        <span
-          role="button"
-          tabIndex={0}
-          className="btn btn--small btn--primary"
-          onClick={(e) => { e.stopPropagation(); onAct('connect') }}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('connect') } }}
-        >
-          {busy === 'connect' ? 'Opening…' : 'Connect'}
-        </span>
-      )}
+      {ROW_ACTIONS[server.lifecycle?.action] !== undefined
+        ? ROW_ACTIONS[server.lifecycle.action] && (
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn btn--small btn--primary"
+            onClick={(e) => { e.stopPropagation(); onAct(ROW_ACTIONS[server.lifecycle.action].act) }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.stopPropagation(); onAct(ROW_ACTIONS[server.lifecycle.action].act) }
+            }}
+          >
+            {busy ? 'Working…' : ROW_ACTIONS[server.lifecycle.action].label}
+          </span>
+        )
+        : server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn btn--small btn--primary"
+            onClick={(e) => { e.stopPropagation(); onAct('connect') }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('connect') } }}
+          >
+            {busy === 'connect' ? 'Opening…' : 'Connect'}
+          </span>
+        )}
       <Icon name="chevron" size={15} className="conn-row-chevron" />
     </button>
   )
@@ -495,6 +528,20 @@ function CatalogueRow({ entry, busy, onAdd }) {
       <Icon name={busy ? 'refresh' : 'plus'} size={15} className="cat-row-add" />
     </button>
   )
+}
+
+/* The short label per lifecycle state. The sentence lives on the server (as
+   `lifecycle.detail`) so it stays the same wherever it is read; this is only
+   the two or three words that fit in a row. */
+const LIFECYCLE_LABELS = {
+  off: 'off',
+  starting: 'not started yet',
+  setup: 'needs credentials',
+  authenticating: 'signing in…',
+  sign_in: 'needs sign-in',
+  syncing: 'first sync pending',
+  failed: 'failed to start',
+  ready: 'ready',
 }
 
 const FEATURED = 8
@@ -657,6 +704,10 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const [busy, setBusy] = useState({})
   const [open, setOpen] = useState(null)
   const [starting, setStarting] = useState(false)
+  // The first fetch. Five calls go out together and none of them is instant on
+  // a cold backend, so without this the page rendered its "no connector
+  // matches that" empty state over a list that was on its way.
+  const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -674,6 +725,8 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       refreshCaps()
     } catch (err) {
       toast(err.message, 'bad')
+    } finally {
+      setLoaded(true)
     }
   }, [refreshCaps, toast])
 
@@ -686,6 +739,12 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
      toasted here -- a toast that disappears is the wrong place for a state the
      user has to act on. */
   const settled = useRef(new Set())
+  // Servers whose "waiting" we have already pulled a fresh row for. The row's
+  // `lifecycle` is computed on the server from the same pending state, so one
+  // refetch at the start of a sign-in is what makes the row say
+  // "authenticating" for its duration -- refetching every tick would ask every
+  // connector who it is signed in as, three seconds apart, for the whole wait.
+  const announced = useRef(new Set())
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
@@ -695,7 +754,15 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       setAuths(rows)
       for (const row of rows) {
         const key = `${row.server}:${row.finished_at}`
-        if (row.status === 'waiting' || settled.current.has(key)) continue
+        if (row.status === 'waiting') {
+          if (!announced.current.has(row.server)) {
+            announced.current.add(row.server)
+            refresh()
+          }
+          continue
+        }
+        announced.current.delete(row.server)
+        if (settled.current.has(key)) continue
         settled.current.add(key)
         refresh()
         refreshHealth()
@@ -766,6 +833,12 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       } else if (action === 'login') {
         await api.mcpLogin(server.name, options)
         toast(`Opening ${server.title}'s sign-in — finish in the browser`, 'info')
+      } else if (action === 'sync') {
+        /* The last step of setting up Microsoft To Do, which used to be
+           invisible: signed in, tools live, and the Tasks page still empty
+           until some background tick fifteen minutes later happened to run. */
+        const result = await api.syncTasks()
+        toast(result.summary || `Synced ${server.title}`, 'ok')
       }
       await refresh()
       refreshHealth()
@@ -800,11 +873,18 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
      reporting 122 tools live, beside a "Sign in" button, while no Google
      account was attached to it — every one of those tools would have failed.
      A connector that still needs an account or its credentials is waiting on
-     you, whatever its process is doing. */
+     you, whatever its process is doing.
+
+     The judgement now comes from the server as `lifecycle` — the same one the
+     agent loop uses to decide whether to offer the connector's tools, so the
+     screen and the model cannot disagree about whether it works. The old
+     derivation stays as the fallback for a payload without it. */
   const usable = (server) =>
-    Boolean(live[server.name]?.connected)
-    && (server.missing_credentials || []).length === 0
-    && server.signed_in !== false
+    server.lifecycle
+      ? server.lifecycle.ready
+      : Boolean(live[server.name]?.connected)
+        && (server.missing_credentials || []).length === 0
+        && server.signed_in !== false
 
   const [running, waiting] = useMemo(() => {
     const on = []
@@ -842,6 +922,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const started = health?.mcp_reconciled !== false
 
   const why = (server) => {
+    if (server.lifecycle) return LIFECYCLE_LABELS[server.lifecycle.state] || server.lifecycle.state
     const state = live[server.name] || {}
     if ((server.missing_credentials || []).length > 0) return 'needs credentials'
     if (server.signed_in === false) return 'needs sign-in'
@@ -1011,7 +1092,14 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
         </section>
       )}
 
-      {servers.length === 0 && available.length === 0 && !newOpen && (
+      {!loaded && (
+        <section data-enter>
+          <div className="cap-section-head"><Skeleton w={92} h={11} /><Skeleton w={54} h={11} /></div>
+          <div className="card conn-list"><SkeletonRows rows={5} controls={2} /></div>
+        </section>
+      )}
+
+      {loaded && servers.length === 0 && available.length === 0 && !newOpen && (
         <div className="dir-empty" data-enter>No connector matches that.</div>
       )}
 

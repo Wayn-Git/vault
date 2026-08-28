@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
+import Skeleton from '../components/Skeleton.jsx'
 
 const MODULES = [
   { id: 'chat', icon: 'chat', name: 'Agent chat', desc: 'Streaming turns, tool calls, permission prompts', meta: 'reason → act → observe' },
@@ -111,7 +112,9 @@ export default function Dashboard() {
           <div className="stat-grid" data-enter>
             {counters.map((s) => (
               <div className="stat" key={s.key}>
-                <div className="stat-num">{s.count}</div>
+                {/* A zero the page has not verified is a lie that looks like
+                    a fact. Until health has answered, say nothing. */}
+                <div className="stat-num">{health ? s.count : <Skeleton w={52} h={26} r={8} />}</div>
                 <div className="stat-label">{s.label}</div>
                 <div className="stat-sub">
                   {s.sub}

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
-import { api } from '../api.js'
+import { api, serverTime } from '../api.js'
+import { SkeletonCard } from '../components/Skeleton.jsx'
 
 /* Automations — beta. A turn that runs without anyone typing.
 
@@ -34,11 +35,17 @@ const describe = (minutes) =>
     ? `every ${minutes / 1440} days`
     : minutes % 60 === 0 ? `every ${minutes / 60} hours` : `every ${minutes} minutes`)
 
-/** "in 4 minutes", "3 hours ago" — a wall-clock time answers the wrong question. */
+/** "in 4 minutes", "3 hours ago" — a wall-clock time answers the wrong question.
+ *
+ *  Read through `serverTime` because these come from two places with different
+ *  habits: `next_run_at` and `last_run_at` carry an offset, and a run's
+ *  `created_at` is SQLite's bare UTC. Reading the second as local put every run
+ *  hours into the past the instant it finished. */
 function when(iso) {
   if (!iso) return '—'
-  const delta = new Date(iso).getTime() - Date.now()
-  if (Number.isNaN(delta)) return iso
+  const at = serverTime(iso)
+  if (!at) return iso
+  const delta = at.getTime() - Date.now()
   const mins = Math.round(Math.abs(delta) / 60000)
   const size = mins < 60
     ? `${Math.max(1, mins)} minute${mins === 1 ? '' : 's'}`
@@ -289,6 +296,8 @@ export default function Automations() {
         </div>
 
         {composing && <Composer onDone={() => { setComposing(false); load() }} onCancel={() => setComposing(false)} />}
+
+        {!loaded && <SkeletonCard rows={3} controls={2} />}
 
         {loaded && rows.length === 0 && !composing && (
           <div className="card empty-state" data-enter>
