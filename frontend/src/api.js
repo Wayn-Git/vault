@@ -1,10 +1,127 @@
-const BASE = '/api'
+/* Where the API is.
+
+   Empty in development and in the single-process build, where the API is served
+   from the same origin as this bundle and `/api` is a relative path. Set
+   `VITE_API_BASE` at build time to point a separately deployed interface at a
+   separately deployed backend -- a Vercel frontend at a Render service, say.
+   Trailing slashes are trimmed so `https://host/` and `https://host` mean the
+   same thing rather than producing `https://host//api`. */
+export const API_ORIGIN = (import.meta.env?.VITE_API_BASE || '').trim().replace(/\/+$/, '')
+
+const BASE = `${API_ORIGIN}/api`
+
+/* Waking the backend.
+
+   A free-tier container is stopped when nothing has asked it for anything, and
+   the request that wakes it waits out a cold start -- tens of seconds, during
+   which every call the interface makes on mount is queued behind the same boot.
+   Rendering a blank page for that long reads as a broken deploy.
+
+   So: one request goes out the moment this module is evaluated, which is before
+   React has mounted, and the interface draws its own frame around the wait
+   instead of waiting for the first answer to arrive. Views read `phase` and
+   show a skeleton rather than an empty room.
+
+   Same-origin builds resolve this on the first attempt and never see it. */
+const WAKE_ATTEMPT_TIMEOUT = 9000
+const WAKE_GAP = 1500
+const WAKE_GIVE_UP_AFTER = 90000
+
+let state = { phase: 'waking', since: Date.now(), attempts: 0, error: null }
+const watchers = new Set()
+
+function publish(patch) {
+  state = { ...state, ...patch }
+  for (const fn of watchers) {
+    try { fn(state) } catch { /* a bad watcher must not stop the others */ }
+  }
+}
+
+/** Subscribe to the backend's reachability. Called immediately with the
+ *  current state, and returns the unsubscribe. */
+export function onServerState(fn) {
+  watchers.add(fn)
+  fn(state)
+  return () => watchers.delete(fn)
+}
+
+export const serverState = () => state
+
+async function ping(timeout) {
+  // `/api/ping` on purpose rather than `/api/health`: health surveys every
+  // provider, which can itself take seconds and is the wrong thing to make a
+  // cold start wait for. Any request wakes the container; the cheapest one
+  // should be the one that does it.
+  const stop = new AbortController()
+  const timer = setTimeout(() => stop.abort(), timeout)
+  try {
+    const res = await fetch(`${BASE}/ping`, { signal: stop.signal, cache: 'no-store' })
+    return res.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Keep asking until the backend answers, or until it has had long enough. */
+export async function wakeBackend() {
+  if (state.phase === 'ready') return true
+  publish({ phase: 'waking', since: Date.now(), attempts: 0, error: null })
+  const deadline = Date.now() + WAKE_GIVE_UP_AFTER
+  for (let attempt = 1; ; attempt += 1) {
+    if (await ping(WAKE_ATTEMPT_TIMEOUT)) {
+      publish({ phase: 'ready', attempts: attempt, error: null })
+      return true
+    }
+    if (Date.now() >= deadline) {
+      publish({
+        phase: 'down',
+        attempts: attempt,
+        error: API_ORIGIN
+          ? `No answer from ${API_ORIGIN} after ${Math.round(WAKE_GIVE_UP_AFTER / 1000)}s.`
+          : 'No answer from the API. Is `psok serve` running?',
+      })
+      return false
+    }
+    publish({ attempts: attempt })
+    await new Promise((done) => setTimeout(done, WAKE_GAP))
+  }
+}
+
+/* DNS, TCP and TLS to the API host, started before the first request needs
+   them. Only when the API is somewhere else -- a same-origin build is already
+   connected to its own origin, and a preconnect to it would be a wasted hint. */
+if (API_ORIGIN && typeof document !== 'undefined') {
+  const hint = document.createElement('link')
+  hint.rel = 'preconnect'
+  hint.href = API_ORIGIN
+  hint.crossOrigin = ''
+  document.head.appendChild(hint)
+}
+
+/** Started here rather than from a component, so the container is already
+ *  booting while React is still parsing. */
+export const backendReady = wakeBackend()
 
 async function j(url, opts) {
-  const res = await fetch(BASE + url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  })
+  let res
+  try {
+    res = await fetch(BASE + url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    })
+  } catch (err) {
+    // `fetch` rejects with a bare "Failed to fetch" for a container that has
+    // gone back to sleep, a CORS origin that was never allowed, and a laptop
+    // with no wifi alike. The interface showed that string verbatim, which
+    // named none of them. Say where it was trying to reach, and put the backend
+    // back into waking so the boot frame comes up rather than a dead page.
+    if (state.phase === 'ready') { publish({ phase: 'waking', since: Date.now(), attempts: 0 }) }
+    const where = API_ORIGIN || window.location.origin
+    throw new Error(`Could not reach ${where} — ${err.message || 'the request failed'}`)
+  }
+  if (state.phase !== 'ready') publish({ phase: 'ready', error: null })
   if (!res.ok) {
     // A 405 on a path this interface knows about means the endpoint is not in
     // the running server, which in practice means one thing: `psok serve` has
@@ -30,6 +147,9 @@ async function j(url, opts) {
 const json = (method, body) => ({ method, body: body === undefined ? undefined : JSON.stringify(body) })
 
 export const api = {
+  // Cheap by design: it exists to be the request that wakes a stopped
+  // container, so it must not do any work of its own.
+  ping: () => j('/ping'),
   health: () => j('/health'),
 
   // Providers. `addProvider` is the only call that carries a key, and nothing
@@ -49,11 +169,14 @@ export const api = {
   pinMessage: (id, messageId, pinned) =>
     j(`/conversations/${id}/messages/${messageId}/pin`, json('POST', { pinned })),
 
-  turn: async ({ conversationId, message, workspace, onEvent, signal }) => {
+  // `mode` is 'chat' or 'plan'. It is a field rather than a sentence glued to
+  // the message: the sentence landed in the transcript and was replayed on
+  // every later turn, and the server had no idea the mode existed.
+  turn: async ({ conversationId, message, workspace, mode, onEvent, signal }) => {
     const res = await fetch(`${BASE}/conversations/${conversationId}/turn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, workspace }),
+      body: JSON.stringify({ message, workspace, mode: mode || 'chat' }),
       signal,
     })
     if (!res.ok || !res.body) {
@@ -174,7 +297,7 @@ export const api = {
   mcpLogin: (name, { force = false, accountHint = null } = {}) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/login`,
       json('POST', { force, account_hint: accountHint })),
-  mcpCancelLogin: (name) => j(`/mcp/servers/${name}/login`, json('DELETE')),
+  mcpCancelLogin: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/login`, json('DELETE')),
   mcpLogout: (name) => j(`/mcp/servers/${encodeURIComponent(name)}/logout`, json('POST', {})),
   mcpAuthorizations: () => j('/mcp/authorizations'),
   // Start every switched-on connector now, the way the first turn would.
@@ -183,15 +306,36 @@ export const api = {
     j(`/mcp/servers/${encodeURIComponent(name)}/connect`, json('POST', {})),
 }
 
+/** Parse a timestamp the *server* wrote, which is UTC and does not say so.
+ *
+ *  Every `created_at` and `updated_at` in this schema comes from SQLite's
+ *  `datetime('now')`, which is UTC and has no offset on it. JavaScript reads a
+ *  bare `YYYY-MM-DD HH:MM:SS` as *local*, so a conversation from a minute ago
+ *  showed up hours old -- five and a half of them on the machine this was found
+ *  on, and never on the machine of anyone in London, which is why it survived.
+ *  A value that already carries an offset is left alone.
+ *
+ *  This is only for those columns. Task dates -- `due_at`, `reminder_at`,
+ *  `scheduled_at`, `completed_at` -- are written with `datetime.now()` and are
+ *  genuinely local; putting them through here would break them the other way.
+ */
+export function serverTime(value) {
+  if (!value) return null
+  const text = String(value).trim()
+  const bare = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(text)
+  const d = new Date(bare ? `${text.replace(' ', 'T')}Z` : text)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 export function fmtTime(iso) {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso || ''
+  const d = serverTime(iso)
+  if (!d) return iso || ''
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 export function fmtDate(iso) {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso || ''
+  const d = serverTime(iso)
+  if (!d) return iso || ''
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 

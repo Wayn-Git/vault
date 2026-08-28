@@ -54,6 +54,43 @@ class ProviderPreset:
     def api_key_ref(self) -> str | None:
         return None if self.local else f"psok/{self.slug}"
 
+    @property
+    def api_key_env(self) -> str | None:
+        """The environment variable this provider's key may also arrive in.
+
+        The keychain stays first -- `has_key` and `resolve_api_key` both check
+        the reference before the variable -- and this is the way in for a host
+        that has no keychain to check. A container is the whole reason it
+        exists: without it, a deployed PSOK could be given a key only by
+        hand-editing providers.yaml on a disk nobody has a shell on.
+
+        The name is the vendor's own where the vendor has one, because that is
+        the variable the key is already sitting in on the machine of anyone who
+        has used the provider before. `PSOK_*` for the rest, which is a name
+        nothing else will collide with.
+        """
+        if self.local:
+            return None
+        return _CONVENTIONAL_ENV.get(self.slug, f"PSOK_{self.slug.upper()}_API_KEY")
+
+
+#: Names the vendors themselves document, so a key already exported for their
+#: own SDK is found without being copied under a second name.
+_CONVENTIONAL_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "xai": "XAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "fireworks": "FIREWORKS_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
+}
+
 
 PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
@@ -179,11 +216,29 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
 
 PRESETS_BY_SLUG: dict[str, ProviderPreset] = {p.slug: p for p in PROVIDER_PRESETS}
 
-#: Seeded as live entries in a new providers.yaml. Everything else is one click
-#: away in the catalogue; these are the ones worth having listed from the start,
-#: because a listed entry with no key costs nothing (`configured_providers`
-#: filters it out) and makes the key the only missing piece.
-SEEDED = ("ollama", "groq", "cerebras", "openai", "anthropic")
+#: Seeded as live entries in a new providers.yaml -- every preset except the
+#: ones needing a model id the user has to choose anyway.
+#:
+#: Listing costs nothing: `configured_providers` filters out any entry whose key
+#: is missing, so a listed provider is not an offered one. What it buys is that
+#: the file itself is the menu -- base URL, model and keychain ref already
+#: written -- so adding a provider is `psok secrets set`, not research. That was
+#: the point of extending `DEFAULT_PROVIDERS` rather than only building a
+#: catalogue behind a screen.
+SEEDED = (
+    "ollama",
+    "groq",
+    "cerebras",
+    "openai",
+    "anthropic",
+    "openrouter",
+    "xai",
+    "deepseek",
+    "mistral",
+    "together",
+    "fireworks",
+    "nvidia",
+)
 
 
 def preset(slug: str) -> ProviderPreset | None:
@@ -203,6 +258,8 @@ def entry_for(preset: ProviderPreset) -> dict:
         entry["base_url"] = preset.base_url
     if preset.api_key_ref:
         entry["api_key_ref"] = preset.api_key_ref
+    if preset.api_key_env:
+        entry["api_key_env"] = preset.api_key_env
     if preset.default_model:
         entry["default_model"] = preset.default_model
     if preset.context_window:

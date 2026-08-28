@@ -441,9 +441,23 @@ class _LazyDirector:
             yield event
 
 
-async def _director(workspace: str | None = None) -> Director:
+async def _director(workspace: str | None = None, mode: str = "chat") -> Director:
     registry, root = await _registry_for(workspace)
-    return Director(registry, workspace_root=root, stream=True)
+    return Director(registry, workspace_root=root, stream=True, mode=mode)
+
+
+@app.get("/api/ping")
+def ping() -> dict[str, Any]:
+    """Alive, and nothing else.
+
+    The interface fires this before React has mounted, because a container that
+    has been stopped for want of traffic takes tens of seconds to come back and
+    the request that wakes it is the one that waits. `/api/health` is the wrong
+    thing to make that request: it surveys every provider over the network, so
+    a cold start would wait for a boot *and* a round of probes. This touches
+    nothing.
+    """
+    return {"status": "ok", "version": app.version}
 
 
 @app.get("/api/health")
@@ -583,7 +597,7 @@ def add_provider_route(body: AddProvider) -> dict[str, Any]:
     from psok.config import add_provider, has_key, load_providers
     from psok.provider_catalogue import entry_for
     from psok.provider_catalogue import preset as find_preset
-    from psok.secrets import get_secret, set_secret
+    from psok.secrets import CredentialError, get_secret, set_secret
 
     name = body.name.strip().lower()
     if not _PROVIDER_NAME.match(name):
@@ -620,7 +634,12 @@ def add_provider_route(body: AddProvider) -> dict[str, Any]:
                 "that key has whitespace around it, which would be sent verbatim."
                 " Paste it again without the leading or trailing space.",
             )
-        set_secret(api_key_ref, value)
+        try:
+            set_secret(api_key_ref, value)
+        except CredentialError as exc:
+            # A host with no keychain -- a container, most often. The message
+            # names the way out; a 500 with a traceback named nothing.
+            raise HTTPException(503, str(exc)) from exc
         entry["api_key_ref"] = api_key_ref
     elif api_key_ref and get_secret(api_key_ref):
         entry["api_key_ref"] = api_key_ref
@@ -722,6 +741,12 @@ class UpdateConversation(BaseModel):
     title: str | None = None
     provider: str | None = None
     model: str | None = None
+    #: Provider names to try, in order, when this conversation's own provider
+    #: cannot answer. `[]` means "do not fall back here"; omitting the field
+    #: leaves whatever was set, and null is not accepted for the same reason --
+    #: "no opinion" and "never" are different answers and a caller that meant
+    #: one must not get the other.
+    fallback: list[str] | None = None
 
 
 @app.patch("/api/conversations/{conversation_id}")
@@ -744,8 +769,20 @@ def update_conversation(conversation_id: str, body: UpdateConversation) -> dict[
             body.provider or existing["provider"], body.model or existing["model"]
         )
 
+    if body.fallback is not None:
+        # Rejected here rather than at turn time: a chain naming a provider that
+        # does not exist would fail silently by being skipped, and the user would
+        # never learn the name was wrong.
+        for name in body.fallback:
+            if not is_known_provider(name):
+                raise HTTPException(400, f"provider '{name}' is not configured")
+
     if not repo.update(
-        conversation_id, title=body.title, provider=body.provider, model=model
+        conversation_id,
+        title=body.title,
+        provider=body.provider,
+        model=model,
+        fallback=body.fallback,
     ):
         raise HTTPException(404, "no such conversation")
     return dict(repo.get(conversation_id))
@@ -835,15 +872,28 @@ def list_pins(conversation_id: str) -> list[dict[str, Any]]:
     ]
 
 
+#: "chat" acts; "plan" looks and hands back steps for approval. A field rather
+#: than a sentence prepended to the message: the sentence was persisted into the
+#: transcript and replayed on every later turn, and nothing on this side even
+#: knew the mode existed -- so the only thing stopping a write in plan mode was
+#: the model choosing to obey prose. See `psok/agent/planning.py`.
+TURN_MODES = frozenset({"chat", "plan"})
+
+
 class TurnRequest(BaseModel):
     message: str
     workspace: str | None = None
+    mode: str = "chat"
 
 
 @app.post("/api/conversations/{conversation_id}/turn")
 async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse:
     if ConversationRepository().get(conversation_id) is None:
         raise HTTPException(404, "no such conversation")
+    if body.mode not in TURN_MODES:
+        # Rejected before the stream opens, like an unknown provider: a mode
+        # nobody honours would silently act when the user asked for a plan.
+        raise HTTPException(400, f"unknown mode '{body.mode}'")
 
     # Registered *before* the director is built. Building it can start
     # connectors, which takes seconds -- and during that window the browser has
@@ -853,7 +903,7 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
     cancel = asyncio.Event()
     _active_turns[conversation_id] = cancel
     try:
-        director = await _director(body.workspace)
+        director = await _director(body.workspace, body.mode)
     except BaseException:
         _active_turns.pop(conversation_id, None)
         raise
@@ -1123,10 +1173,52 @@ def mcp_catalogue() -> list[dict[str, Any]]:
 @app.get("/api/mcp/servers")
 def mcp_servers(accounts: bool = False) -> list[dict[str, Any]]:
     """Configured connectors. `accounts=true` also asks each who it is signed in as,
-    which can mean a network round trip, so the polling list does not ask for it."""
-    from psok.mcp import commands as mcp
+    which can mean a network round trip, so the polling list does not ask for it.
 
-    return mcp.status(with_accounts=accounts)
+    Each row carries a derived `state` -- see `psok/mcp/lifecycle.py`. It is
+    computed here rather than in the interface so that the screen, the CLI and
+    anything else asking cannot reach different conclusions from the same five
+    fields, which is what they were doing.
+    """
+    from psok.mcp import commands as mcp
+    from psok.mcp.lifecycle import state_of
+    from psok.mcp.oauth import PENDING
+
+    rows = mcp.status(with_accounts=accounts)
+    manager = _mcp["manager"]
+    live = manager.state() if manager is not None else {}
+    reconciled = manager is not None
+    synced = _synced_sources()
+
+    for row in rows:
+        name = row["name"]
+        p = PENDING.get(name)
+        row["lifecycle"] = state_of(
+            row,
+            pending={"status": p.status, "message": p.message} if p else None,
+            live=live.get(name),
+            synced=name in synced,
+            reconciled=reconciled,
+        ).as_dict()
+    return rows
+
+
+def _synced_sources() -> set[str]:
+    """Connectors whose first pull has actually happened.
+
+    Asked of the mirrored rows rather than remembered in a flag: a flag would
+    survive the tasks being cleared, and then claim a sync that no longer shows
+    anywhere. Failing closed here only costs a "not synced yet" label.
+    """
+    try:
+        from psok.db.connection import get_connection
+
+        rows = get_connection().execute(
+            "SELECT DISTINCT external_source FROM tasks WHERE external_source IS NOT NULL"
+        )
+        return {r[0] for r in rows if r[0]}
+    except Exception:
+        return set()
 
 
 class AddServer(BaseModel):
@@ -1142,7 +1234,7 @@ class AddServer(BaseModel):
 
 
 @app.post("/api/mcp/servers")
-def mcp_add_server(body: AddServer) -> dict[str, Any]:
+async def mcp_add_server(body: AddServer) -> dict[str, Any]:
     from psok.mcp import commands as mcp
 
     try:
@@ -1163,12 +1255,88 @@ def mcp_add_server(body: AddServer) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    # Adding used to end here, leaving a row in mcp.yaml and nothing running --
+    # so "add" meant "add, then go and find the switch, then go and find
+    # Connect". It now carries its own setup as far as it can go without the
+    # user: switched on, started, and asked what it still needs.
+    #
+    # Non-interactive on purpose. A browser opening behind someone who pressed
+    # Add is the same mistake as the serial sign-in that cost an automation its
+    # whole budget: a sign-in is a step the user takes, deliberately, when they
+    # are ready for it.
+    lifecycle = await _start_after_add(config.name)
+
     return {
         "name": config.name,
         "oauth": config.oauth,
         "needs_login": config.oauth,
         "registration_help": mcp.registration_help(config.name, config.catalogue_id) or None,
+        # What is still missing, in the same vocabulary the Connectors list uses,
+        # so the card that opens after Add reads the same as the row behind it.
+        "lifecycle": lifecycle,
     }
+
+
+async def _first_sync(name: str) -> None:
+    """Run a connector's initial pull, if it has one to run."""
+    from psok.mcp.lifecycle import FIRST_SYNC
+
+    if name not in FIRST_SYNC:
+        return
+    try:
+        from psok.sync.microsoft_todo import SERVER
+        from psok.sync.microsoft_todo import sync as sync_microsoft_todo
+
+        report = await sync_microsoft_todo(await _manager_with(SERVER))
+        log.info("first sync for '%s': %s", name, report.summary())
+    except Exception as exc:
+        # Nearly always "not signed in yet", which is the expected state right
+        # after adding it. The lifecycle reports `sign_in`, then `syncing`, and
+        # the row offers Sync now.
+        log.info("'%s' has nothing to sync yet: %s", name, exc)
+
+
+async def _start_after_add(name: str) -> dict[str, Any]:
+    """Switch a newly added connector on, start it, and report where it got to."""
+    from psok.capabilities import CapabilityService, Kind
+    from psok.mcp import commands as mcp
+    from psok.mcp import guidance
+    from psok.mcp.config import load_servers
+    from psok.mcp.lifecycle import state_of
+
+    try:
+        CapabilityService().set_enabled(Kind.CONNECTOR, name, True)
+    except Exception as exc:  # a connector that will not switch on is still added
+        log.warning("could not switch on '%s' after adding it: %s", name, exc)
+
+    manager = None
+    try:
+        manager = await _manager_with(name)
+    except Exception as exc:
+        log.info("'%s' did not start on being added: %s", name, exc)
+
+    guidance.forget()
+
+    # The last step of setting a connector up, where it has one. Microsoft To Do
+    # mirrors into the local tasks table, and until the first pull has run the
+    # Tasks page is empty while the connector reports itself ready -- which reads
+    # as the sync being broken rather than as never having been asked to run.
+    # Best-effort: a sync that cannot run yet (no account) is the normal state
+    # on the way through, not a failure to add the connector.
+    await _first_sync(name)
+
+    config = load_servers().get(name)
+    if config is None:
+        return {}
+    row = next((r for r in mcp.status() if r["name"] == name), None)
+    if row is None:
+        return {}
+    return state_of(
+        row,
+        live=(manager.state() if manager is not None else {}).get(name),
+        synced=name in _synced_sources(),
+        reconciled=manager is not None,
+    ).as_dict()
 
 
 @app.delete("/api/mcp/servers/{name}")

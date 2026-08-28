@@ -9,6 +9,11 @@
     <title>PSOK · personal operating system</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- The API's own preconnect is added from api.js rather than written here:
+         a `%VITE_API_BASE%` that no build defined stays in the markup verbatim
+         as a broken href, and the same-origin build has no second host to
+         connect to at all. -->
+
     <link
       href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap"
       rel="stylesheet"

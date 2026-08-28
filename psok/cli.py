@@ -68,9 +68,15 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     providers = load_providers()
     usable = configured_providers()
     print(f"providers: {', '.join(usable) or 'none configured'}")
-    for name in sorted(set(providers) - set(usable)):
-        ref = providers[name].api_key_ref or providers[name].api_key_env
-        print(f"           ! {name} is listed but has no key ({ref}); it is not offered")
+    # Summarised, not one line each. providers.yaml lists every provider PSOK
+    # knows how to reach, so on a fresh install "no key yet" is the normal state
+    # of most of them -- eleven warning lines would train the reader to skip the
+    # section that also reports the things that are actually wrong.
+    keyless = sorted(set(providers) - set(usable))
+    if keyless:
+        listed = ", ".join(keyless)
+        print(f"           {len(keyless)} listed without a key, so not offered: {listed}")
+        print("           add one with: psok secrets set psok/<name>")
 
     # The starter file is only written when providers.yaml is absent, so an
     # existing one never gains an entry PSOK adds later. Reporting the drift is
@@ -548,6 +554,38 @@ def cmd_mcp_status(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp_merge_google(args: argparse.Namespace) -> int:
+    """Collapse five Google connectors into one, on purpose and never by accident.
+
+    Dry by default. This touches a working Google sign-in, and a migration that
+    runs itself is a migration nobody chose.
+    """
+    from psok.mcp.migrations import apply_google_merge, plan_google_merge
+
+    if not args.apply:
+        plan = plan_google_merge()
+        print(plan.describe())
+        if not plan.is_noop and not plan.already_merged:
+            print("\nNothing has been changed. Run again with --apply to do it.")
+        return 0
+
+    plan, backup = apply_google_merge()
+    if plan.already_merged or plan.is_noop:
+        print(plan.describe())
+        return 0
+
+    print(f"Merged {', '.join(plan.sources)} into '{plan.target}'.")
+    if backup is not None:
+        print(f"Previous config: {backup}")
+    for warning in plan.warnings:
+        print(f"  ! {warning}")
+    print(
+        "\nThe Google account is untouched. Start it with `psok mcp connect"
+        f" {plan.target}`, or open Connectors."
+    )
+    return 0
+
+
 def _add_mcp_commands(sub) -> None:
     mcp_parser = sub.add_parser("mcp", help="connect external apps over MCP")
     mcp_sub = mcp_parser.add_subparsers(dest="mcp_command", required=True)
@@ -556,6 +594,17 @@ def _add_mcp_commands(sub) -> None:
         func=cmd_mcp_catalogue
     )
     mcp_sub.add_parser("status", help="show configured servers").set_defaults(func=cmd_mcp_status)
+
+    merge = mcp_sub.add_parser(
+        "merge-google",
+        help="collapse the per-service Google connectors into one workspace-mcp process",
+    )
+    merge.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually do it; without this the plan is printed and nothing changes",
+    )
+    merge.set_defaults(func=cmd_mcp_merge_google)
 
     add = mcp_sub.add_parser("add", help="add a server from the catalogue, or a custom one")
     add.add_argument("target", help="catalogue id, or a name when defining a custom server")
@@ -734,7 +783,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_secrets(args: argparse.Namespace) -> int:
-    from psok.secrets import SERVICE, delete_secret, get_secret, set_secret
+    import os
+
+    from psok.secrets import (
+        SERVICE,
+        CredentialError,
+        delete_secret,
+        get_secret,
+        set_secret,
+    )
 
     action = args.action
     if action == "list":
@@ -769,8 +826,13 @@ def cmd_secrets(args: argparse.Namespace) -> int:
     if not value or value != value.strip():
         print("error: a key cannot be empty or padded with whitespace", file=sys.stderr)
         return 1
-    set_secret(ref, value)
-    print(f"stored {ref} in the OS keychain")
+    try:
+        set_secret(ref, value)
+    except CredentialError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    where = os.environ.get("PSOK_SECRETS_FILE", "").strip()
+    print(f"stored {ref} in {where}" if where else f"stored {ref} in the OS keychain")
     return 0
 
 
