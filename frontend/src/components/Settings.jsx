@@ -75,11 +75,148 @@ function General() {
   )
 }
 
+/* Add a provider, and store its key.
+ *
+ * This panel used to say "configured in ~/.psok/config/providers.yaml", which
+ * is a strange thing for an interface to say about a file whose every field it
+ * knows: the base URL, the model id and the page the key comes from are all in
+ * the catalogue. So the form writes the entry rather than describing it.
+ *
+ * The key goes straight to the server and into the OS keychain. Nothing sends
+ * one back, so a saved provider shows "key stored" and never the key -- the
+ * same rule the connector credential form already holds to. */
+function AddProviderForm({ preset, onDone, onCancel }) {
+  const { toast } = useApp()
+  const [model, setModel] = useState(preset?.default_model || '')
+  const [baseUrl, setBaseUrl] = useState(preset?.base_url || '')
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const custom = !preset
+  const needsKey = custom || !preset.local
+
+  const save = async () => {
+    setBusy(true)
+    try {
+      const result = await api.addProvider({
+        name: preset ? preset.slug : (model && baseUrl ? nameFor(baseUrl) : ''),
+        base_url: baseUrl.trim() || null,
+        default_model: model.trim() || null,
+        api_key: key.trim() ? key.trim() : null,
+      })
+      // Says what is still missing rather than claiming success: an entry with
+      // no key is listed and not offered, and silence about that is how a
+      // provider ends up in the picker and fails on the first round trip.
+      if (result.needs_key) toast(`${result.name} added — it still needs a key`, 'amber')
+      else if (result.needs_model) toast(`${result.name} added — pick a model for it`, 'amber')
+      else toast(`${result.name} is ready`, 'ok')
+      onDone()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="set-panel set-subpanel">
+      <h3>{preset ? `Add ${preset.label}` : 'Add a provider'}</h3>
+      {preset?.note && <p className="set-note">{preset.note}</p>}
+
+      {custom && (
+        <div className="field">
+          <label htmlFor="prov-url">Base URL</label>
+          <input
+            id="prov-url"
+            value={baseUrl}
+            placeholder="http://localhost:8000/v1"
+            onChange={(e) => setBaseUrl(e.target.value)}
+          />
+          <span className="hint">
+            Any OpenAI-compatible endpoint works with no adapter — vLLM, LM Studio, a proxy.
+          </span>
+        </div>
+      )}
+
+      <div className="field">
+        <label htmlFor="prov-model">Model</label>
+        <input
+          id="prov-model"
+          value={model}
+          placeholder={preset?.default_model || 'model id'}
+          onChange={(e) => setModel(e.target.value)}
+        />
+        {preset?.docs_url && (
+          <span className="hint">
+            <a href={preset.docs_url} target="_blank" rel="noreferrer">See this provider’s models</a>
+          </span>
+        )}
+      </div>
+
+      {needsKey && (
+        <div className="field">
+          <label htmlFor="prov-key">API key</label>
+          <input
+            id="prov-key"
+            type="password"
+            value={key}
+            autoComplete="off"
+            placeholder={preset ? `stored as psok/${preset.slug}` : 'stored in the OS keychain'}
+            onChange={(e) => setKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !busy) save() }}
+          />
+          <span className="hint">
+            Goes straight into the OS keychain. providers.yaml holds only a reference to it
+            {preset?.keys_url && (
+              <> — <a href={preset.keys_url} target="_blank" rel="noreferrer">get one here</a></>
+            )}
+            .
+          </span>
+        </div>
+      )}
+
+      <div className="set-inline">
+        <button type="button" className="btn btn--primary btn--small" disabled={busy} onClick={save}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        <button type="button" className="btn btn--ghost btn--small" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// A custom endpoint still needs a name to be keyed by. Its host is the one
+// thing the user has already typed that is both stable and recognisable.
+function nameFor(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname.replace(/^www\./, '').replace(/[^a-z0-9._-]/gi, '-').toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
 function Models() {
-  const { health, conversations, activeId, refreshConvs, toast } = useApp()
+  const { health, conversations, activeId, refreshConvs, refreshHealth, toast } = useApp()
   const providers = health?.providers ?? []
   const defaults = health?.provider_defaults ?? {}
+  const unavailable = health?.providers_unavailable ?? {}
   const active = conversations.find((c) => c.id === activeId)
+
+  const [catalogue, setCatalogue] = useState([])
+  const [configured, setConfigured] = useState([])
+  const [adding, setAdding] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.providers()
+      setCatalogue(data.catalogue)
+      setConfigured(data.configured)
+    } catch (err) { toast(err.message, 'bad') }
+  }, [toast])
+
+  useEffect(() => { load() }, [load])
 
   const apply = async (patch) => {
     if (!activeId) return
@@ -92,29 +229,117 @@ function Models() {
     }
   }
 
+  const remove = async (name) => {
+    try {
+      await api.removeProvider(name)
+      toast(`${name} removed — its key stays in the keychain`, 'ok')
+      load()
+      refreshHealth?.()
+    } catch (err) { toast(err.message, 'bad') }
+  }
+
+  const finish = () => { setAdding(null); load(); refreshHealth?.() }
+
+  const unlisted = catalogue.filter((p) => !p.listed)
+
   return (
     <div className="set-panel">
       <h3>Providers</h3>
       <p className="set-note">
-        Configured in <span className="mono">~/.psok/config/providers.yaml</span>. Keys live in the OS
-        keychain; the file holds only a reference.
+        Keys live in the OS keychain; <span className="mono">providers.yaml</span> holds only a
+        reference. A provider with no key is listed and not offered.
       </p>
       <div className="set-rows">
-        {providers.length === 0 && <div className="set-row"><span>none configured</span></div>}
-        {providers.map((name) => (
-          <div className="set-row" key={name}>
-            <span>{name}</span>
-            <span className="mono">{defaults[name] || 'no default model'}</span>
+        {configured.length === 0 && <div className="set-row"><span>none configured</span></div>}
+        {configured.map((p) => (
+          <div className="set-row" key={p.name}>
+            <span>
+              {p.name}
+              <span className="set-sub">{p.default_model || 'no default model'}</span>
+            </span>
+            <span className="set-row-tail">
+              {!p.has_key && <span className="badge">needs a key</span>}
+              {p.has_key && !p.available && (
+                <span className="badge" title={p.unavailable_reason}>not answering</span>
+              )}
+              {p.has_key && p.available && <span className="badge">ready</span>}
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                onClick={() => remove(p.name)}
+              >
+                Remove
+              </button>
+            </span>
           </div>
         ))}
       </div>
+
+      {/* A provider that has a key and still cannot answer is the case `has_key`
+          alone could never see: a local endpoint declares no key at all, so it
+          reported itself configured while nothing was listening on its port. */}
+      {Object.entries(unavailable).map(([name, reason]) => (
+        <p className="set-note" key={name}>{name}: {reason}</p>
+      ))}
+
+      {adding !== null ? (
+        <AddProviderForm
+          preset={adding || null}
+          onDone={finish}
+          onCancel={() => setAdding(null)}
+        />
+      ) : (
+        <>
+          <h3>Add one</h3>
+          <div className="set-rows">
+            {unlisted.map((p) => (
+              <div className="set-row" key={p.slug}>
+                <span>
+                  {p.label}
+                  {p.note && (
+                    <span className="set-sub">{p.note}</span>
+                  )}
+                </span>
+                <span className="set-row-tail">
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--small"
+                    onClick={() => setAdding(p)}
+                  >
+                    Add
+                  </button>
+                </span>
+              </div>
+            ))}
+            <div className="set-row">
+              <span>
+                Something else
+                <span className="set-sub">Any OpenAI-compatible endpoint — vLLM, LM Studio, a proxy.</span>
+              </span>
+              <span className="set-row-tail">
+                <button
+                  type="button"
+                  className="btn btn--ghost btn--small"
+                  onClick={() => setAdding(false)}
+                >
+                  Add
+                </button>
+              </span>
+            </div>
+          </div>
+        </>
+      )}
 
       {active && (
         <>
           <h3>This conversation</h3>
           <div className="set-inline">
             <select value={active.provider} onChange={(e) => apply({ provider: e.target.value, model: defaults[e.target.value] || active.model })}>
-              {providers.map((p) => <option key={p} value={p}>{p}</option>)}
+              {providers.map((p) => (
+                <option key={p} value={p} disabled={p in unavailable}>
+                  {p}{p in unavailable ? ' — not answering' : ''}
+                </option>
+              ))}
             </select>
             <input
               key={active.model}

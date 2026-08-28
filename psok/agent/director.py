@@ -23,6 +23,9 @@ from psok.agent.prompt import (
     to_wire_messages,
 )
 from psok.db.repositories import ConversationRepository, MessageRepository
+from psok.runtime import availability
+from psok.runtime.chain import AttemptBudget, Link, announcement, build_chain, reason_for
+from psok.runtime.failures import FailureKind, should_fall_back, should_retry
 from psok.runtime.registry import resolve
 from psok.runtime.types import ModelParameters, ModelResponse, ToolCall
 from psok.tools.base import ToolContext, ToolResult
@@ -193,7 +196,19 @@ class Director:
             yield Event("error", {"message": f"unknown conversation {conversation_id}"})
             return
 
-        model = resolve(conversation["provider"], conversation["model"])
+        # The chosen provider, then whatever else could answer if it cannot.
+        # Built once per turn rather than per iteration: it costs a read of
+        # providers.yaml and a keychain round trip, and a turn is up to fifteen
+        # iterations. `active` only moves forward, so a provider that failed is
+        # not rediscovered on every later iteration of the same turn.
+        chain = build_chain(conversation["provider"], conversation["model"])
+        budget = AttemptBudget()
+        active = 0
+        model = resolve(
+            chain[0].provider,
+            chain[0].model,
+            max_retries=budget.allowance(len(chain) - 1) - 1,
+        )
 
         # "/weekly-review do the thing" pins that skill for this turn, mirroring
         # the slash menu in the interface. The marker is stripped so the model
@@ -230,29 +245,6 @@ class Director:
                 yield Event("guard", {"reason": "time limit reached"})
                 break
 
-            system_prompt = build_system_prompt(
-                workspace_root=self.workspace_root,
-                conversation_id=conversation_id,
-                pinned_skills=pinned,
-                retrieved_context=retrieved_context,
-                memories=recalled,
-            )
-            history = to_wire_messages(self.messages.history(conversation_id))
-            history = budget_history(
-                history,
-                context_window=model.capabilities.context_window,
-                system_prompt=system_prompt,
-            )
-            wire = [{"role": "system", "content": system_prompt}, *history]
-            if nudge:
-                wire.append({"role": "system", "content": nudge})
-                nudge = None
-
-            tool_schemas = (
-                self.registry.schemas(hidden_servers=hidden_servers)
-                if model.capabilities.tools
-                else None
-            )
             response = None
             # Whether the answer already reached the interface as deltas -- not
             # whether the streaming path was taken. An adapter may fall back to
@@ -260,61 +252,144 @@ class Director:
             # `stream: true`, and that answer still has to be delivered.
             streamed = False
             streamed_text: list[str] = []
-            try:
-                if self.stream and model.capabilities.streaming and hasattr(model.client, "stream"):
-                    # Deltas go out as they arrive so the interface can render
-                    # progressively; tool calls are only actionable once assembled.
-                    async for chunk in _stream_until_cancelled(
-                        model.client.stream(wire, tools=tool_schemas, params=self.params),
-                        cancel,
+
+            # One answer, from however many providers it takes to get one.
+            while True:
+                links_after = len(chain) - 1 - active
+                allowance = budget.allowance(links_after)
+                system_prompt = build_system_prompt(
+                    workspace_root=self.workspace_root,
+                    conversation_id=conversation_id,
+                    pinned_skills=pinned,
+                    retrieved_context=retrieved_context,
+                    memories=recalled,
+                )
+                # Built before the history is budgeted, not after: the schemas go
+                # out on every round trip and measured 29,620 tokens across 132
+                # tools, so budgeting without them overstates the room left by more
+                # than the system prompt costs.
+                tool_schemas = (
+                    self.registry.schemas(hidden_servers=hidden_servers)
+                    if model.capabilities.tools
+                    else None
+                )
+                history = to_wire_messages(self.messages.history(conversation_id))
+                # Re-budgeted against whichever model is about to be called.
+                # Carrying a 200,000-token history into a 32,000-token
+                # fallback trades one provider's outage for the next one's
+                # refusal.
+                history = budget_history(
+                    history,
+                    context_window=model.capabilities.context_window,
+                    system_prompt=system_prompt,
+                    tools=tool_schemas,
+                )
+                wire = [{"role": "system", "content": system_prompt}, *history]
+                if nudge:
+                    # Cleared once a call succeeds, not here: a fallback
+                    # attempt has to carry the same instruction.
+                    wire.append({"role": "system", "content": nudge})
+
+                response = None
+                streamed = False
+                streamed_text = []
+                try:
+                    if (
+                        self.stream
+                        and model.capabilities.streaming
+                        and hasattr(model.client, "stream")
                     ):
-                        if chunk.type == "text" and chunk.text:
-                            streamed_text.append(chunk.text)
-                            yield Event("assistant_delta", {"text": chunk.text})
-                        elif chunk.type == "reasoning" and chunk.text:
-                            yield Event("reasoning_delta", {"text": chunk.text})
-                        elif chunk.type == "done":
-                            response = chunk.response
-                    streamed = bool(streamed_text)
-                    if response is None:
-                        # The provider dropped the stream before its terminal
-                        # event. Keep what already reached the user rather than
-                        # discarding a partial answer they can see on screen.
-                        partial = "".join(streamed_text)
-                        response = ModelResponse(text=partial or None, stop_reason="incomplete")
+                        # Deltas go out as they arrive so the interface can render
+                        # progressively; tool calls are only actionable once assembled.
+                        async for chunk in _stream_until_cancelled(
+                            model.client.stream(wire, tools=tool_schemas, params=self.params),
+                            cancel,
+                        ):
+                            if chunk.type == "text" and chunk.text:
+                                streamed_text.append(chunk.text)
+                                yield Event("assistant_delta", {"text": chunk.text})
+                            elif chunk.type == "reasoning" and chunk.text:
+                                yield Event("reasoning_delta", {"text": chunk.text})
+                            elif chunk.type == "done":
+                                response = chunk.response
+                        streamed = bool(streamed_text)
+                        if response is None:
+                            # The provider dropped the stream before its terminal
+                            # event. Keep what already reached the user rather than
+                            # discarding a partial answer they can see on screen.
+                            partial = "".join(streamed_text)
+                            response = ModelResponse(text=partial or None, stop_reason="incomplete")
+                            yield Event(
+                                "warning",
+                                {"message": "the response was cut off before it finished"},
+                            )
+                    else:
+                        response = await _race_cancel(
+                            model.client.complete(wire, tools=tool_schemas, params=self.params),
+                            cancel,
+                        )
+                except Stopped:
+                    # Whatever had already streamed is on screen and is worth
+                    # keeping; the rest of the turn is not.
+                    partial = "".join(streamed_text).strip()
+                    if partial:
+                        self.messages.append(conversation_id, "assistant", partial)
+                    yield Event("guard", {"reason": "stopped by the user"})
+                    self.conversations.touch(conversation_id)
+                    return
+                except Exception as exc:
+                    message = f"{type(exc).__name__}: {exc}"
+                    # A failure that was never classified is a bad request as
+                    # far as anything downstream is concerned: it stops rather
+                    # than spending another provider on a guess.
+                    kind = getattr(exc, "kind", FailureKind.NON_RETRYABLE)
+                    # A retryable failure exhausted its allowance before it
+                    # was raised; a non-retryable one cost exactly one call.
+                    budget.spend(allowance if should_retry(kind) else 1)
+                    availability.record_failure(chain[active].provider, kind)
+
+                    # Not once text is on screen: a second provider would start
+                    # its answer underneath the half the user is already reading.
+                    can_hand_over = (
+                        not streamed_text
+                        and links_after > 0
+                        and should_fall_back(kind)
+                        and budget.remaining > 0
+                    )
+                    if can_hand_over:
+                        failed = chain[active]
+                        active += 1
+                        model = resolve(
+                            chain[active].provider,
+                            chain[active].model,
+                            max_retries=budget.allowance(len(chain) - 1 - active) - 1,
+                        )
+                        log.warning(
+                            "%s failed (%s); falling back to %s", failed, kind, chain[active]
+                        )
                         yield Event(
                             "warning",
-                            {"message": "the response was cut off before it finished"},
+                            {"message": announcement(failed, reason_for(kind), chain[active])},
                         )
-                else:
-                    response = await _race_cancel(
-                        model.client.complete(wire, tools=tool_schemas, params=self.params),
-                        cancel,
+                        continue
+
+                    # Keep whatever already reached the user. Persisting only the
+                    # error meant a partial answer they could read on screen
+                    # vanished the moment they reloaded -- which reads as the turn
+                    # having produced nothing at all.
+                    partial = "".join(streamed_text).strip()
+                    noted = f"[model error] {message}"
+                    self.messages.append(
+                        conversation_id,
+                        "assistant",
+                        f"{partial}\n\n{noted}" if partial else noted,
                     )
-            except Stopped:
-                # Whatever had already streamed is on screen and is worth
-                # keeping; the rest of the turn is not.
-                partial = "".join(streamed_text).strip()
-                if partial:
-                    self.messages.append(conversation_id, "assistant", partial)
-                yield Event("guard", {"reason": "stopped by the user"})
-                self.conversations.touch(conversation_id)
-                return
-            except Exception as exc:
-                message = f"{type(exc).__name__}: {exc}"
-                # Keep whatever already reached the user. Persisting only the
-                # error meant a partial answer they could read on screen
-                # vanished the moment they reloaded -- which reads as the turn
-                # having produced nothing at all.
-                partial = "".join(streamed_text).strip()
-                noted = f"[model error] {message}"
-                self.messages.append(
-                    conversation_id,
-                    "assistant",
-                    f"{partial}\n\n{noted}" if partial else noted,
-                )
-                yield Event("error", {"message": message})
-                return
+                    yield Event("error", {"message": message})
+                    return
+
+                availability.record_success(chain[active].provider)
+                nudge = None
+                break
 
             if not streamed and response.reasoning:
                 # A non-streaming provider hands back its thinking in one piece.
@@ -371,7 +446,9 @@ class Director:
                 # and blocking the terminal event on it would keep an interface's
                 # composer disabled for the length of one. An interface that
                 # stops reading at `done` simply skips it.
-                async for event in self._remember(conversation_id, user_message, answer):
+                async for event in self._remember(
+                    conversation_id, user_message, answer, chain[active]
+                ):
                     yield event
                 return
 
@@ -494,7 +571,11 @@ class Director:
             return []
 
     async def _remember(
-        self, conversation_id: str, user_message: str, answer: str
+        self,
+        conversation_id: str,
+        user_message: str,
+        answer: str,
+        answered_with: Link | None = None,
     ) -> AsyncIterator[Event]:
         """Post-turn extraction, emitting an event only when something changed.
 
@@ -510,7 +591,7 @@ class Director:
             service = MemoryService()
             if not service.store.is_enabled(conversation_id):
                 return
-            client = self._memory_client(conversation_id)
+            client = self._memory_client(conversation_id, answered_with)
             if client is None:
                 return
             diff = await service.extract(conversation_id, user_message, answer, client)
@@ -523,13 +604,14 @@ class Director:
                 "memory", {"created": diff.create, "superseded": diff.supersede}
             )
 
-    def _memory_client(self, conversation_id: str):
-        """The extraction model: the user's chosen small one, else the conversation's.
+    def _memory_client(self, conversation_id: str, answered_with: Link | None = None):
+        """The extraction model: the user's chosen small one, else the turn's own.
 
         ai-runtime.md gives this role its own row because it runs on every turn
-        and wants to be small, cheap and local. Falling back to the conversation's
-        own model is what keeps memory working on a machine with one provider
-        configured, rather than silently doing nothing.
+        and wants to be small, cheap and local. Falling back to the model that
+        answered is what keeps memory working on a machine with one provider
+        configured -- and after a fallback that is not the provider named on the
+        conversation, which has just been proven unable to answer.
         """
         from psok.config import load_memory_model
 
@@ -539,6 +621,9 @@ class Director:
                 return resolve(*pinned).client
             except Exception as exc:
                 log.debug("configured memory model unavailable, using the conversation's: %s", exc)
+
+        if answered_with is not None:
+            return resolve(answered_with.provider, answered_with.model).client
 
         conversation = self.conversations.get(conversation_id)
         if conversation is None:

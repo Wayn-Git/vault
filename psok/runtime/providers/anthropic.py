@@ -15,11 +15,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from psok.config import ProviderConfig
-from psok.runtime.http import post_json, stream_sse
-from psok.runtime.providers.openai_compat import (
-    ProviderStreamError,
-    _describe_provider_error,
-)
+from psok.runtime.failures import classify_stream_error
+from psok.runtime.http import MAX_RETRIES, ProviderStreamError, post_json, stream_sse
+from psok.runtime.providers.openai_compat import _describe_provider_error
 from psok.runtime.types import (
     Capabilities,
     ModelParameters,
@@ -80,11 +78,24 @@ def _to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, 
 
 
 class AnthropicClient:
-    def __init__(self, *, api_key: str | None, model: str, base_url: str, timeout: float = 120.0):
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        model: str,
+        base_url: str,
+        timeout: float = 120.0,
+        max_retries: int = MAX_RETRIES,
+    ):
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        #: Attempts this client may make, counting the first. The fallback chain
+        #: owns one budget for the whole turn and hands each link its share, so
+        #: a three-provider chain costs the same order of wall clock as one
+        #: provider rather than three times it.
+        self.max_retries = max_retries
 
     def _build_payload(
         self,
@@ -139,6 +150,7 @@ class AnthropicClient:
             headers=self._headers(),
             payload=self._build_payload(messages, tools, params),
             timeout=self.timeout,
+            max_retries=self.max_retries,
         )
         text_parts: list[str] = []
         calls: list[ToolCall] = []
@@ -187,6 +199,7 @@ class AnthropicClient:
             headers=self._headers(),
             payload=payload,
             timeout=self.timeout,
+            max_retries=self.max_retries,
         ):
             try:
                 event = json.loads(raw)
@@ -202,7 +215,10 @@ class AnthropicClient:
                 # an `overloaded_error` mid-stream matched nothing and was
                 # dropped -- surfacing as a truncated answer with no message, or
                 # as a redundant non-streaming retry into the same overload.
-                raise ProviderStreamError(_describe_provider_error(event.get("error")))
+                error = event.get("error")
+                raise ProviderStreamError(
+                    _describe_provider_error(error), kind=classify_stream_error(error)
+                )
 
             if kind == "content_block_start":
                 block = event.get("content_block") or {}
@@ -266,7 +282,9 @@ class AnthropicClient:
         )
 
 
-def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedModel:
+def initialize(
+    config: ProviderConfig, model: str | None = None, *, max_retries: int = MAX_RETRIES
+) -> ResolvedModel:
     resolved_model = model or config.default_model
     if not resolved_model:
         raise ValueError(f"no model specified for provider '{config.name}'")
@@ -275,12 +293,19 @@ def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedMode
         api_key=api_key,
         model=resolved_model,
         base_url=config.base_url or "https://api.anthropic.com/v1",
+        max_retries=max_retries,
     )
     return ResolvedModel(
         provider=config.name,
         model=resolved_model,
         client=client,
         capabilities=Capabilities(
-            tools=True, streaming=True, vision=True, reasoning=True, context_window=200_000
+            tools=True,
+            streaming=True,
+            vision=True,
+            reasoning=True,
+            # 200k is right for the Claude 3/4 line and wrong for a model that
+            # declares a million; an entry that states its window wins.
+            context_window=config.context_window or 200_000,
         ),
     )

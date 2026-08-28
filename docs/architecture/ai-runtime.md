@@ -9,7 +9,7 @@ The AI runtime is everything between "the agent loop wants a model response" and
 Every provider adapter implements one function. That is the whole abstraction — no base class to inherit, no lifecycle to implement, no plugin registration protocol.
 
 ```
-initialize(provider_config, model_parameters) -> ResolvedModel
+initialize(provider_config, model, *, max_retries=MAX_RETRIES) -> ResolvedModel
 
 ResolvedModel:
     provider          str            # canonical provider name
@@ -20,6 +20,10 @@ ResolvedModel:
 ```
 
 `Capabilities` declares what the loop is allowed to attempt: whether tools are supported, whether streaming works, whether images can be sent, the context window size, and whether the model has a reasoning or thinking mode. The loop reads capabilities and adapts — it does not guess from the model name.
+
+`max_retries` is a keyword with a default, so an adapter written against the two-argument form still satisfies the contract. Its only caller is the fallback chain, which owns one attempt budget for the whole turn and hands each provider its share — see [providers.md](providers.md).
+
+The context window is the one capability an adapter used to *guess*: `_context_window` matches substrings in the model name and falls through to 128,000 for anything unrecognised. A `context_window:` field on the providers.yaml entry overrides it, and the guess stays as the fallback.
 
 `ChatClient` exposes a single method taking a normalized message list, a tool list, and parameters, and returning a normalized response containing text, tool calls, a stop reason, and usage. Streaming is the same shape yielded incrementally.
 
@@ -86,6 +90,10 @@ Ollama speaks the OpenAI format and could ride the fallback. It gets a thin adap
 PSOK's common parameter surface is deliberately small: `temperature`, `max_tokens`, `reasoning_effort` (none/low/medium/high), `thinking_budget`, `stop`, `seed`. Anything a provider does not support is dropped by its adapter, which reports the drop through capabilities rather than failing.
 
 **The test for whether this boundary is holding:** grep the agent loop and tool registry for provider names. If a provider name appears outside `runtime/providers/`, the abstraction has leaked.
+
+### When a provider cannot answer
+
+Failures are classified rather than formatted: `ProviderError` carries a `FailureKind` alongside its message, and *retry the same provider* and *try a different one* are separate decisions off it. A turn walks a bounded chain of providers rather than ending at the first failure, and says so in one line. Written up in [providers.md](providers.md); the abstraction above is unchanged by it.
 
 ### Switching models
 

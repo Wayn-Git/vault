@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from psok import provider_catalogue as catalogue
 from psok.agent.director import Director
 from psok.config import configured_providers, load_providers, paths
 from psok.db.connection import get_connection
@@ -53,19 +54,10 @@ def cmd_init(_: argparse.Namespace) -> int:
     return 0
 
 
-# Open-weights providers fast enough to matter for agent work, and what to add
-# to providers.yaml for each. Both speak the OpenAI API, so neither needs an
-# adapter -- only a key.
-FAST_PROVIDERS = {
-    "groq": (
-        "Add it with base_url https://api.groq.com/openai/v1,"
-        " api_key_ref psok/groq, default_model llama-3.3-70b-versatile."
-    ),
-    "cerebras": (
-        "Add it with base_url https://api.cerebras.ai/v1,"
-        " api_key_ref psok/cerebras, default_model llama-3.3-70b."
-    ),
-}
+# Providers worth having and not yet listed. The catalogue is the source; this
+# only decides which absences are worth mentioning unprompted, and the fast
+# open-weights pair are the ones that change how a turn feels.
+FAST_PROVIDERS = ("groq", "cerebras")
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
@@ -80,12 +72,14 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         ref = providers[name].api_key_ref or providers[name].api_key_env
         print(f"           ! {name} is listed but has no key ({ref}); it is not offered")
 
-    # DEFAULT_PROVIDERS is only written when the file is absent, so an existing
-    # providers.yaml never gains an entry PSOK adds later. Say so rather than
-    # leaving the fast options to be found by reading the source.
-    for name, hint in FAST_PROVIDERS.items():
+    # The starter file is only written when providers.yaml is absent, so an
+    # existing one never gains an entry PSOK adds later. Reporting the drift is
+    # half the job; `psok providers add` is the other half.
+    for name in FAST_PROVIDERS:
         if name not in providers:
-            print(f"           - {name} is not in providers.yaml. {hint}")
+            preset = catalogue.preset(name)
+            label = preset.label if preset else name
+            print(f"           - {label} is not listed. Add it: psok providers add {name}")
 
     registry = build_default_registry()
     print(f"tools:     {len(registry.list())} registered")
@@ -731,6 +725,121 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- secrets ----------------------------------------------------------------
+#
+# providers.yaml and the docs have told people to run `psok secrets set` since
+# before there was one; the README worked around its absence by telling them to
+# open a Python REPL and import `set_secret`. Storing a key is the one step
+# between a listed provider and an offered one, so it gets a command.
+
+
+def cmd_secrets(args: argparse.Namespace) -> int:
+    from psok.secrets import SERVICE, delete_secret, get_secret, set_secret
+
+    action = args.action
+    if action == "list":
+        # Values are never printed, here or anywhere. The useful answer is which
+        # refs providers.yaml names and which of those the keychain can satisfy.
+        providers = load_providers()
+        refs = {cfg.api_key_ref for cfg in providers.values() if cfg.api_key_ref}
+        if not refs:
+            print("no providers declare a keychain reference")
+            return 0
+        for ref in sorted(refs):
+            print(f"{'set    ' if get_secret(ref) else 'missing'}  {ref}")
+        return 0
+
+    ref = args.ref
+    if "/" not in ref:
+        ref = f"{SERVICE}/{ref}"
+
+    if action == "delete":
+        delete_secret(ref)
+        print(f"deleted {ref}")
+        return 0
+
+    value = args.value
+    if value is None:
+        # Prompted rather than taken as an argument by default: an argument
+        # lands in the shell history and in `ps`, which is how a key ends up in
+        # a transcript that then has to be rotated.
+        import getpass
+
+        value = getpass.getpass(f"value for {ref} (not echoed): ")
+    if not value or value != value.strip():
+        print("error: a key cannot be empty or padded with whitespace", file=sys.stderr)
+        return 1
+    set_secret(ref, value)
+    print(f"stored {ref} in the OS keychain")
+    return 0
+
+
+# --- providers --------------------------------------------------------------
+
+
+def cmd_providers(args: argparse.Namespace) -> int:
+    from psok.config import add_provider, remove_provider
+    from psok.provider_catalogue import PROVIDER_PRESETS, entry_for
+
+    action = args.action
+
+    if action == "catalogue":
+        listed = load_providers()
+        for preset in PROVIDER_PRESETS:
+            mark = "listed" if preset.slug in listed else "      "
+            print(f"{mark}  {preset.slug:<12} {preset.label}")
+            if preset.keys_url:
+                print(f"                       key: {preset.keys_url}")
+        return 0
+
+    if action == "list":
+        listed = load_providers()
+        usable = configured_providers()
+        if not listed:
+            print("no providers in providers.yaml")
+            return 0
+        for name, cfg in listed.items():
+            state = "ready" if name in usable else "no key"
+            print(f"{state:<7} {name:<12} {cfg.default_model or '(no default model)'}")
+        return 0
+
+    if action == "remove":
+        if remove_provider(args.name):
+            print(f"removed {args.name} from providers.yaml")
+            return 0
+        print(f"error: no provider named '{args.name}'", file=sys.stderr)
+        return 1
+
+    preset = catalogue.preset(args.name)
+    if preset is None:
+        known = ", ".join(p.slug for p in PROVIDER_PRESETS)
+        print(
+            f"error: '{args.name}' is not in the catalogue. Known: {known}."
+            " Anything else is one hand-written providers.yaml entry --"
+            " any OpenAI-compatible endpoint works with no code.",
+            file=sys.stderr,
+        )
+        return 1
+
+    entry = entry_for(preset)
+    if args.model:
+        entry["default_model"] = args.model
+    add_provider(entry)
+    print(f"added {preset.slug} to providers.yaml")
+    if preset.api_key_ref:
+        from psok.secrets import get_secret
+
+        if get_secret(preset.api_key_ref):
+            print(f"its key is already in the keychain at {preset.api_key_ref}")
+        else:
+            print(f"  get a key: {preset.keys_url}")
+            print(f"  store it:  psok secrets set {preset.api_key_ref}")
+    if not entry.get("default_model"):
+        print(f"  pick a model: {preset.docs_url}  (psok providers add {preset.slug} --model ...)")
+    return 0
+
+
+
 def main(argv: list[str] | None = None) -> int:
     from psok.capabilities import Kind
 
@@ -751,6 +860,29 @@ def main(argv: list[str] | None = None) -> int:
     chat.add_argument("--conversation", help="continue an existing conversation id")
     chat.add_argument("--workspace", help="workspace root for file and shell tools")
     chat.set_defaults(func=cmd_chat)
+
+    secrets = sub.add_parser("secrets", help="store an API key in the OS keychain")
+    secrets_sub = secrets.add_subparsers(dest="action", required=True)
+    secrets_set = secrets_sub.add_parser(
+        "set", help="store a key (prompts, so it stays out of shell history)"
+    )
+    secrets_set.add_argument("ref", help="keychain reference, e.g. psok/groq")
+    secrets_set.add_argument("value", nargs="?", help="the key; omit to be prompted")
+    secrets_sub.add_parser("list", help="which declared references have a key")
+    secrets_delete = secrets_sub.add_parser("delete", help="remove a stored key")
+    secrets_delete.add_argument("ref")
+    secrets.set_defaults(func=cmd_secrets)
+
+    provs = sub.add_parser("providers", help="list, add or remove model providers")
+    provs_sub = provs.add_subparsers(dest="action", required=True)
+    provs_sub.add_parser("list", help="what providers.yaml lists and which are ready")
+    provs_sub.add_parser("catalogue", help="providers PSOK knows how to configure")
+    provs_add = provs_sub.add_parser("add", help="add a catalogue provider to providers.yaml")
+    provs_add.add_argument("name")
+    provs_add.add_argument("--model", help="override the preset's default model")
+    provs_remove = provs_sub.add_parser("remove", help="drop an entry from providers.yaml")
+    provs_remove.add_argument("name")
+    provs.set_defaults(func=cmd_providers)
 
     logs = sub.add_parser("logs", help="show the tool execution audit trail")
     logs.add_argument("--limit", type=int, default=30)

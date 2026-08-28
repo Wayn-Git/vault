@@ -11,10 +11,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from psok.config import ProviderConfig, load_providers
+from psok.runtime.http import MAX_RETRIES
 from psok.runtime.providers import anthropic, google, ollama, openai_compat
 from psok.runtime.types import ResolvedModel
 
-Initializer = Callable[[ProviderConfig, str | None], ResolvedModel]
+#: `(config, model, *, max_retries) -> ResolvedModel`. The retry allowance is
+#: a keyword with a default, so an adapter written against the two-argument form
+#: still satisfies it -- the fallback chain is the only caller that sets it.
+Initializer = Callable[..., ResolvedModel]
 
 PROVIDER_REGISTRY: dict[str, Initializer] = {
     "openai": openai_compat.initialize,
@@ -39,7 +43,9 @@ def is_known_provider(provider: str) -> bool:
     return provider in load_providers() or provider in PROVIDER_REGISTRY
 
 
-def resolve(provider: str, model: str | None = None) -> ResolvedModel:
+def resolve(
+    provider: str, model: str | None = None, *, max_retries: int = MAX_RETRIES
+) -> ResolvedModel:
     configs = load_providers()
     config = configs.get(provider)
 
@@ -56,4 +62,4 @@ def resolve(provider: str, model: str | None = None) -> ResolvedModel:
     # otherwise fall through to the OpenAI-compatible adapter.
     adapter_key = config.provider or config.name
     initializer = PROVIDER_REGISTRY.get(adapter_key, openai_compat.initialize)
-    return initializer(config, model)
+    return initializer(config, model, max_retries=max_retries)

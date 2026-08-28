@@ -11,7 +11,7 @@ import uuid
 from typing import Any
 
 from psok.config import ProviderConfig
-from psok.runtime.http import post_json
+from psok.runtime.http import MAX_RETRIES, post_json
 from psok.runtime.types import (
     Capabilities,
     ModelParameters,
@@ -102,11 +102,24 @@ def _to_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict]
 
 
 class GeminiClient:
-    def __init__(self, *, api_key: str | None, model: str, base_url: str, timeout: float = 120.0):
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        model: str,
+        base_url: str,
+        timeout: float = 120.0,
+        max_retries: int = MAX_RETRIES,
+    ):
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        #: Attempts this client may make, counting the first. The fallback chain
+        #: owns one budget for the whole turn and hands each link its share, so
+        #: a three-provider chain costs the same order of wall clock as one
+        #: provider rather than three times it.
+        self.max_retries = max_retries
 
     async def complete(
         self,
@@ -148,6 +161,7 @@ class GeminiClient:
             payload=payload,
             timeout=self.timeout,
             params={"key": self.api_key},
+            max_retries=self.max_retries,
         )
 
         candidate = (data.get("candidates") or [{}])[0]
@@ -176,12 +190,19 @@ class GeminiClient:
         )
 
 
-def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedModel:
+def initialize(
+    config: ProviderConfig, model: str | None = None, *, max_retries: int = MAX_RETRIES
+) -> ResolvedModel:
     resolved_model = model or config.default_model
     if not resolved_model:
         raise ValueError(f"no model specified for provider '{config.name}'")
     api_key = resolve_api_key(ref=config.api_key_ref, env=config.api_key_env or "GEMINI_API_KEY")
-    client = GeminiClient(api_key=api_key, model=resolved_model, base_url=config.base_url or BASE)
+    client = GeminiClient(
+        api_key=api_key,
+        model=resolved_model,
+        base_url=config.base_url or BASE,
+        max_retries=max_retries,
+    )
     return ResolvedModel(
         provider=config.name,
         model=resolved_model,
@@ -193,6 +214,6 @@ def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedMode
             streaming=False,
             vision=True,
             reasoning=False,
-            context_window=1_000_000,
+            context_window=config.context_window or 1_000_000,
         ),
     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from psok.config import load_providers
+from psok.runtime.failures import FailureKind
 from psok.runtime.http import ProviderHTTPError, post_json
 from psok.secrets import resolve_api_key
 
@@ -87,7 +88,9 @@ class Embedder:
                 max_retries=0,
             )
         except ProviderHTTPError as exc:
-            if "unreachable" in str(exc):
+            # Was `if "unreachable" in str(exc)`: a caller re-parsing prose the
+            # raiser already knew the shape of. The kind says it outright.
+            if exc.kind is FailureKind.UNREACHABLE:
                 _UNREACHABLE.add(url)
             raise EmbeddingError(
                 f"could not reach Ollama at {native}. Is it running, and has"

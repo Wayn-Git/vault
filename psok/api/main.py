@@ -38,6 +38,7 @@ from psok.db.repositories import (
 from psok.mcp import live
 from psok.mcp.manager import MCPManager
 from psok.reminders import ReminderRunner
+from psok.runtime import availability
 from psok.runtime.http import close_clients
 from psok.runtime.registry import is_known_provider
 from psok.security.confirmation import ConfirmationRequest, ConfirmationService
@@ -446,7 +447,7 @@ async def _director(workspace: str | None = None) -> Director:
 
 
 @app.get("/api/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
     """Component health, reported from the live registry where one exists.
 
     Building a throwaway registry here counted builtins only, so the number
@@ -460,6 +461,16 @@ def health() -> dict[str, Any]:
     # then fails on the first round trip, and a model picker offering one turns
     # a missing credential into "PSOK is broken".
     providers = configured_providers()
+    # Having a key is not the same as being able to answer. A local endpoint
+    # declares no key at all, so `has_key` calls it configured by definition and
+    # the picker offered Ollama while nothing was listening on its port -- nine
+    # consecutive `All connection attempts failed` in the real database. Probed
+    # where the credential says nothing, remembered from real turns otherwise.
+    reachable = await availability.survey(providers)
+    unavailable = {
+        name: state.reason for name, state in reachable.items() if not state.available
+    }
+
     # A connector nobody has signed in to is not a fault. It used to count as
     # one, so a machine with one un-signed-in connector reported the whole
     # system degraded -- which makes the word mean nothing on the day something
@@ -476,6 +487,10 @@ def health() -> dict[str, Any]:
         # colouring it the same red as a server that will not start.
         "connectors_awaiting_sign_in": sorted(waiting),
         "providers": sorted(providers),
+        # Listed above and known not to answer. Kept as a separate key rather
+        # than filtered out of `providers`: a provider the user configured on
+        # purpose should stay visible with a reason, not vanish.
+        "providers_unavailable": unavailable,
         # So an interface can prefill the model a provider already declares
         # rather than making the user retype what providers.yaml already says.
         "provider_defaults": {
@@ -492,6 +507,157 @@ def health() -> dict[str, Any]:
         "skills": len(skills),
         "skill_errors": len(errors),
     }
+
+
+# --- providers ---------------------------------------------------------------
+#
+# The Settings panel used to say "configured in ~/.psok/config/providers.yaml",
+# which is a strange thing for an interface to say about a file whose every
+# field it knows. These three routes are what let it write that file instead of
+# describing it.
+
+#: providers.yaml keys the model picker and the conversation rows by this name,
+#: so it has to survive a URL and a YAML mapping key without surprises.
+_PROVIDER_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+
+
+class AddProvider(BaseModel):
+    name: str
+    base_url: str | None = None
+    default_model: str | None = None
+    context_window: int | None = None
+    adapter: str | None = None
+    #: Stored in the OS keychain and never returned by any route. Omitted when
+    #: the key is already there, or when the endpoint needs none.
+    api_key: str | None = None
+
+
+@app.get("/api/providers")
+async def list_providers() -> dict[str, Any]:
+    """What is configured, what could be, and what is actually answering."""
+    from psok.config import has_key, load_providers
+    from psok.provider_catalogue import PROVIDER_PRESETS
+
+    listed = load_providers()
+    usable = configured_providers()
+    reachable = await availability.survey(usable)
+
+    return {
+        "configured": [
+            {
+                "name": name,
+                "base_url": cfg.base_url,
+                "default_model": cfg.default_model,
+                "context_window": cfg.context_window,
+                # Whether the key it says it needs exists -- never the key.
+                "has_key": has_key(cfg),
+                "available": name not in reachable or reachable[name].available,
+                "unavailable_reason": (
+                    "" if name not in reachable else reachable[name].reason
+                ),
+                "api_key_ref": cfg.api_key_ref,
+            }
+            for name, cfg in listed.items()
+        ],
+        "catalogue": [
+            {
+                "slug": preset.slug,
+                "label": preset.label,
+                "base_url": preset.base_url,
+                "default_model": preset.default_model,
+                "context_window": preset.context_window,
+                "keys_url": preset.keys_url,
+                "docs_url": preset.docs_url,
+                "local": preset.local,
+                "note": preset.note,
+                "listed": preset.slug in listed,
+            }
+            for preset in PROVIDER_PRESETS
+        ],
+    }
+
+
+@app.post("/api/providers")
+def add_provider_route(body: AddProvider) -> dict[str, Any]:
+    """Add or update one providers.yaml entry, and store its key if given."""
+    from psok.config import add_provider, has_key, load_providers
+    from psok.provider_catalogue import entry_for
+    from psok.provider_catalogue import preset as find_preset
+    from psok.secrets import get_secret, set_secret
+
+    name = body.name.strip().lower()
+    if not _PROVIDER_NAME.match(name):
+        raise HTTPException(
+            400,
+            f"'{body.name}' is not a usable provider name."
+            " Use lower-case letters, digits, dots, dashes or underscores.",
+        )
+
+    preset = find_preset(name)
+    entry = entry_for(preset) if preset else {"name": name}
+    for field, value in (
+        ("base_url", body.base_url),
+        ("default_model", body.default_model),
+        ("context_window", body.context_window),
+        ("provider", body.adapter),
+    ):
+        if value:
+            entry[field] = value
+
+    if not entry.get("base_url") and not preset:
+        # Without one the OpenAI-compatible adapter silently posts to OpenAI,
+        # which fails as an authentication error and reads as a bad key.
+        raise HTTPException(400, f"'{name}' needs a base URL: PSOK has no preset for it")
+
+    api_key_ref = entry.get("api_key_ref") or (None if preset and preset.local else f"psok/{name}")
+    if body.api_key is not None:
+        value = body.api_key
+        if not value.strip():
+            raise HTTPException(400, "a key cannot be empty")
+        if value != value.strip():
+            raise HTTPException(
+                400,
+                "that key has whitespace around it, which would be sent verbatim."
+                " Paste it again without the leading or trailing space.",
+            )
+        set_secret(api_key_ref, value)
+        entry["api_key_ref"] = api_key_ref
+    elif api_key_ref and get_secret(api_key_ref):
+        entry["api_key_ref"] = api_key_ref
+
+    add_provider(entry)
+    # A newly reachable endpoint should not be judged by what was remembered
+    # about it before it existed.
+    availability.forget(name)
+
+    stored = load_providers().get(name)
+    ready = stored is not None and has_key(stored) and bool(stored.default_model)
+    return {
+        "status": "added",
+        "name": name,
+        # What the interface needs in order to say what is still missing --
+        # never anything derived from the key itself.
+        "ready": ready,
+        "needs_key": stored is not None and not has_key(stored),
+        "needs_model": stored is not None and not stored.default_model,
+        "api_key_ref": entry.get("api_key_ref"),
+    }
+
+
+@app.delete("/api/providers/{name}")
+def remove_provider_route(name: str) -> dict[str, Any]:
+    """Drop an entry. The key stays in the keychain, deliberately.
+
+    Removing a provider from a list and destroying the credential behind it are
+    different decisions, and only one of them is reversible from this screen.
+    `psok secrets delete` is the other one.
+    """
+    from psok.config import remove_provider
+
+    if not remove_provider(name):
+        raise HTTPException(404, f"no provider named '{name}' in providers.yaml")
+    availability.forget(name)
+    return {"status": "removed", "name": name}
 
 
 class CreateConversation(BaseModel):

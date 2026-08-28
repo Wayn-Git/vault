@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import platform
 import re
+from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
 from psok.db.repositories import Message
 from psok.skills.loader import format_catalogue, scan
@@ -174,6 +176,31 @@ def message_tokens(message: dict) -> int:
     return cost
 
 
+def tool_schema_tokens(tools: Sequence[Any] | None) -> int:
+    """What the tool schemas cost, because they are sent on every round trip.
+
+    Measured at 29,620 tokens across 132 tools from seven connectors -- more
+    than the entire system prompt, and `budget_history` never counted a single
+    one of them. The budget was therefore wrong by exactly their size, in the
+    direction that overflows the context window rather than the one that wastes
+    it, so the failure mode was a provider error mid-generation.
+
+    Serialized the way the adapter sends it: the provider is billed for the JSON
+    it receives, not for the dataclass this side of the wire.
+    """
+    if not tools:
+        return 0
+    payload = [
+        {
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+        }
+        for t in tools
+    ]
+    return estimate_tokens(json.dumps(payload, default=str))
+
+
 def to_wire_messages(history: list[Message]) -> list[dict]:
     """Repository rows to the normalized message shape adapters consume."""
     out: list[dict] = []
@@ -196,9 +223,14 @@ def budget_history(
     *,
     context_window: int,
     system_prompt: str,
+    tools: Sequence[Any] | None = None,
     reserved: int = RESERVED_FOR_RESPONSE,
 ) -> list[dict]:
-    """Drop oldest messages until the assembly fits, keeping tool pairs coherent."""
+    """Drop oldest messages until the assembly fits, keeping tool pairs coherent.
+
+    `tools` are part of the request whether or not the model calls one, so they
+    come out of the same window the history is competing for.
+    """
 
     def drop_leading_orphans(chosen: list[dict]) -> list[dict]:
         # A tool result whose originating assistant turn was dropped confuses
@@ -207,7 +239,9 @@ def budget_history(
             chosen = chosen[1:]
         return chosen
 
-    available = context_window - estimate_tokens(system_prompt) - reserved
+    available = (
+        context_window - estimate_tokens(system_prompt) - tool_schema_tokens(tools) - reserved
+    )
     if available <= 0:
         return drop_leading_orphans(messages[-2:])
 

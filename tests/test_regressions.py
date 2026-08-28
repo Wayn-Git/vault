@@ -1625,6 +1625,7 @@ async def test_a_refused_embedding_endpoint_is_not_retried(monkeypatch):
     embeddings.forget_unreachable()
     attempts = 0
 
+    from psok.runtime.failures import FailureKind
     from psok.runtime.http import ProviderHTTPError
 
     seen_retries = []
@@ -1633,7 +1634,12 @@ async def test_a_refused_embedding_endpoint_is_not_retried(monkeypatch):
         nonlocal attempts
         attempts += 1
         seen_retries.append(kwargs.get("max_retries"))
-        raise ProviderHTTPError(f"{url} unreachable: ConnectError: nope")
+        # The kind is what the real raiser attaches for a refused connection,
+        # and what marks the endpoint down. A message-shaped fake would pass
+        # here while the product read the field, not the sentence.
+        raise ProviderHTTPError(
+            f"{url} unreachable: ConnectError: nope", kind=FailureKind.UNREACHABLE
+        )
 
     monkeypatch.setattr(embeddings, "post_json", refuse)
 

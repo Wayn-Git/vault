@@ -2650,6 +2650,19 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 .set-ok { color: var(--live); }
 .set-bad { color: var(--stop); }
 
+/* The add-a-provider form, inline in the panel rather than in a modal: it is
+   a continuation of the list above it, and a dialog over a dialog would put
+   the thing you were reading behind the thing you are filling in. */
+.set-subpanel {
+  padding: 14px 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.015);
+  overflow: visible;
+}
+.set-subpanel h3:first-child { margin-top: 0; }
+
 .set-inline { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .set-inline input, .set-inline select {
   flex: 1;

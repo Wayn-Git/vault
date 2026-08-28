@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from psok.runtime.failures import FailureKind, classify_status, should_retry
+
 MAX_RETRIES = 3
 RETRYABLE_STATUS = {408, 409, 425, 429}
 TRANSIENT_EXCEPTIONS = (
@@ -29,8 +31,43 @@ TRANSIENT_EXCEPTIONS = (
 log = logging.getLogger(__name__)
 
 
-class ProviderHTTPError(RuntimeError):
+class ProviderError(RuntimeError):
+    """Base for every provider failure, carrying why rather than only what.
+
+    `kind` is the field callers branch on; the message stays human prose. Both
+    exist because the two audiences are different -- a fallback chain needs the
+    kind, a user reading a `warning` frame needs the sentence.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: FailureKind = FailureKind.NON_RETRYABLE,
+        status: int | None = None,
+        body: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+        self.body = body
+
+    @property
+    def retryable(self) -> bool:
+        return should_retry(self.kind)
+
+
+class ProviderHTTPError(ProviderError):
     """Carries the provider's own error body, which is where diagnostics live."""
+
+
+class ProviderStreamError(ProviderError):
+    """An error frame arrived inside an already-successful 200 stream.
+
+    Lives here rather than in an adapter because both the OpenAI-compatible and
+    Anthropic adapters raise it, and Anthropic was importing it -- along with a
+    private helper -- across module boundaries to do so.
+    """
 
 
 def backoff(attempt: int) -> float:
@@ -69,8 +106,15 @@ async def close_clients() -> None:
         await client.aclose()
 
 
-def is_retryable(status: int) -> bool:
-    return status in RETRYABLE_STATUS or status >= 500
+def is_retryable(status: int, body: str | None = None) -> bool:
+    """Whether asking this same endpoint again could plausibly work.
+
+    The body is consulted because a 429 is two different failures wearing one
+    status: a rate limit clears by waiting, an exhausted quota does not, and
+    retrying the second one spends four attempts to learn what the first
+    response already said.
+    """
+    return should_retry(classify_status(status, body))
 
 
 def _delay_for(response: httpx.Response, attempt: int) -> float:
@@ -95,6 +139,8 @@ async def post_json(
 ) -> dict[str, Any]:
     """POST JSON, retrying transient failures, and surface the error body on give-up."""
     last_error = "no response"
+    last_status: int | None = None
+    last_body: str | None = None
 
     for attempt in range(max_retries + 1):
         try:
@@ -103,8 +149,11 @@ async def post_json(
             )
         except TRANSIENT_EXCEPTIONS as exc:
             last_error = f"{type(exc).__name__}: {exc}"
+            last_status, last_body = None, None
             if attempt == max_retries:
-                raise ProviderHTTPError(f"{url} unreachable: {last_error}") from exc
+                raise ProviderHTTPError(
+                    f"{url} unreachable: {last_error}", kind=FailureKind.UNREACHABLE
+                ) from exc
             await asyncio.sleep(backoff(attempt))
             continue
 
@@ -112,9 +161,16 @@ async def post_json(
             return response.json()
 
         # raise_for_status() throws the body away; the body is the diagnostic.
-        last_error = f"{response.status_code}: {response.text[:1000]}"
-        if not is_retryable(response.status_code) or attempt == max_retries:
-            raise ProviderHTTPError(f"{url} returned {last_error}")
+        body = response.text[:1000]
+        last_error = f"{response.status_code}: {body}"
+        last_status, last_body = response.status_code, body
+        if not is_retryable(response.status_code, body) or attempt == max_retries:
+            raise ProviderHTTPError(
+                f"{url} returned {last_error}",
+                kind=classify_status(response.status_code, body),
+                status=response.status_code,
+                body=body,
+            )
 
         delay = _delay_for(response, attempt)
         log.warning(
@@ -127,7 +183,16 @@ async def post_json(
         )
         await asyncio.sleep(delay)
 
-    raise ProviderHTTPError(f"{url} returned {last_error}")
+    raise ProviderHTTPError(
+        f"{url} returned {last_error}",
+        kind=(
+            classify_status(last_status, last_body)
+            if last_status is not None
+            else FailureKind.UNREACHABLE
+        ),
+        status=last_status,
+        body=last_body,
+    )
 
 
 async def stream_sse(
@@ -153,8 +218,13 @@ async def stream_sse(
                 if response.status_code >= 400:
                     body = (await response.aread()).decode(errors="replace")[:1000]
                     error = f"{response.status_code}: {body}"
-                    if not is_retryable(response.status_code) or attempt == max_retries:
-                        raise ProviderHTTPError(f"{url} returned {error}")
+                    if not is_retryable(response.status_code, body) or attempt == max_retries:
+                        raise ProviderHTTPError(
+                            f"{url} returned {error}",
+                            kind=classify_status(response.status_code, body),
+                            status=response.status_code,
+                            body=body,
+                        )
                     await asyncio.sleep(_delay_for(response, attempt))
                     continue
 
@@ -168,7 +238,13 @@ async def stream_sse(
                 return
         except TRANSIENT_EXCEPTIONS as exc:
             if started or attempt == max_retries:
-                raise ProviderHTTPError(f"{url} stream failed: {exc}") from exc
+                # Once bytes have moved, a different provider cannot take over
+                # cleanly either -- half an answer is already on screen -- so
+                # this is not a fallback opportunity, only a failure.
+                raise ProviderHTTPError(
+                    f"{url} stream failed: {exc}",
+                    kind=(FailureKind.NON_RETRYABLE if started else FailureKind.UNREACHABLE),
+                ) from exc
             # Nothing had arrived yet, so replaying is safe -- but it is a whole
             # request, and the provider may well have generated a response it
             # then failed to deliver. Unlogged, a turn could silently cost four

@@ -32,6 +32,13 @@ const json = (method, body) => ({ method, body: body === undefined ? undefined :
 export const api = {
   health: () => j('/health'),
 
+  // Providers. `addProvider` is the only call that carries a key, and nothing
+  // gives one back: the server stores it in the OS keychain and every response
+  // reports whether a key exists, never what it is.
+  providers: () => j('/providers'),
+  addProvider: (body) => j('/providers', json('POST', body)),
+  removeProvider: (name) => j(`/providers/${encodeURIComponent(name)}`, json('DELETE')),
+
   conversations: () => j('/conversations'),
   createConversation: (provider, model, title) =>
     j('/conversations', json('POST', { provider, model, title })),

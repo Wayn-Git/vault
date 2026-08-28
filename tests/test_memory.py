@@ -297,7 +297,7 @@ async def test_a_configured_memory_model_is_used_instead_of_the_conversations(db
 
     asked: list[str] = []
 
-    def fake_resolve(provider, model=None):
+    def fake_resolve(provider, model=None, **kwargs):
         asked.append(f"{provider}:{model}")
         return ResolvedModel(provider, model or "", ScriptedModel(), Capabilities(streaming=False))
 

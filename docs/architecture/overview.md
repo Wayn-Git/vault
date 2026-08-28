@@ -128,6 +128,7 @@ Every arrow in that walkthrough is a component boundary that exists in the diagr
 
 - [components.md](components.md) — precise definitions of Tool, Skill, MCP Tool, and Agent, and the rule for choosing between them
 - [ai-runtime.md](ai-runtime.md) — the provider abstraction and the agent loop
+- [providers.md](providers.md) — the provider catalogue, the failure taxonomy and the fallback chain
 - [data-model.md](data-model.md) — what is stored where, and why three mechanisms
 - [security.md](security.md) — the permission model, sandboxing, and credential isolation
 - [skills.md](skills.md), [mcp.md](mcp.md), [mcp-oauth.md](mcp-oauth.md), [scheduling.md](scheduling.md) — subsystem detail

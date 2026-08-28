@@ -13,7 +13,7 @@ retrieval over notes vault (BM25 + vector, incremental). Long-term memory extrac
 Markdown skills, installable from URL / browsed / written from 3 fields. Full React UI served
 by same process (`psok serve`). Standing approvals in UI+CLI. Full CLI.
 
-**Verified:** 268 unit tests, `ruff` clean, 53-check Playwright suite (`frontend/tests/smoke.mjs`)
+**Verified:** 457 unit tests, `ruff` clean, 53-check Playwright suite (`frontend/tests/smoke.mjs`)
 driving real browser + real server + real model — streaming, markdown-once, thinking live/folds,
 permission gate on keyboard, skill install/uninstall, pin survives reload, automation
 create/pause/delete, audit trail, conversation delete.
@@ -46,7 +46,7 @@ create/pause/delete, audit trail, conversation delete.
 - **Refused:** WhatsApp servers all need `better-sqlite3` (Node 20–25; this box runs **Node 26**
   → exit 1) — recheck when it ships 26 support. `jordanburke/microsoft-todo-mcp-server` broken in
   all 5 versions; `fabienbutz/microsoft-todo-mcp` shipped instead (uses Microsoft's public client).
-- **Tests:** `pytest` (268 unit, 1 skipped), `pytest -m live` (5), `ruff check psok tests`.
+- **Tests:** `pytest` (457 unit, 1 skipped), `pytest -m live` (5), `ruff check psok tests`.
   Frontend: `npm run lint` / `build` / `smoke` (needs running `psok serve` + provider).
 
 ## Traps (reproduced live; plausible errors pointed away from cause)
@@ -86,74 +86,77 @@ Browser tools not the bottleneck (`take_snapshot` 30ms, `browser_click` 1.1s); m
 8.3→2.8s); HTTP clients pooled per event loop (−75% conn overhead); `_unattended_director`
 didn't share live registry (each automation tick respawned all MCP, killing browser).
 
-**Still open (the 77%):** Groq/Cerebras are free + OpenAI-compatible; this box's
-`providers.yaml` predates them (Groq commented out, no Cerebras). `DEFAULT_PROVIDERS` only
-written when file absent — `psok doctor` reports drift (verified 2026-08-27). Automations
-composer finally sends `provider`/`model` — pointing one at a fast provider is the lever.
+**Still open (the 77%):** pointing the loop at a fast provider is the lever, and as of
+Phase 3 that is now one screen rather than a YAML edit — Settings > Models, or
+`psok providers add groq` then `psok secrets set psok/groq`. The starter file is
+generated from the catalogue, so the drift `psok doctor` reported cannot recur; this
+box's existing `providers.yaml` still predates it, so run `psok providers add` there.
+**Nobody has actually put a Groq or Cerebras key in yet — that is the next lever.**
 
-## Remaining work — phases 3 to 5
+## Remaining work — phases 4 and 5
 
 Phases 1 (tasks + To Do) and 2 (turns that resolve, Stop) are **done and
-live-verified 2026-08-27**. What follows is written for whoever picks this up.
+live-verified 2026-08-27**; phase 3 (providers and fallback) is **done and
+live-verified 2026-08-28**. What follows is written for whoever picks this up.
 Order is payoff order; each phase is independently shippable and has its own
 verification. Do not start the next until the current one's checks pass.
 
 Context and measurements: [AUDIT-2026-08-27.md](AUDIT-2026-08-27.md),
 [architecture/tasks.md](architecture/tasks.md),
-[architecture/turns.md](architecture/turns.md).
+[architecture/turns.md](architecture/turns.md),
+[architecture/providers.md](architecture/providers.md).
 
-### Phase 3 — providers and fallback
+### Phase 3 — providers and fallback — **DONE, verified 2026-08-28**
 
-**The abstraction is already right; do not rewrite it.** `runtime/types.py` has
-the `ChatClient` protocol, `ResolvedModel`, `ToolSchema`, `Capabilities`.
-`runtime/registry.py` falls through to `openai_compat.initialize` for any
-unknown provider name, so OpenRouter, xAI, DeepSeek, Together, Fireworks and any
-local server already work with a `providers.yaml` entry and **no code**. This is
-a catalogue-and-UI problem.
+Built and live-verified. Full write-up: [architecture/providers.md](architecture/providers.md).
+The abstraction was not rewritten — `ChatClient`, `ResolvedModel`, the registry
+and the OpenAI-compatible fall-through are unchanged.
 
-3.1 **Catalogue.** Extend `DEFAULT_PROVIDERS` (`config.py`) with OpenRouter,
-xAI, DeepSeek, Mistral, Together, Fireworks, NVIDIA beside the Groq/Cerebras
-already there. Add a preset table — name, base URL, docs link, where to get a
-key. openhuman does exactly this in `cloud_providers.rs`
-(`{slug, label, endpoint, auth_style}`, 28 entries) and keeps every provider
-quirk as a **flag on one generic client** rather than a subclass; its
-`AuthStyle` enum is why Anthropic is not a bespoke adapter there. Worth copying
-the shape.
+- **3.1 Catalogue.** `psok/provider_catalogue.py`, 13 presets (Ollama, Groq,
+  Cerebras, OpenAI, Anthropic, Google, OpenRouter, xAI, DeepSeek, Mistral,
+  Together, Fireworks, NVIDIA). The starter `providers.yaml` is now **generated
+  from it**, so the drift `psok doctor` reported cannot recur. No `auth_style`
+  field: PSOK already has native adapters for the two providers that need one,
+  so it would be a slot nothing reads.
+- **3.2 Settings writes the file.** `providers.yaml` had no write path at all;
+  it now has `save_providers` / `add_provider` / `remove_provider` plus
+  `GET,POST /api/providers` and `DELETE /api/providers/{name}`. Settings →
+  Models lists what is configured with a per-row state, offers the rest of the
+  catalogue, and takes a key. **No route returns a key.** `psok secrets` — cited
+  by the docs and the starter file since before it existed — is now real, and
+  prompts rather than taking the key as an argument (an argument lands in shell
+  history, which is how two keys ended up needing rotation).
+- **3.3 Availability.** `psok/runtime/availability.py`. Keyless endpoints are
+  probed once and cached (60s); everything else is presumed available until a
+  turn proves otherwise (300s). `/api/health` gained `providers_unavailable`.
+  Unavailable providers stay listed with a reason rather than vanishing.
+- **3.4 Declared context windows.** `context_window` on `ProviderConfig`, honoured
+  by all four adapters, guess kept as fallback. **`budget_history` now counts
+  tool schemas** — the 29,620 tokens it never saw — and the director builds the
+  schemas before budgeting rather than after.
+- **3.5 Taxonomy.** `psok/runtime/failures.py`: `FailureKind` with retry and
+  fallback as *separate* decisions. Quota-exhausted 429 is non-retryable but
+  fallback-worthy; a 404 is neither. `ProviderStreamError` moved to
+  `runtime/http.py` beside `ProviderHTTPError`, both now `ProviderError`
+  subclasses carrying `kind`/`status`/`body`. The one string-matching consumer
+  (`embeddings.py`'s `if "unreachable" in str(exc)`) reads the field now.
+- **3.6 The chain.** `psok/runtime/chain.py`. Order from `providers.yaml`, or a
+  top-level `fallback:` list. Capped at two fallbacks. **One shared
+  `AttemptBudget`**, not `MAX_RETRIES` per link. History **re-budgeted for the
+  fallback model's own window**. One `warning` frame: *"nvidia was unreachable —
+  answering with groq/llama-3.3-70b instead"*. `active` moves forward only, so a
+  dead provider is not re-tried each iteration. Memory extraction now uses the
+  model that answered, not the one on the conversation row.
 
-3.2 **A Settings panel that adds a provider and stores its key** through
-`psok secrets`. Today `Settings.jsx:99` tells the user to hand-edit YAML.
+**Verified** exactly as this section asked: two providers over real HTTP (live
+`http.server` + a dead port, no mocked transport) — primary unreachable answered
+by the fallback in 2.1s with one warning line naming both; primary returning 404
+failed in 0.00s with no fallback attempt. Plus a live `psok serve` run of the new
+routes. 39 new tests, 457 in the suite, `ruff` clean, frontend lint + build clean.
 
-3.3 **Stop offering providers that cannot answer.** `has_key()`
-(`config.py:110`) calls a credential-free local endpoint "configured by
-definition" — so Ollama is offered while not running, and four conversations in
-the real DB collected nine consecutive `All connection attempts failed`. Probe
-once, cache, mark unavailable in the picker.
-
-3.4 **Declared context windows.** `_context_window`
-(`openai_compat.py:324`) guesses from model-name substrings and falls through to
-128,000 — a guess for `nemotron-3-ultra-550b-a55b`. Make it a field on the
-provider entry, keep the guess as fallback. Also: `budget_history` still does
-not count tool schemas, which measured **29,620 tokens across 132 tools**.
-
-3.5 **Error taxonomy first, then fallback.** Everything is one
-`ProviderHTTPError` carrying a formatted string, so nothing can tell "retry"
-from "wrong model" from "bad key". Give it `status` and a `kind`. openhuman's
-`ProviderFailureClass` is a good model: `Retryable | NonRetryable | RateLimited
-| NonRetryableRateLimit | UpstreamUnhealthy`, with `408/409/429/5xx` retryable
-and quota-exhausted text (`insufficient quota`, `out of credits`) explicitly
-**non**-retryable so a fallback is not burned on a billing problem.
-
-3.6 **The chain.** Per-conversation fallback order, defaulting to every other
-configured provider. Attempt budget shared across the chain — do not multiply
-`MAX_RETRIES` by chain length. **Re-budget history for the fallback model's own
-context window** (khoj does this; it is easy to forget and fails loudly).
-Announce it as one `warning` frame: *"nvidia was unreachable — answered with
-groq/llama-3.3-70b instead."* Decided with the user: visible, one line, no stack
-trace.
-
-**Verify:** configure two providers, break the first, confirm the answer arrives
-from the second with one line saying so. Then break it with a 404 and confirm it
-fails immediately **without** trying the fallback.
+**Left undone on purpose:** per-conversation fallback order (the order is global;
+per-conversation needs a column, a PATCH field and a control, and a column
+nothing writes is a reserved slot).
 
 ### Phase 4 — connector setup that finishes itself
 
@@ -256,7 +259,8 @@ cancelling real tasks.
    published with TTL, `8765` held.
 1. **Rotate NVIDIA key + Google secret** (both touched a transcript). Highest-consequence loose end.
 2. **Verify Anthropic/OpenAI live** once a key exists — most likely place for a real defect
-   (only path never exercised for real).
+   (only path never exercised for real). Now `psok providers add anthropic` + `psok secrets set
+   psok/anthropic`, or Settings > Models.
 3. **Bring Ollama up + one real indexing pass** — closes default-embedding gap.
 4. **GitHub connector** — register app + re-enable only if wanted; absent beats permanently-failing.
 5. **Decide** first-party Gmail/Calendar/Drive vs connector path. Open: does data need *local sync*
@@ -278,7 +282,7 @@ No timeline — personal project, list is so the next session doesn't re-derive 
 Allows `http://localhost:5173` + `http://127.0.0.1:5173`; else `PSOK_CORS_ORIGINS` (CSV).
 Deliberately not wildcard (API runs shell). Verified live.
 
-## Endpoints (51, all verified)
+## Endpoints (54, all verified)
 
 | Need | Endpoint |
 |---|---|
@@ -293,6 +297,9 @@ Deliberately not wildcard (API runs shell). Verified live.
 | Pending confirmations | `GET /api/confirmations` |
 | Approve/deny | `POST /api/confirmations/{request_id}` |
 | Standing prefs / revoke | `GET /api/confirmations/preferences`, `DELETE /api/confirmations/preferences/{operation_key}` |
+| Providers + catalogue | `GET /api/providers` (configured, with `has_key`/`available`; never a key) |
+| Add/update a provider | `POST /api/providers` `{name, base_url?, default_model?, context_window?, api_key?}` — key goes to the keychain |
+| Remove a provider | `DELETE /api/providers/{name}` (entry only; the key stays) |
 | Skills+connectors state | `GET /api/capabilities` |
 | Toggle one | `POST,DELETE /api/capabilities/{kind}/{name}` |
 | `/` autocomplete | `GET /api/skills/search?q=` |
@@ -323,7 +330,8 @@ Deliberately not wildcard (API runs shell). Verified live.
 | Health | `GET /api/health` |
 
 `POST/PATCH /api/conversations` reject unknown provider (400). `/api/health` returns
-`provider_defaults` (for prefill), live registry after a turn runs, `connector_errors`; `status`
+`provider_defaults` (for prefill), `providers_unavailable` (`{name: reason}` — configured and
+not answering; listed, not hidden), live registry after a turn runs, `connector_errors`; `status`
 `degraded` when that map non-empty.
 
 ## Turn stream
@@ -337,7 +345,8 @@ Frames (`data: {json}`):
 - `tool_call {name, arguments}`
 - `confirmation_required {request_id, tool_name, operation_key, risk, reason, arguments, conversation_id}` — turn suspended until answered
 - `tool_result {name, content, is_error}`
-- `warning {message}` — stream cut off / turn continuing an empty reply
+- `warning {message}` — stream cut off / turn continuing an empty reply / **provider fell back**
+  (*"nvidia was unreachable — answering with groq/llama-3.3-70b instead"*, one line, not terminal)
 - `guard {reason}` — loop limit / user stop
 - `error {message}` — always last
 - `done {text, iterations}`
@@ -424,9 +433,13 @@ First use of any MCP server needs a one-time trust confirmation — expect two p
     algorithm. Lists mirrored; names matched past leading emoji (`🛒 Groceries` answers to
     "groceries"). Buckets — My Day / Missed / Important / General — are queries, never stored
     state. See [architecture/tasks.md](architecture/tasks.md).
-13. **Settings→Data** — clear convs or facts, each behind 2-click confirm + count first. Tasks,
+13. **Settings→Models** — writes `providers.yaml` rather than describing it. Configured rows carry
+    `ready` / `needs a key` / `not answering`; the rest of the 13-entry catalogue is one Add each,
+    plus a row for any OpenAI-compatible endpoint. Key goes to the keychain and no route hands one
+    back. Remove drops the entry and **keeps the key** (`psok secrets delete` is the other decision).
+14. **Settings→Data** — clear convs or facts, each behind 2-click confirm + count first. Tasks,
     audit, index, creds untouched.
-14. **Pins** — header pin or `⌘P`; strip above transcript. Deliberately inert (not sent to model,
+15. **Pins** — header pin or `⌘P`; strip above transcript. Deliberately inert (not sent to model,
     no recall effect). Column on `messages`; streaming msg can't pin until read back.
 
 ## Deliberately not built
@@ -437,7 +450,9 @@ toggles (absorbed in adapters). Pins-that-mean-something (would be a different f
 multi-user (ADR-0001). Automations answering permission prompts (deny + report). Recurring tasks
 (no schema slot; reminders ≠ recurrence). Two-way task sync — **built 2026-08-27** (`dirty_at`
 push-then-pull avoids merge algo; lists mirrored; vanished tasks stay `cancelled` not deleted).
-Notification delivery guarantees (best-effort `notify-send`). **My Day round-tripping** — proven
+Notification delivery guarantees (best-effort `notify-send`). Per-conversation fallback order —
+the chain order is global (`providers.yaml`'s `fallback:` key); per-conversation needs a column,
+a PATCH field and a control, and a column nothing writes is a reserved slot. **My Day round-tripping** — proven
 impossible through this API, see the limitations note above.
 
 ## Ground rules

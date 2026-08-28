@@ -35,21 +35,27 @@ psok serve --open                      # http://127.0.0.1:8000
 
 `psok serve` is the whole product in one process: the API under `/api`, the built interface everywhere else. There is no second port and no cross-origin request to configure.
 
-Point it at a model in `~/.psok/config/providers.yaml`. Ollama is preconfigured; a cloud provider keeps its key in the keychain, never in the file:
+Point it at a model. Ollama is preconfigured; a cloud provider keeps its key in the OS keychain, never in the config file:
+
+```bash
+psok providers catalogue               # what PSOK knows how to configure
+psok providers add anthropic
+psok secrets set psok/anthropic        # prompts, so the key stays out of shell history
+```
+
+Or Settings → Models in the interface, which writes the same file.
+
+Any OpenAI-compatible endpoint — vLLM, LM Studio, a proxy — works with no code change:
 
 ```yaml
 providers:
-  - name: anthropic
-    api_key_ref: psok/anthropic        # a keychain reference, never a key
-    default_model: claude-sonnet-4-20250514
+  - name: my-vllm
+    base_url: http://localhost:8000/v1
+    default_model: llama-3.1-8b
+    context_window: 32768              # optional; otherwise it is guessed
 ```
 
-```python
-from psok.secrets import set_secret
-set_secret("psok/anthropic", "sk-ant-...")
-```
-
-Any OpenAI-compatible endpoint — vLLM, LM Studio, NVIDIA NIM, Groq, OpenRouter — works with a `base_url` entry and no code change.
+Configure a second provider and a turn survives the first one being down: it falls back, and says which provider answered. See [providers.md](docs/architecture/providers.md).
 
 Prefer the terminal:
 
@@ -121,7 +127,7 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
 
 - [Architecture overview](docs/architecture/overview.md) — the layer model and a worked request
 - [The web interface](docs/interface.md) — how the React app is built, and every keyboard binding
-- [AI runtime](docs/architecture/ai-runtime.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
+- [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
 - [Decision records](docs/architecture/decisions/) — ADRs with the alternatives and what they cost
 - [API contract](docs/NEXT-SESSION.md) — the 36 endpoints the interface is built against
 

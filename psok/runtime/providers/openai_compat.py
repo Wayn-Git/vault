@@ -15,7 +15,14 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from psok.config import ProviderConfig
-from psok.runtime.http import ProviderHTTPError, post_json, stream_sse
+from psok.runtime.failures import classify_stream_error
+from psok.runtime.http import (
+    MAX_RETRIES,
+    ProviderHTTPError,
+    ProviderStreamError,
+    post_json,
+    stream_sse,
+)
 from psok.runtime.types import (
     Capabilities,
     ModelParameters,
@@ -30,7 +37,7 @@ from psok.secrets import resolve_api_key
 # Models that reject `reasoning_effort` alongside function tools on chat-completions.
 _REASONING_MODELS = ("o1", "o3", "o4", "gpt-5")
 
-__all__ = ["OpenAICompatClient", "ProviderHTTPError", "initialize"]
+__all__ = ["OpenAICompatClient", "ProviderHTTPError", "ProviderStreamError", "initialize"]
 
 
 def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -87,10 +94,6 @@ def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 log = logging.getLogger(__name__)
 
 
-class ProviderStreamError(RuntimeError):
-    """The provider reported a failure part-way through a streamed response."""
-
-
 def _describe_provider_error(error: object) -> str:
     """The provider's own words, however it chose to shape them.
 
@@ -117,11 +120,17 @@ class OpenAICompatClient:
         api_key: str | None,
         model: str,
         timeout: float = 120.0,
+        max_retries: int = MAX_RETRIES,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        #: Attempts this client may make, counting the first. The fallback chain
+        #: owns one budget for the whole turn and hands each link its share, so
+        #: a three-provider chain costs the same order of wall clock as one
+        #: provider rather than three times it.
+        self.max_retries = max_retries
 
     @property
     def _url(self) -> str:
@@ -183,6 +192,7 @@ class OpenAICompatClient:
             headers=self._headers(),
             payload=self._build_payload(messages, tools, params),
             timeout=self.timeout,
+            max_retries=self.max_retries,
         )
         return self._parse(data)
 
@@ -237,7 +247,11 @@ class OpenAICompatClient:
         usage: dict[str, Any] = {}
 
         async for raw in stream_sse(
-            self._url, headers=self._headers(), payload=payload, timeout=self.timeout
+            self._url,
+            headers=self._headers(),
+            payload=payload,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
         ):
             try:
                 chunk = json.loads(raw)
@@ -257,7 +271,9 @@ class OpenAICompatClient:
             # already refused. Raising puts the provider's own words in front of
             # the user instead.
             if error := chunk.get("error"):
-                raise ProviderStreamError(_describe_provider_error(error))
+                raise ProviderStreamError(
+                    _describe_provider_error(error), kind=classify_stream_error(error)
+                )
 
             if chunk.get("usage"):
                 usage = chunk["usage"]
@@ -344,7 +360,17 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"_value": parsed}
 
 
-def _context_window(model: str) -> int:
+def _context_window(model: str, declared: int | None = None) -> int:
+    """The declared window if providers.yaml states one, else a guess.
+
+    The guess matches substrings in the model name and falls through to 128,000,
+    which is a plausible number rather than a known one -- `nemotron-3-ultra-550b`
+    matches nothing and got 128,000 by default. `budget_history` then trims the
+    history against a figure nobody checked, so an entry that declares its window
+    is the only way the budget is right rather than lucky.
+    """
+    if declared:
+        return declared
     m = model.lower()
     if "gpt-4o" in m or "gpt-4.1" in m or "gpt-5" in m:
         return 128_000
@@ -353,13 +379,17 @@ def _context_window(model: str) -> int:
     return 128_000
 
 
-def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedModel:
+def initialize(
+    config: ProviderConfig, model: str | None = None, *, max_retries: int = MAX_RETRIES
+) -> ResolvedModel:
     resolved_model = model or config.default_model
     if not resolved_model:
         raise ValueError(f"no model specified for provider '{config.name}'")
     base_url = config.base_url or "https://api.openai.com/v1"
     api_key = resolve_api_key(ref=config.api_key_ref, env=config.api_key_env)
-    client = OpenAICompatClient(base_url=base_url, api_key=api_key, model=resolved_model)
+    client = OpenAICompatClient(
+        base_url=base_url, api_key=api_key, model=resolved_model, max_retries=max_retries
+    )
     return ResolvedModel(
         provider=config.name,
         model=resolved_model,
@@ -369,6 +399,6 @@ def initialize(config: ProviderConfig, model: str | None = None) -> ResolvedMode
             streaming=True,
             vision="gpt-4o" in resolved_model.lower(),
             reasoning=resolved_model.lower().startswith(_REASONING_MODELS),
-            context_window=_context_window(resolved_model),
+            context_window=_context_window(resolved_model, config.context_window),
         ),
     )
