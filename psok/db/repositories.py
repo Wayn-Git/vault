@@ -32,6 +32,13 @@ def _now() -> str:
 
 
 def _today() -> str:
+    """Local calendar date. "Today" is the one the user's clock shows.
+
+    Not `date('now')`. SQLite's is UTC, and every timestamp compared against it
+    here is local -- so for the machine's offset either side of midnight the two
+    disagreed and the day's buckets emptied themselves. East of Greenwich that
+    window is the small hours; west of it, the evening.
+    """
     return datetime.now().date().isoformat()
 
 
@@ -155,14 +162,21 @@ class ConversationRepository:
         title: str | None = None,
         provider: str | None = None,
         model: str | None = None,
+        fallback: list[str] | None = None,
     ) -> bool:
-        """Change the conversation's title or its provider/model pair.
+        """Change the conversation's title, its provider/model pair, or its chain.
 
         Provider and model are plain strings the loop re-resolves on every turn,
         so switching model mid-conversation is this write and nothing else
         (ai-runtime.md, "Switching models").
+
+        `fallback` is stored as JSON. An empty list is meaningful and different
+        from None -- it means "do not fall back at all for this conversation" --
+        so it is written rather than treated as absent.
         """
-        fields = {"title": title, "provider": provider, "model": model}
+        fields: dict[str, Any] = {"title": title, "provider": provider, "model": model}
+        if fallback is not None:
+            fields["fallback"] = json.dumps(fallback)
         updates = {k: v for k, v in fields.items() if v is not None}
         if not updates:
             return self.get(conversation_id) is not None
@@ -434,14 +448,17 @@ class TaskRepository:
         list_id: int | None = None,
         important: bool = False,
         my_day_on: str | None = None,
+        external_categories: str | None = None,
+        completed_at: str | None = None,
         status: str | None = None,
         dirty_at: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
             " priority, source, reminder_at, external_source, external_id, external_etag,"
-            " list_id, important, my_day_on, dirty_at, status, last_synced_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
+            " list_id, important, my_day_on, external_categories, completed_at, dirty_at,"
+            " status, last_synced_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
             " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
             (
                 title,
@@ -458,6 +475,8 @@ class TaskRepository:
                 list_id,
                 1 if important else 0,
                 my_day_on,
+                external_categories,
+                completed_at,
                 dirty_at,
                 status,
                 external_id,
@@ -486,6 +505,7 @@ class TaskRepository:
             "list_id",
             "important",
             "my_day_on",
+            "external_categories",
             "completed_at",
             "dirty_at",
         }
@@ -567,36 +587,51 @@ class TaskRepository:
 
     OPEN = "status IN ('todo', 'in_progress')"
 
+    # Today is bound in as `:today` rather than written as `date('now')`.
+    # SQLite's `now` is UTC; every column these compare against holds local
+    # naive time. The two agree for most of the day and disagree either side of
+    # midnight by the machine's offset -- at UTC+5:30 that is 00:00 to 05:30
+    # local, during which My Day read empty, the sun did nothing visible, and
+    # Missed forgot the previous evening's deadlines. Nothing announced it,
+    # because there is no error in comparing two well-formed dates.
+
     #: `date(due_at) <= today` catches an overdue task as well as one due today.
     #: A task explicitly put in My Day stays there for the day even if its
     #: deadline is next week -- that is what putting it there means.
     _MY_DAY = (
-        "(my_day_on = date('now')"
-        " OR date(scheduled_at) = date('now')"
-        " OR date(due_at) = date('now'))"
+        "(my_day_on = :today"
+        " OR date(scheduled_at) = :today"
+        " OR date(due_at) = :today)"
     )
-    _MISSED = "due_at IS NOT NULL AND due_at < date('now')"
+    #: Finished today, and therefore still part of today. My Day showing only
+    #: what is left makes it empty by the evening of a day you actually got
+    #: things done, which reads as the page being broken rather than as the work
+    #: being over. Kept as its own clause because everything else in My Day is
+    #: an open task and this deliberately is not.
+    _DONE_TODAY = "status = 'done' AND date(completed_at) = :today"
+    _MISSED = "due_at IS NOT NULL AND due_at < :today"
     _IMPORTANT = "important = 1"
     _GENERAL = "due_at IS NULL AND scheduled_at IS NULL AND my_day_on IS NULL"
 
-    def _bucket_where(self, bucket: str, list_id: int | None = None) -> tuple[str, tuple]:
+    def _bucket_where(self, bucket: str, list_id: int | None = None) -> tuple[str, dict]:
+        params = {"today": _today(), "list_id": list_id}
         if bucket == "my_day":
-            return f"{self.OPEN} AND {self._MY_DAY}", ()
+            return f"(({self.OPEN} AND {self._MY_DAY}) OR ({self._DONE_TODAY}))", params
         if bucket == "missed":
-            return f"{self.OPEN} AND {self._MISSED}", ()
+            return f"{self.OPEN} AND {self._MISSED}", params
         if bucket == "important":
-            return f"{self.OPEN} AND {self._IMPORTANT}", ()
+            return f"{self.OPEN} AND {self._IMPORTANT}", params
         if bucket == "general":
-            return f"{self.OPEN} AND {self._GENERAL}", ()
+            return f"{self.OPEN} AND {self._GENERAL}", params
         if bucket == "completed":
             # Cancelled is not completed. `upcoming(include_done=True)` conflates
             # them, which made "Showing done" quietly mean "showing everything
             # including things you gave up on".
-            return "status = 'done'", ()
+            return "status = 'done'", params
         if bucket == "list":
-            return f"{self.OPEN} AND list_id IS ?", (list_id,)
+            return f"{self.OPEN} AND list_id IS :list_id", params
         if bucket == "all":
-            return self.OPEN, ()
+            return self.OPEN, params
         raise ValueError(f"unknown task bucket '{bucket}'")
 
     #: Overdue first, then by deadline, then undated. `id` last so the order is
@@ -604,13 +639,26 @@ class TaskRepository:
     #: reads and the list appears to shuffle itself.
     _ORDER = "ORDER BY important DESC, (due_at IS NULL), due_at, id"
 
+    #: My Day mixes open work with what was finished today, and the two are not
+    #: peers: the open ones are the list, the done ones are the record. Sorting
+    #: them together buried a task still to do underneath three that were
+    #: already crossed off. Done sinks; the rest keeps the usual order.
+    _MY_DAY_ORDER = (
+        "ORDER BY (status = 'done'), important DESC, (due_at IS NULL), due_at, id"
+    )
+
     def bucket(
         self, name: str, *, list_id: int | None = None, limit: int = 200
     ) -> list[sqlite3.Row]:
         where, params = self._bucket_where(name, list_id)
-        order = "ORDER BY completed_at DESC, id DESC" if name == "completed" else self._ORDER
+        if name == "completed":
+            order = "ORDER BY completed_at DESC, id DESC"
+        elif name == "my_day":
+            order = self._MY_DAY_ORDER
+        else:
+            order = self._ORDER
         return self.conn.execute(
-            f"SELECT * FROM tasks WHERE {where} {order} LIMIT ?", (*params, limit)
+            f"SELECT * FROM tasks WHERE {where} {order} LIMIT :limit", {**params, "limit": limit}
         ).fetchall()
 
     def counts(self) -> dict[str, int]:

@@ -223,6 +223,7 @@ class TaskService:
             reminder_at=reminder_at,
             priority=priority,
             important=important,
+            add_to_my_day=add_to_my_day,
             list_external_id=list_ref.external_id,
         )
 
@@ -272,6 +273,7 @@ class TaskService:
         reminder_at: datetime | None,
         priority: str | None,
         important: bool,
+        add_to_my_day: bool,
         list_external_id: str | None,
     ) -> tuple[dict[str, str] | None, str]:
         """Put the task in the user's real task list, where there is one.
@@ -291,6 +293,7 @@ class TaskService:
                 reminder_at=_stamp(reminder_at),
                 priority=priority,
                 important=important,
+                add_to_my_day=add_to_my_day,
                 list_id=list_external_id,
             )
         except Exception as exc:

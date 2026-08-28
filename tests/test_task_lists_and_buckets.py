@@ -654,24 +654,427 @@ def test_my_day_is_a_choice_and_can_be_unmade(db):
     assert repo.bucket("my_day") == []
 
 
-def test_my_day_does_not_claim_to_sync(db):
-    """Graph exposes no My Day field -- verified against a real account, whose
-    task keys are id/title/status/importance/isReminderOn/createdDateTime/
-    dueDateTime/body/categories/@odata.etag/hasAttachments/lastModifiedDateTime.
+def test_my_day_travels_as_a_category(db):
+    """To Do's own My Day is unreachable -- verified against the live account on
+    2026-08-28, not inferred: `showInMyDay` and `isInMyDay` both 400 with "Could
+    not find a property named ... on type 'microsoft.graph.todoTask'" on v1.0 and
+    beta, the live beta $metadata lists twenty-one todoTask properties and none
+    contains "day", there is no `myDay` well-known list, and the legacy
+    /me/outlook/tasks surface has no such field either.
 
-    So a pull must never clear or set it, or the bucket would empty itself
-    every fifteen minutes with no explanation.
+    `categories` does round-trip, so that is what carries it.
 
-    Mutation check: add `"my_day_on": None` to `_apply`'s `fields`.
+    Mutation check: drop the `in_my_day` branch from `_apply`.
+    """
+    from psok.sync.microsoft_todo import MY_DAY_CATEGORY, SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "m-1", "title": "Ship", "status": "notStarted"}
+
+    _apply(repo, SyncReport(), None, {**item, "categories": [MY_DAY_CATEGORY]})
+    assert repo.by_external(SOURCE, "m-1")["my_day_on"] == _today(), "the tag puts it in My Day"
+
+    _apply(repo, SyncReport(), None, {**item, "categories": []})
+    assert repo.by_external(SOURCE, "m-1")["my_day_on"] is None, "untagging takes it out"
+
+
+def test_a_pull_does_not_undo_a_sun_that_has_not_been_pushed_yet(db):
+    """The push runs first and clears `dirty_at` when it lands. A row still
+    dirty is one whose change never reached To Do -- so the tag being absent
+    upstream says nothing yet, and clearing My Day on it would silently undo the
+    button the user just pressed.
+
+    Mutation check: drop the `pending` guard from `_apply`.
     """
     from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
-    _apply(repo, SyncReport(), None, {"id": "m-1", "title": "Ship", "status": "notStarted"})
-    row = repo.by_external(SOURCE, "m-1")
-    repo.update(row["id"], my_day_on=_today())
+    item = {"id": "m-2", "title": "Ship", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item)
 
-    _apply(repo, SyncReport(), None, {"id": "m-1", "title": "Ship it", "status": "notStarted"})
-    after = repo.by_external(SOURCE, "m-1")
-    assert after["title"] == "Ship it"
-    assert after["my_day_on"] == _today(), "a pull must not empty My Day"
+    row = repo.by_external(SOURCE, "m-2")
+    repo.update(row["id"], my_day_on=_today(), dirty_at=_today())
+
+    _apply(repo, SyncReport(), None, {**item, "title": "Ship it", "categories": []})
+    after = repo.by_external(SOURCE, "m-2")
+    assert after["title"] == "Ship it", "the rest of the pull still applies"
+    assert after["my_day_on"] == _today(), "an unpushed sun survives"
+
+
+def test_pushing_my_day_keeps_the_other_tags(db):
+    """Graph replaces the categories array rather than merging it, so sending
+    just ["My Day"] would delete whatever else the user had tagged the task
+    with.
+
+    Mutation check: return only the My Day category from `_categories_for`.
+    """
+    from psok.sync.microsoft_todo import (
+        MY_DAY_CATEGORY,
+        SOURCE,
+        SyncReport,
+        _apply,
+        _categories_for,
+    )
+
+    repo = TaskRepository()
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {"id": "m-3", "title": "Ship", "status": "notStarted", "categories": ["Work", "Urgent"]},
+    )
+    row = repo.by_external(SOURCE, "m-3")
+    assert _categories_for(row) == ["Work", "Urgent"], "not in My Day, tags untouched"
+
+    repo.update(row["id"], my_day_on=_today())
+    assert _categories_for(repo.by_external(SOURCE, "m-3")) == [
+        "Work",
+        "Urgent",
+        MY_DAY_CATEGORY,
+    ]
+
+
+def test_completion_time_comes_back_from_to_do(db):
+    """To Do knew three tasks were finished today and PSOK had recorded the
+    completion time of one: `_apply` never mapped `completedDateTime`, so
+    "what did I get done today" could not be answered from local data.
+
+    Mutation check: drop `completed_at` from `_apply`'s `fields`.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {
+        "id": "c-1",
+        "title": "SIH PPT",
+        "status": "completed",
+        "completedDateTime": {"dateTime": "2026-08-28T00:00:00.0000000", "timeZone": "UTC"},
+    }
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "c-1")
+    assert row["status"] == "done"
+    assert str(row["completed_at"]).startswith("2026-08-28"), row["completed_at"]
+
+    # Un-completing it upstream clears the time rather than stranding it.
+    _apply(repo, SyncReport(), None, {"id": "c-1", "title": "SIH PPT", "status": "notStarted"})
+    assert repo.by_external(SOURCE, "c-1")["completed_at"] is None
+
+
+def test_my_day_shows_what_was_finished_today(db):
+    """My Day showing only what is left makes it empty by the evening of a day
+    you actually got things done, which reads as the page being broken rather
+    than as the work being over.
+
+    Mutation check: drop the `_DONE_TODAY` clause from `_bucket_where`.
+    """
+    repo = TaskRepository()
+    done_today = repo.create("Vault project")
+    repo.update(done_today, status="done")
+
+    old = repo.create("Finished last week")
+    repo.update(old, status="done", completed_at="2026-08-01 09:00:00")
+
+    repo.create("Still open, no date")
+
+    titles = [r["title"] for r in repo.bucket("my_day")]
+    assert "Vault project" in titles, "today's completions belong to today"
+    assert "Finished last week" not in titles
+    assert "Still open, no date" not in titles, "an undated open task is not today's business"
+
+    # The rail count and the rows come from the same predicate, so they agree.
+    assert repo.counts()["my_day"] == len(titles)
+
+
+def test_my_day_puts_what_is_done_at_the_bottom(db):
+    """My Day mixes open work with what was finished today, and the two are not
+    peers: the open ones are the list, the done ones are the record. Sorted
+    together, a task still to do sat underneath three already crossed off.
+
+    Mutation check: use `_ORDER` for the my_day bucket.
+    """
+    repo = TaskRepository()
+    finished = repo.create("Vault project")
+    repo.update(finished, status="done")
+    repo.create("Assignment 2", my_day_on=_today())
+    starred = repo.create("Urgent thing", my_day_on=_today())
+    repo.update(starred, important=True)
+
+    rows = repo.bucket("my_day")
+    statuses = [r["status"] == "done" for r in rows]
+    assert statuses == sorted(statuses), "every open task comes before every done one"
+    assert rows[0]["title"] == "Urgent thing", "important still leads the open ones"
+    assert rows[-1]["title"] == "Vault project"
+
+
+def test_a_hashtag_in_the_title_puts_it_in_my_day(db):
+    """To Do's own onboarding says "Add #hashtags to a task's title to
+    categorise", and the title is the one field that syncs verbatim and cannot
+    be taken away. It is the gesture that works from a phone.
+
+    Mutation check: drop `tagged_by_hashtag` from `in_my_day`.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "h-1", "title": "Revision #myday", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "h-1")
+    assert row["my_day_on"] == _today()
+    assert row["title"] == "Revision #myday", (
+        "the marker stays in the title: stripping it would let the next push"
+        " send the stripped title back and silently untag it in To Do"
+    )
+
+    _apply(repo, SyncReport(), None, {"id": "h-1", "title": "Revision", "status": "notStarted"})
+    assert repo.by_external(SOURCE, "h-1")["my_day_on"] is None, "removing the tag takes it out"
+
+
+def test_a_list_called_my_day_counts_as_my_day(db):
+    """The version that needs no per-task gesture. To Do puts a task in exactly
+    one list, so this moves it out of wherever it lived -- unlike To Do's own My
+    Day, which is an overlay. Offered because some people work that way.
+
+    Mutation check: drop the `list_name` clause from `in_my_day`.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "l-1", "title": "Groceries run", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item, list_name="My Day")
+    assert repo.by_external(SOURCE, "l-1")["my_day_on"] == _today()
+
+    _apply(repo, SyncReport(), None, {**item, "id": "l-2"}, list_name="Groceries")
+    assert repo.by_external(SOURCE, "l-2")["my_day_on"] is None
+
+
+# ------------------------------------------------------- the local calendar
+#
+# Every timestamp in this schema is naive *local* time -- `_now()` is
+# `datetime.now()`, `my_day_on` is `datetime.now().date()`. SQLite's `date('now')`
+# is UTC. Comparing one against the other is wrong by the machine's offset for
+# part of every day, and the part it is wrong for is the small hours, which is
+# exactly when someone tidying up tomorrow's list finds the page has stopped
+# working.
+
+
+def _shifted_now(hours: int):
+    """`datetime.now()` moved, so a test can stand in another part of the day."""
+    from datetime import datetime, timedelta
+
+    real = datetime.now
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real(tz) + timedelta(hours=hours)
+
+    return Clock
+
+
+def test_buckets_use_the_local_date_not_utc(db, monkeypatch):
+    """A task put in My Day at half past midnight is in My Day.
+
+    `date('now')` is UTC. On a machine east of Greenwich the local date runs
+    ahead of it for the first hours of every day, so a row stamped with the
+    local date matched nothing -- My Day read empty, the sun did nothing, and
+    Missed forgot yesterday's deadlines. West of Greenwich the same mismatch
+    lands in the evening.
+
+    Mutation check: put `date('now')` back in any of the bucket predicates.
+    """
+    from datetime import datetime, timedelta
+
+    from psok.db import repositories
+
+    # Wherever this actually runs, look at the clock from a point where the
+    # local date and the UTC date disagree.
+    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    hours = 23 if offset.total_seconds() >= 0 else -23
+    monkeypatch.setattr(repositories, "datetime", _shifted_now(hours))
+
+    local_today = repositories._today()
+    utc_today = db.execute("select date('now')").fetchone()[0]
+    assert local_today != utc_today, "the shift has to actually straddle midnight"
+
+    repo = TaskRepository()
+    sunned = repo.create("Picked for today", my_day_on=local_today)
+    due = repo.create("Due today", due_at=f"{local_today} 17:00:00")
+    late = repo.create("Was due yesterday", due_at=f"{utc_today} 09:00:00")
+
+    my_day = [r["id"] for r in repo.bucket("my_day")]
+    assert sunned in my_day, "the sun has to work at every hour of the day"
+    assert due in my_day
+
+    done = repo.create("Finished today")
+    repo.update(done, status="done")
+    assert done in [r["id"] for r in repo.bucket("my_day")], "done today is still today"
+
+    assert late in [r["id"] for r in repo.bucket("missed")]
+    counts = repo.counts()
+    for name in ("my_day", "missed", "important", "general", "completed", "all"):
+        assert counts[name] == len(repo.bucket(name)), name
+
+
+# ------------------------------------------------- My Day survives the sync
+
+
+@pytest.mark.asyncio
+async def test_a_task_created_for_today_stays_in_my_day_after_a_sync(db, monkeypatch):
+    """The sun on the composer wrote `my_day_on` locally and told To Do
+    nothing, so the first pull saw no tag, decided the user had taken it out,
+    and cleared it. Fifteen minutes after making a task for today it silently
+    left today.
+
+    Mutation check: stop passing `add_to_my_day` through `TaskService.create`.
+    """
+    from psok.mcp import live
+    from psok.sync.microsoft_todo import MY_DAY_CATEGORY, SOURCE, SyncReport, _apply
+
+    sent = {}
+
+    class Connected:
+        connected = True
+
+        async def call(self, tool_name, arguments):
+            import json as _json
+
+            sent[tool_name] = arguments
+            body = (
+                {"value": [{"id": "L1", "wellknownListName": "defaultList"}]}
+                if tool_name == "list_task_lists"
+                else {"id": "T1", "lastModifiedDateTime": "2026-08-28T10:00:00Z"}
+            )
+            text = type("T", (), {"type": "text", "text": _json.dumps(body)})()
+            return type("R", (), {"content": [text]})()
+
+    monkeypatch.setattr(live, "connection", lambda name: Connected())
+
+    written = await _service().create("Finish the report", add_to_my_day=True)
+    assert MY_DAY_CATEGORY in sent["create_task"].get("categories", []), (
+        "To Do has to be told, or the next pull undoes it"
+    )
+
+    repo = TaskRepository()
+    assert repo.get(written.task_id)["my_day_on"] == _today()
+
+    # The pull, echoing back what the create sent.
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {
+            "id": "T1",
+            "title": "Finish the report",
+            "status": "notStarted",
+            "categories": [MY_DAY_CATEGORY],
+        },
+    )
+    assert repo.by_external(SOURCE, "T1")["my_day_on"] == _today(), "still today"
+
+
+def test_yesterdays_tag_does_not_keep_a_task_in_todays_my_day(db):
+    """My Day is a day's worth of choosing, and the local stamp expires at
+    midnight on purpose. The category upstream does not expire -- nothing takes
+    it off -- so every pull read a tag PSOK itself had written weeks ago and
+    stamped it today again. My Day stopped emptying and grew without bound.
+
+    The tag is stale, so it is cleared here and the row is marked dirty for the
+    push to take it off upstream too.
+
+    Mutation check: drop the staleness check from `_apply`'s My Day branch.
+    """
+    from psok.sync.microsoft_todo import MY_DAY_CATEGORY, SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {
+        "id": "y-1",
+        "title": "Yesterday's plan",
+        "status": "notStarted",
+        "categories": [MY_DAY_CATEGORY],
+    }
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "y-1")
+    assert row["my_day_on"] == _today()
+
+    # A day passes. The stamp goes stale; the tag upstream does not.
+    repo.update(row["id"], my_day_on="2020-01-01", dirty_at=None)
+    _apply(repo, SyncReport(), None, item)
+
+    after = repo.by_external(SOURCE, "y-1")
+    assert after["my_day_on"] is None, "a stale tag does not put it back in today"
+    assert after["dirty_at"], "and the push is told to take the tag off upstream"
+
+
+def test_a_hashtag_keeps_a_task_in_my_day_every_day(db):
+    """Unlike the category, a hashtag is in the title the user is looking at,
+    and a list they keep is a place they chose. Those are standing choices and
+    expiring them would fight the user; only the tag PSOK writes expires.
+
+    Mutation check: expire the hashtag the same way the category expires.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "h-9", "title": "Gym #myday", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "h-9")
+    repo.update(row["id"], my_day_on="2020-01-01")
+
+    _apply(repo, SyncReport(), None, item)
+    assert repo.by_external(SOURCE, "h-9")["my_day_on"] == _today()
+
+
+def test_a_completion_time_is_not_dragged_into_the_previous_day(db):
+    """To Do stamps `completedDateTime` as the completion *date* at midnight
+    UTC. Reading it as an instant and converting it to local time moves it
+    backwards by the machine's offset, so anywhere west of Greenwich a task
+    ticked off this morning came back stamped yesterday -- and dropped out of
+    "what I finished today" on the sync that followed the tick.
+
+    Mutation check: send `completedDateTime` through the ordinary `_timestamp`.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {
+            "id": "z-1",
+            "title": "SIH PPT",
+            "status": "completed",
+            "completedDateTime": {"dateTime": f"{_today()}T00:00:00.0000000", "timeZone": "UTC"},
+        },
+    )
+    row = repo.by_external(SOURCE, "z-1")
+    assert str(row["completed_at"]).startswith(_today()), row["completed_at"]
+    assert row["id"] in [r["id"] for r in repo.bucket("my_day")], "finished today is today"
+
+
+def test_a_pull_keeps_the_time_of_day_psok_already_recorded(db):
+    """PSOK knows the minute the box was ticked; To Do only knows the date. The
+    pull used to overwrite the first with the second, so every completion time
+    collapsed to midnight and "what did I do this morning" lost its answer.
+
+    Mutation check: take `completedDateTime` unconditionally in `_apply`.
+    """
+    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    _apply(repo, SyncReport(), None, {"id": "z-2", "title": "Ship", "status": "notStarted"})
+    row = repo.by_external(SOURCE, "z-2")
+    repo.update(row["id"], status="done", completed_at=f"{_today()} 09:41:00")
+
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {
+            "id": "z-2",
+            "title": "Ship",
+            "status": "completed",
+            "completedDateTime": {"dateTime": f"{_today()}T00:00:00.0000000", "timeZone": "UTC"},
+        },
+    )
+    assert repo.by_external(SOURCE, "z-2")["completed_at"] == f"{_today()} 09:41:00"
