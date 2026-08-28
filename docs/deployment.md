@@ -135,7 +135,30 @@ Honest list, because finding these one at a time is worse.
   is a local binary has to be installed in the image to exist at all.
 - **OAuth sign-ins** need their redirect URL to be the Render host, registered
   with the provider — the loopback URL a laptop uses will not come back.
-- **Reminders and automations run only while the service is up.** A free service
-  that sleeps is not running, so a reminder due during a quiet spell arrives
-  late, when something next wakes it. That is the same rule as on a laptop with
-  the lid shut, but the lid closes far more often here.
+- **Reminders have nowhere to arrive.** This is the one that surprises people,
+  and it is not about the plan. `psok/notify.py` shells out to `notify-send`,
+  `osascript` or `powershell` — it asks the platform what it has rather than
+  assuming a desktop. A container has none of them, so `_notifier()` returns
+  None, logs once, and drops the message. The loop still runs and still stamps
+  `reminded_at`, so from the inside it looks like it worked. Until PSOK grows a
+  delivery channel that is not a desktop session, a deployed reminder is a
+  reminder nobody gets.
+
+  Automations are the half that does survive, because their output is a
+  conversation you can open and read rather than a notification you have to be
+  present for.
+
+- **Both loops run only while the service is up.** A free service that has
+  spun down is not running either of them. An automation due during a quiet
+  spell fires when something next wakes the container, not on time. Same rule
+  as a laptop with the lid shut — the lid just closes far more often here.
+
+- **A free service has no disk at all**, so `PSOK_HOME` is discarded on every
+  spin-down. Provider keys given as environment variables survive (they are
+  service config, not disk) and `providers.yaml` regenerates on boot with the
+  `api_key_env` for each preset, so the agent can still answer. Tasks come back
+  too, because To Do is the source of truth. Conversations, memory, the
+  execution log and `mcp.yaml` — every connector added and its sign-in — do not.
+  Do not set `PSOK_SECRETS_FILE` on a free service: it would accept a key into
+  storage that is about to vanish, where leaving it unset gives an honest 503
+  and points at the environment variable instead.
