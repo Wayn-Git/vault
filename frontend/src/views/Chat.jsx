@@ -24,6 +24,24 @@ import { MOD_LABEL } from '../keys.js'
    report -- a loop wedged on a dead socket, which used to need a page reload. */
 const SILENCE_LIMIT_MS = 180_000
 
+// Kept identical to `planning.APPROVAL_MESSAGE` on the server, which is where
+// the instruction it answers lives.
+const PLAN_APPROVAL = 'Approved. Carry out the plan.'
+
+// Step events belong to the plan being carried out, which is always the most
+// recent one on screen -- an older card is a plan that was already finished or
+// discarded, and moving its ticks would be a lie about what is running.
+function markPlan(items, update) {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    if (items[i].kind === 'plan') {
+      const next = items.slice()
+      next[i] = update(items[i])
+      return next
+    }
+  }
+  return items
+}
+
 const OPENERS = [
   'What am I meant to be doing tomorrow?',
   'Find where I wrote about the deploy error',
@@ -173,8 +191,127 @@ function PinButton({ item, onPin }) {
   )
 }
 
-function Msg({ item, onPin }) {
+/* What each named state is called on screen. The set is closed on the server
+   (`director.STATUSES`), so a label missing here means a state was added
+   without deciding what to call it -- which is why the fallback is the raw
+   name rather than a shrug. */
+const STATUS_LABELS = {
+  retrieving: 'Searching your notes',
+  recalling: 'Recalling',
+  thinking: 'Thinking',
+  planning: 'Planning',
+  generating: 'Writing',
+  tool: 'Running',
+  connector: 'Using',
+  retrying: 'Continuing',
+  switching: 'Switching provider',
+  completed: 'Finishing',
+  cancelled: 'Stopping',
+  failed: 'Failed',
+}
+
+function statusLabel(status) {
+  if (!status) return 'Thinking'
+  const base = STATUS_LABELS[status.state] || status.state
+  if (status.state === 'connector' && status.server) return `${base} ${status.server}`
+  if (status.state === 'tool' && status.tool) return `${base} ${status.tool}`
+  return base
+}
+
+function formatDuration(ms) {
+  const total = Math.round(ms / 1000)
+  if (total < 60) return `${total}s`
+  return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, '0')}s`
+}
+
+/* The plan, as steps you can act on.
+
+   Plan mode used to prepend a sentence to the message and hope. The steps now
+   arrive as a `plan` frame from a `submit_plan` tool call, and nothing that
+   changes anything was even offered to the model during the turn that produced
+   them -- the registry withheld it. So Approve is the first moment any of this
+   could touch the machine. */
+/* Where the executing turn has got to. `running` is the step the model said it
+   was starting; `done` are the ones it said it finished. Both come from
+   `begin_step` calls, never from guessing which tool belongs to which step. */
+function stepClass(item, index) {
+  const n = index + 1
+  if (item.doneSteps?.includes(n)) return 'plan-step--done'
+  if (item.runningStep === n) return 'plan-step--running'
+  return ''
+}
+
+function PlanCard({ item, onApprove, onDiscard, onEditStep, disabled }) {
+  return (
+    <div className="plan-card">
+      <div className="plan-head">
+        <Icon name="check" size={14} />
+        <span>Plan</span>
+        <span className="plan-count">{item.steps.length} steps</span>
+      </div>
+      {item.summary && <p className="plan-summary">{item.summary}</p>}
+      <ol className="plan-steps">
+        {item.steps.map((step, i) => (
+          <li key={`${item.id}-${i}`} className={stepClass(item, i)}>
+            {/* Editable in place. The spec asked for approve, edit or discard,
+                and an edited plan travels with the approval -- the model's
+                original is already in the transcript, so approving without
+                sending the edit would approve the wrong thing. */}
+            {item.settled ? (
+              <span className="plan-step-title">{step.title}</span>
+            ) : (
+              <input
+                className="plan-step-input"
+                value={step.title}
+                aria-label={`Step ${i + 1}`}
+                onChange={(e) => onEditStep?.(item.id, i, e.target.value)}
+              />
+            )}
+            {step.detail && <span className="plan-step-detail">{step.detail}</span>}
+            {step.tools?.length > 0 && (
+              <span className="plan-step-tools">{step.tools.join(' · ')}</span>
+            )}
+          </li>
+        ))}
+      </ol>
+      {item.settled ? (
+        <p className="plan-settled">{item.settled === 'approved' ? 'Approved.' : 'Discarded.'}</p>
+      ) : (
+        <div className="plan-actions">
+          <button type="button" className="btn btn--primary btn--small" disabled={disabled} onClick={onApprove}>
+            Approve and run
+          </button>
+          <button type="button" className="btn btn--ghost btn--small" disabled={disabled} onClick={onDiscard}>
+            Discard
+          </button>
+          <span className="plan-hint">Nothing has run yet. Edit the request and plan again to change it.</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Msg({ item, onPin, onApprovePlan, onDiscardPlan, onEditPlanStep, busy }) {
   const role = item.kind
+
+  if (role === 'plan') {
+    return (
+      <PlanCard
+        item={item}
+        disabled={busy}
+        onApprove={() => onApprovePlan?.(item.id)}
+        onDiscard={() => onDiscardPlan?.(item.id)}
+        onEditStep={onEditPlanStep}
+      />
+    )
+  }
+  if (role === 'cost') {
+    return (
+      <div className="msg-cost">
+        {item.steps} step{item.steps === 1 ? '' : 's'} · {item.tools} tool{item.tools === 1 ? '' : 's'} · {formatDuration(item.durationMs)}
+      </div>
+    )
+  }
 
   if (role === 'note') {
     const cls = item.tone === 'guard'
@@ -252,6 +389,7 @@ export default function Chat() {
   const [turnState, setTurnState] = useState('idle')
   const [stopping, setStopping] = useState(false)
   const [liveTool, setLiveTool] = useState(null)
+  const [liveStatus, setLiveStatus] = useState(null)
   const [liveBuffer, setLiveBuffer] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
   const [pending, setPending] = useState([])
@@ -275,7 +413,7 @@ export default function Chat() {
   const textareaRef = useRef(null)
   const fileRef = useRef(null)
   const acTimerRef = useRef(null)
-  const liveRef = useRef({ buffer: '', reasoning: '', reasoningStart: 0, tool: null })
+  const liveRef = useRef({ buffer: '', reasoning: '', reasoningStart: 0, tool: null, status: null })
   // One counter per turn. The stream outlives the answer -- memory extraction
   // runs after `done` -- so a turn that has already been superseded must not be
   // allowed to reset the composer when its stream finally closes.
@@ -296,6 +434,7 @@ export default function Chat() {
 
   const setBuffer = useCallback((t) => { liveRef.current.buffer = t; setLiveBuffer(t) }, [])
   const setTool = useCallback((t) => { liveRef.current.tool = t; setLiveTool(t) }, [])
+  const setStatus = useCallback((next) => { liveRef.current.status = next; setLiveStatus(next) }, [])
   const setReasoning = useCallback((t) => { liveRef.current.reasoning = t; setLiveReasoning(t) }, [])
 
   const loadMessages = useCallback(async (cid) => {
@@ -384,10 +523,11 @@ export default function Chat() {
     settledRef.current = true
     pushAssistant()
     setTool(null)
+    setStatus(null)
     setTurnState('idle')
     setStopping(false)
     refreshConvs()
-  }, [pushAssistant, setTool, refreshConvs])
+  }, [pushAssistant, setTool, setStatus, refreshConvs])
 
   const onEvent = useCallback((evt) => {
     switch (evt.type) {
@@ -442,17 +582,66 @@ export default function Chat() {
         setItems((prev) => [...prev, { id: nextId(), kind: 'memory', text: parts.join(' — ') }])
         break
       }
-      case 'done': settle(); break
+      // The plan itself, as data. Rendered as steps with Approve and Discard
+      // rather than as prose, which is the whole reason it is a tool call.
+      case 'plan':
+        pushAssistant()
+        setItems((prev) => [...prev, {
+          id: nextId(),
+          kind: 'plan',
+          summary: evt.summary ?? '',
+          steps: evt.steps ?? [],
+          settled: false,
+        }])
+        break
+      // What the turn is doing right now. Every one of these already happened
+      // inside the loop and none of it was visible: the composer said
+      // "Thinking" from the moment a turn opened until the first token, whether
+      // the wait was retrieval, a cold connector or a provider retry.
+      case 'status':
+        setStatus(evt.state ? { state: evt.state, tool: evt.tool, server: evt.server } : null)
+        break
+      // Progress through an approved plan, as the model reported it. Applied to
+      // the last plan card, which is the one that was approved.
+      case 'step_started':
+        setItems((prev) => markPlan(prev, (plan) => ({ ...plan, runningStep: evt.number })))
+        break
+      case 'step_done':
+        setItems((prev) => markPlan(prev, (plan) => ({
+          ...plan,
+          runningStep: plan.runningStep === evt.number ? null : plan.runningStep,
+          doneSteps: [...(plan.doneSteps ?? []), evt.number],
+        })))
+        break
+      case 'done':
+        // `execution_logs.duration_ms` has held this since logging shipped and
+        // nothing ever read it. Asked immediately or not at all.
+        if (evt.duration_ms != null) {
+          setItems((prev) => [...prev, {
+            id: nextId(),
+            kind: 'cost',
+            steps: evt.steps ?? evt.iterations ?? 0,
+            tools: evt.tools ?? 0,
+            durationMs: evt.duration_ms,
+          }])
+        }
+        settle()
+        break
       case 'guard': pushNote('guard', evt.reason); settle(); break
       case 'error': pushNote('error', evt.message); settle(); break
       // Not terminal: the loop is continuing a turn that came back empty or
       // truncated, and the composer stays disabled while it does.
       case 'warning': pushNote('warning', evt.message); break
-      default: break
+      default:
+        /* A frame added on the server used to vanish here without trace, which
+           is how you spend an afternoon wondering why the backend's new event
+           "does not arrive". It arrives. */
+        console.warn('[psok] unhandled turn frame', evt.type, evt) // eslint-disable-line no-console
+        break
     }
-  }, [pushAssistant, pushNote, settle, setBuffer, setReasoning, setTool])
+  }, [pushAssistant, pushNote, settle, setBuffer, setReasoning, setTool, setStatus])
 
-  const openTurn = useCallback(async (cid, message) => {
+  const openTurn = useCallback(async (cid, message, mode = 'chat') => {
     const token = ++turnTokenRef.current
     runningRef.current = cid
     settledRef.current = false
@@ -490,6 +679,7 @@ export default function Chat() {
         conversationId: cid,
         message,
         workspace: workspace.trim() || null,
+        mode,
         onEvent: (evt) => { beat(); onEvent(evt) },
         signal: controller.signal,
       })
@@ -527,17 +717,63 @@ export default function Chat() {
     }
   }, [toast])
 
+  /* Approve runs the plan as an ordinary chat turn.
+
+     The plan is already in the transcript -- the director persisted it as the
+     assistant's own words -- so the executing turn reads it as history rather
+     than being handed it again. That is also why approving is a normal turn and
+     not a special endpoint: there is nothing special about it except that the
+     model has already agreed what it is going to do. */
+  const approvePlan = useCallback(async (itemId) => {
+    if (turnState !== 'idle' || !activeId) return
+    let message = PLAN_APPROVAL
+    setItems((prev) => prev.map((it) => {
+      if (it.id !== itemId) return it
+      if (it.edited) {
+        // An edited plan travels with the approval. The model's original is
+        // already in the transcript, so approving without sending the edit
+        // would approve the plan the user just changed.
+        const steps = it.steps.map((st, i) => `${i + 1}. ${st.title}`).join('\n')
+        message = `Approved, with this as the plan. Carry it out, and call \`begin_step\` before each step.\n\n${steps}`
+      }
+      return { ...it, settled: 'approved' }
+    }))
+    try {
+      abortRef.current?.abort()
+      await openTurn(activeId, message, 'chat')
+    } catch (err) {
+      toast(err.message, 'bad')
+      setTurnState('idle')
+    }
+  }, [turnState, activeId, openTurn, toast])
+
+  const editPlanStep = useCallback((itemId, index, title) => {
+    setItems((prev) => prev.map((it) => (
+      it.id === itemId
+        ? { ...it, steps: it.steps.map((st, i) => (i === index ? { ...st, title } : st)), edited: true }
+        : it
+    )))
+  }, [])
+
+  const discardPlan = useCallback((itemId) => {
+    // Local only. Nothing ran, so there is nothing to undo on the server, and
+    // the plan stays in the transcript because the model said it.
+    setItems((prev) => prev.map((it) => (it.id === itemId ? { ...it, settled: 'discarded' } : it)))
+  }, [])
+
   const send = useCallback(async () => {
     const typed = input.trim()
     if ((!typed && attachments.length === 0) || turnState !== 'idle') return
     const attached = attachments.length
       ? `\n\nAttached files (read them with view_file):\n${attachments.map((f) => `- ${f.path}`).join('\n')}`
       : ''
-    const prefix = plan
-      ? 'Plan first: list the steps you intend to take and what each one will'
-        + ' touch, then stop and wait. Do not write files or run commands this turn.\n\n'
-      : ''
-    const message = `${prefix}${typed}${attached}`
+    /* No prefix any more. It used to prepend "Plan first: ..." to the user's
+       own message, which meant the instruction was persisted into the
+       transcript and replayed on every later iteration and every later turn --
+       and nothing enforced it, because the backend had no idea plan mode
+       existed. It is a field on the request now, and the tool schemas are
+       withheld by the registry. */
+    const message = `${typed}${attached}`
     if (!message.trim()) return
     setInput('')
     setAttachments([])
@@ -568,7 +804,7 @@ export default function Chat() {
       // after `done`. Let go of it before opening the next one on the same
       // conversation, so two readers are never live at once.
       abortRef.current?.abort()
-      await openTurn(cid, message)
+      await openTurn(cid, message, plan ? 'plan' : 'chat')
     } catch (err) {
       toast(err.message, 'bad')
       setTurnState('idle')
@@ -1020,7 +1256,14 @@ export default function Chat() {
               <div className="chat-stream">
                 {rendered.map((item) => (
                   <div key={item.id} data-item={item.id} className="stream-item">
-                    <Msg item={item} onPin={onPin} />
+                    <Msg
+                      item={item}
+                      onPin={onPin}
+                      busy={turnState !== 'idle'}
+                      onApprovePlan={approvePlan}
+                      onDiscardPlan={discardPlan}
+                      onEditPlanStep={editPlanStep}
+                    />
                   </div>
                 ))}
                 {turnState === 'running' && !liveTool && (
@@ -1033,10 +1276,13 @@ export default function Chat() {
                         <span className="tele-cursor" />
                       </div>
                     ) : !liveReasoning && (
-                      // A model that does not expose its reasoning gives the
-                      // interface nothing to show but the fact that it is going.
+                      /* It said "Thinking" from the moment a turn opened
+                         until the first token, whether the wait was the vault
+                         search, a cold connector, a provider retry or the model.
+                         The loop knew which; it just never said. */
                       <div className="thinking">
-                        Thinking<span className="thinking-dots"><i /><i /><i /></span>
+                        {statusLabel(liveStatus)}
+                        <span className="thinking-dots"><i /><i /><i /></span>
                       </div>
                     )}
                   </div>

@@ -18,13 +18,21 @@ Three things this deliberately does *not* do:
   a second provider would restart the answer under text the user is already
   reading. A failure after the first byte is a failure.
 
-The order is providers.yaml's own order, which is the closest thing to a stated
-preference that exists without inventing a setting. A `fallback:` key overrides
-it for anyone who wants to be explicit:
+The order is decided in three places, most specific first:
 
-    fallback:
-      - groq
-      - cerebras
+1. **The conversation's own `fallback` column** -- a JSON list of provider
+   names, set through `PATCH /api/conversations/{id}`. An empty list means "do
+   not fall back at all here", which is a real answer and not the same as
+   having said nothing.
+2. **A `fallback:` key in providers.yaml**, for someone who wants one order
+   everywhere:
+
+       fallback:
+         - groq
+         - cerebras
+
+3. **providers.yaml's own order**, which is the closest thing to a stated
+   preference that exists without anybody having to configure anything.
 """
 
 from __future__ import annotations
@@ -120,6 +128,9 @@ def build_chain(
     chain = [Link(provider=provider, model=model)]
 
     preferred = order if order is not None else declared_order()
+    if preferred is not None and not preferred:
+        # An explicit empty list: this conversation does not fall back.
+        return chain
     if preferred:
         candidates = [name for name in preferred if name in configured]
     else:

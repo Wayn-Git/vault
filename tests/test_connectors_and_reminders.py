@@ -321,6 +321,11 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
     it from there on create, and holding it back meant a note edited on the
     phone never reached PSOK again -- a bug that read as an invariant because
     it sat beside a real one.
+
+    `my_day_on` left this set on 2026-08-28, when My Day started travelling as a
+    category. It is now two-way like everything else, and its own protection --
+    a pull must not clear it off a row whose push has not landed -- is tested in
+    test_task_lists_and_buckets.py.
     """
     from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
@@ -333,7 +338,6 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
         row["id"],
         scheduled_at="2026-09-02 14:00:00",
         duration_estimate_minutes=45,
-        my_day_on="2026-09-02",
     )
 
     _apply(repo, SyncReport(), None, {**item, "title": "Book flights (return)"})
@@ -341,7 +345,6 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
     assert after["title"] == "Book flights (return)"
     assert after["scheduled_at"] == "2026-09-02 14:00:00"
     assert after["duration_estimate_minutes"] == 45
-    assert after["my_day_on"] == "2026-09-02"
 
 
 def test_a_body_edited_in_to_do_reaches_psok(db):
@@ -713,8 +716,14 @@ async def test_a_server_that_cannot_come_back_says_so_once(monkeypatch):
 
     result = await manager._make_handler("x", "t")({}, ToolContext())
     assert result.is_error
-    assert "could not be re-established" in result.content
     assert len(attempts) == 1, "exactly one reconnect, not a loop"
+
+    # The message is an instruction, not an exception string: it names the
+    # connector, the screen and the button, and tells the model to stop. A raw
+    # `Connection closed` is what the model turned into an invented outage.
+    assert "'x'" in result.content
+    assert "Connectors" in result.content and "Reconnect" in result.content
+    assert "Do not retry" in result.content
 
 
 # --- tasks go where the user keeps their tasks ------------------------------

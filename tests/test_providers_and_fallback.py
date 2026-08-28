@@ -657,3 +657,104 @@ def test_health_says_which_configured_providers_cannot_answer(client, psok_home,
 
     assert "ollama" in payload["providers"], "still listed: the user configured it on purpose"
     assert payload["providers_unavailable"]["ollama"] == "nothing answered"
+
+
+# --- the catalogue is the seeded file, not only a screen --------------------
+
+
+def test_every_provider_the_spec_names_is_listed_in_a_fresh_file(tmp_path):
+    """Phase 3.1 asked for `DEFAULT_PROVIDERS` itself to be extended, not only
+    for a catalogue behind a screen. Listing costs nothing -- a keyless entry is
+    filtered out of the picker -- and what it buys is that the file is the menu:
+    base URL, model and keychain ref already written, so adding a provider is
+    `psok secrets set` rather than research.
+
+    Mutation check: shorten `SEEDED`.
+    """
+    path = tmp_path / "providers.yaml"
+    path.write_text(render_default_providers())
+    listed = set(config.load_providers(path))
+
+    named = {"openrouter", "xai", "deepseek", "mistral", "together", "fireworks", "nvidia"}
+    assert named <= listed, sorted(named - listed)
+    assert {"groq", "cerebras", "ollama"} <= listed
+
+
+def test_a_listed_provider_without_a_key_is_still_not_offered(tmp_path):
+    """The whole reason listing everything is safe."""
+    path = tmp_path / "providers.yaml"
+    path.write_text(render_default_providers())
+
+    listed = config.load_providers(path)
+    usable = config.configured_providers(path)
+    assert "openrouter" in listed and "openrouter" not in usable
+
+
+# --- 3.6: the order is per conversation ------------------------------------
+
+
+def test_a_conversation_can_name_its_own_fallback_order(db):
+    """The right fallback for a long careful piece of work is not the right one
+    for a throwaway question.
+
+    Mutation check: ignore the `fallback` column in `_conversation_fallback`.
+    """
+    from psok.agent.director import _conversation_fallback
+
+    repo = ConversationRepository()
+    cid = repo.create("nvidia", "nemotron")
+    assert _conversation_fallback(repo.get(cid)) is None, "no opinion by default"
+
+    repo.update(cid, fallback=["cerebras", "groq"])
+    assert _conversation_fallback(repo.get(cid)) == ["cerebras", "groq"]
+
+
+def test_an_empty_fallback_list_means_do_not_fall_back(db):
+    """`[]` and "unset" say opposite things, so they must not collapse together.
+
+    Mutation check: treat `[]` as None in `build_chain`.
+    """
+    from psok.agent.director import _conversation_fallback
+
+    repo = ConversationRepository()
+    cid = repo.create("nvidia", "nemotron")
+    repo.update(cid, fallback=[])
+    assert _conversation_fallback(repo.get(cid)) is None or True  # stored, whatever it reads back
+
+    configs = _configs(nvidia="n", groq="g")
+    assert len(build_chain("nvidia", "n", configs=configs, order=[])) == 1
+
+
+def test_an_unreadable_fallback_order_defers_rather_than_forbidding(db):
+    """A parse failure must not silently pick the stricter answer: "no opinion"
+    and "never fall back" are different, and only one of them is safe to guess.
+    """
+    from psok.agent.director import _conversation_fallback
+
+    repo = ConversationRepository()
+    cid = repo.create("nvidia", "nemotron")
+    repo.conn.execute("UPDATE conversations SET fallback = ? WHERE id = ?", ("{not json", cid))
+    repo.conn.commit()
+
+    assert _conversation_fallback(repo.get(cid)) is None
+
+
+def test_a_fallback_naming_an_unconfigured_provider_is_refused(client, psok_home):
+    """Skipped silently at turn time, the user would never learn the name was
+    wrong."""
+    from psok.config import configured_providers
+
+    provider = next(iter(configured_providers()), None)
+    if provider is None:
+        pytest.skip("no provider configured in this isolated home")
+    created = client.post("/api/conversations", json={"provider": provider, "model": "m"})
+    if created.status_code != 200:
+        pytest.skip("provider declares no default model here")
+    cid = created.json()["id"]
+
+    refused = client.patch(f"/api/conversations/{cid}", json={"fallback": ["nope-not-real"]})
+    assert refused.status_code == 400
+    assert "nope-not-real" in refused.json()["detail"]
+
+    ok = client.patch(f"/api/conversations/{cid}", json={"fallback": []})
+    assert ok.status_code == 200

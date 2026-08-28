@@ -157,8 +157,51 @@ GOOGLE_SETUP_HINT = (
 )
 
 
+#: Shared by every Google entry, merged or single, so the two cannot drift into
+#: contradicting each other about the callback port -- which is the one setting
+#: Google validates byte-for-byte against the registered redirect URI.
+_GOOGLE_ENV: dict[str, str] = {
+    # The server's own OAuth callback listener. Its default is 8000, which is
+    # where PSOK's API usually sits, so this pins a free port; the redirect URI
+    # registered with Google has to match it exactly. Bound lazily, only during
+    # a sign-in, so several of these can run at once.
+    "WORKSPACE_MCP_PORT": "8765",
+    # And if that port is busy, fail rather than move. Left to itself
+    # workspace-mcp walks to 8766..8769 and composes a redirect URI from
+    # whichever it got -- which Google then rejects as redirect_uri_mismatch,
+    # naming a port the user never chose and cannot see. Every one of these
+    # entries shares one port, so this is the common case, not a corner.
+    "WORKSPACE_MCP_PORT_FALLBACK_COUNT": "0",
+    "OAUTHLIB_INSECURE_TRANSPORT": "1",  # plain http on loopback
+    # Lets the callback accept a code whose flow state it does not hold, which
+    # is what allows the account to be chosen on Google's page rather than
+    # declared up front.
+    "MCP_SINGLE_USER_MODE": "1",
+}
+
+
+#: The services a single merged Workspace connector covers. Deliberately not all
+#: nine: these are the ones with a real PSOK use, and every extra `--tools`
+#: entry is more tool schemas on every model round trip -- Gmail and Calendar
+#: alone measured 10,493 tokens.
+GOOGLE_MERGED_TOOLS = ("gmail", "calendar", "drive", "docs", "sheets")
+
+#: The name a merged Google connector takes.
+GOOGLE_MERGED_ID = "google-workspace"
+
+
 def _google_apps() -> list[CatalogueEntry]:
-    entries = []
+    """One entry per Google service, plus one that runs several in a process.
+
+    The per-service entries are how this started, and they work -- but five of
+    them over one Google account is five `workspace-mcp` processes sharing one
+    OAuth client, one credentials directory and one callback port. That sharing
+    is what produced the traps: `sign_out` deleting the CSRF store the other
+    four were mid-flow against, and `NoAvailablePortError` when two of them
+    started at once. The merged entry is the same server told to serve five
+    tool sets, which is what it was built to do.
+    """
+    entries = [_google_merged()]
     for service, title, category, description in GOOGLE_APPS:
         entries.append(
             CatalogueEntry(
@@ -170,26 +213,7 @@ def _google_apps() -> list[CatalogueEntry]:
                 transport=Transport.STDIO,
                 command="uvx",
                 args=["workspace-mcp", "--single-user", "--tools", service],
-                env={
-                    # The server's own OAuth callback listener. Its default is
-                    # 8000, which is where PSOK's API usually sits, so this pins
-                    # a free port; the redirect URI registered with Google has
-                    # to match it exactly. Bound lazily, only during a sign-in,
-                    # so several of these can run at once.
-                    "WORKSPACE_MCP_PORT": "8765",
-                    # And if that port is busy, fail rather than move. Left to
-                    # itself workspace-mcp walks to 8766..8769 and composes a
-                    # redirect URI from whichever it got -- which Google then
-                    # rejects as redirect_uri_mismatch, naming a port the user
-                    # never chose and cannot see. Nine of these entries share
-                    # one port, so this is the common case, not a corner.
-                    "WORKSPACE_MCP_PORT_FALLBACK_COUNT": "0",
-                    "OAUTHLIB_INSECURE_TRANSPORT": "1",  # plain http on loopback
-                    # Lets the callback accept a code whose flow state it does
-                    # not hold, which is what allows the account to be chosen on
-                    # Google's page rather than declared up front.
-                    "MCP_SINGLE_USER_MODE": "1",
-                },
+                env=_GOOGLE_ENV.copy(),
                 requires="uv (uvx) and a Google Cloud OAuth client",
                 setup_hint=GOOGLE_SETUP_HINT,
                 homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
@@ -201,6 +225,32 @@ def _google_apps() -> list[CatalogueEntry]:
             )
         )
     return entries
+
+
+def _google_merged() -> CatalogueEntry:
+    services = ", ".join(t.capitalize() for t in GOOGLE_MERGED_TOOLS[:-1])
+    return CatalogueEntry(
+        id=GOOGLE_MERGED_ID,
+        title="Google Workspace",
+        description=(
+            f"{services} and {GOOGLE_MERGED_TOOLS[-1].capitalize()} in one connector."
+            " One sign-in, one process."
+        ),
+        category="Productivity",
+        auth=AuthKind.SETUP,
+        transport=Transport.STDIO,
+        command="uvx",
+        args=["workspace-mcp", "--single-user", "--tools", *GOOGLE_MERGED_TOOLS],
+        env=_GOOGLE_ENV.copy(),
+        requires="uv (uvx) and a Google Cloud OAuth client",
+        setup_hint=GOOGLE_SETUP_HINT,
+        homepage="https://github.com/taylorwilsdon/google_workspace_mcp",
+        client_id_env="GOOGLE_OAUTH_CLIENT_ID",
+        client_secret_env="GOOGLE_OAUTH_CLIENT_SECRET",
+        auth_tool="start_google_auth",
+        credentials_path="~/.google_workspace_mcp/credentials",
+        shares_account_with="google",
+    )
 
 
 CATALOGUE: list[CatalogueEntry] = [

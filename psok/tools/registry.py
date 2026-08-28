@@ -13,7 +13,7 @@ from typing import Any
 from psok.db.repositories import ExecutionLogRepository
 from psok.runtime.types import ToolSchema
 from psok.security.confirmation import ConfirmationService
-from psok.tools.base import Tool, ToolContext, ToolResult, ToolSource
+from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
 
 MAX_RESULT_CHARS = 100_000
 MCP_DELIMITER = "__mcp__"
@@ -75,19 +75,29 @@ class ToolRegistry:
     def list(self) -> list[Tool]:
         return list(self._tools.values())
 
-    def schemas(self, *, hidden_servers: set[str] | None = None) -> list[ToolSchema]:
+    def schemas(
+        self, *, hidden_servers: set[str] | None = None, read_only: bool = False
+    ) -> list[ToolSchema]:
         """What the model sees. Source is deliberately invisible here.
 
         `hidden_servers` withholds the tools of connectors switched off for the
-        current conversation. The connection itself is process-wide -- one
-        manager serves every conversation -- so what a conversation can reach is
-        decided here rather than by connecting a different set of servers.
+        current conversation, and of connectors nobody has signed in to. The
+        connection itself is process-wide -- one manager serves every
+        conversation -- so what a conversation can reach is decided here rather
+        than by connecting a different set of servers.
+
+        `read_only` withholds every tool that can change anything, which is what
+        plan mode is. `RiskLevel.LOW` already means "changes nothing, runs
+        without asking" -- the permission gate has trusted that judgement since
+        it shipped -- so gating on it covers a connector's tools on the day it
+        is added rather than on the day someone remembers to update a list.
         """
         hidden = hidden_servers or set()
         return [
             ToolSchema(name=t.name, description=t.description, parameters=t.parameters)
             for t in self._tools.values()
             if not (t.server_name and t.server_name in hidden)
+            and not (read_only and t.risk is not RiskLevel.LOW)
         ]
 
     async def dispatch(
@@ -111,6 +121,26 @@ class ToolRegistry:
                 f"the '{tool.server_name}' connector is switched off for this conversation."
                 " Ask the user to turn it back on if they want it used."
             )
+
+        # Plan mode. Withholding the schema is a request; this is the answer to
+        # "what if it asks anyway". Refused before the permission gate, because
+        # a plan turn must not be able to raise a confirmation prompt either --
+        # an approval dialog for a write the user did not ask for yet is worse
+        # than the write being declined.
+        if ctx.read_only and tool.risk is not RiskLevel.LOW:
+            return ToolResult.error(
+                f"'{name}' changes things, and this turn is planning rather than acting."
+                " It is not available until the user approves the plan. Finish the plan"
+                " and call submit_plan; do not try this tool again."
+            )
+
+        # Withholding the schema is not enough here either: a model can name a
+        # tool it saw in an earlier turn, before the account was removed or
+        # before the sign-in was found to be missing.
+        if tool.server_name and tool.server_name in _unsigned_connectors():
+            from psok.mcp.guidance import sign_in_instruction
+
+            return ToolResult.error(sign_in_instruction(tool.server_name))
 
         outcome = await self.confirmation.check(tool, arguments, ctx)
         if not outcome.allowed:
@@ -147,6 +177,21 @@ class ToolRegistry:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         return result
+
+
+def _unsigned_connectors() -> frozenset[str]:
+    """Connectors running with no account attached, cached briefly.
+
+    Imported lazily and guarded for the same reason `_connector_enabled` is: the
+    tool registry serves builtin tools on a machine with no connectors at all,
+    and a failure to read MCP state must not stop a file being written.
+    """
+    try:
+        from psok.mcp.guidance import unsigned_connectors
+
+        return unsigned_connectors()
+    except Exception:
+        return frozenset()
 
 
 def _connector_enabled(server_name: str, conversation_id: str | None) -> bool:

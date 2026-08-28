@@ -34,7 +34,15 @@ default model, context window where it is known, key page, docs page. Each is
 the set of facts needed to write one `providers.yaml` entry.
 
 The starter file is **generated from the catalogue** (`render_default_providers`)
-rather than hand-written. The hand-written one had drifted: Groq sat commented
+and lists twelve of them, so the file itself is the menu -- base URL, model and
+keychain ref already written, making "add a provider" one `psok secrets set`
+rather than research. Listing costs nothing: `configured_providers` filters out
+any entry whose key is missing, so a listed provider is not an offered one.
+`psok doctor` summarises the keyless ones on one line rather than warning per
+provider, which would train the reader to skip the section that also reports
+real faults.
+
+The file is generated rather than hand-written. The hand-written one had drifted: Groq sat commented
 out while the docs claimed it was configured, and Cerebras existed in neither.
 `psok doctor` had grown a check to report the drift, which is a good sign the
 two should not have been separate lists.
@@ -136,7 +144,9 @@ how "start Ollama and it still says unavailable" happens.
 
 `GET /api/health` reports `providers_unavailable` as a `{name: reason}` map
 beside `providers`. Unavailable providers stay **listed**: the user configured
-them on purpose, so they get a reason rather than vanishing.
+them on purpose, so they get a reason rather than vanishing. Both pickers read
+it -- the composer's `ModelMenu` dims the row and says "not answering", and
+Settings shows the reason in full.
 
 ## The chain
 
@@ -224,7 +234,7 @@ YAML for the user to copy.
 
 ## Verified
 
-- 39 tests in `tests/test_providers_and_fallback.py`; 457 in the suite; `ruff`
+- 45 tests in `tests/test_providers_and_fallback.py`; 503 in the suite; `ruff`
   clean; `npm run lint` and `build` clean.
 - End to end against real HTTP, no mocked transport — a live `http.server` on
   one port and a dead port for the other entry:
@@ -241,10 +251,9 @@ YAML for the user to copy.
 
 ## Not built, on purpose
 
-- **Per-conversation fallback order.** The order is global
-  (`providers.yaml`'s `fallback:` key). A per-conversation one needs a column,
-  a PATCH field and a control to set it; none of those exists, and a column
-  nothing writes is a reserved slot.
+- **A control in the interface for the per-conversation chain.** The column and
+  the PATCH field are there and tested; nothing in the UI sets them yet, so it
+  is an API-level setting today.
 - **Probing cloud providers on a schedule.** Costs latency on every health poll
   to learn what the next turn learns for free.
 - **A generic client with per-provider auth flags.** See the catalogue section.

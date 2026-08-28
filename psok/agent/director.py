@@ -16,6 +16,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from psok.agent.planning import (
+    EXECUTE_INSTRUCTION,
+    PLAN_INSTRUCTION,
+    PLAN_TOOL,
+    PLAN_TOOL_NAME,
+    STEP_TOOL,
+    STEP_TOOL_NAME,
+    parse_plan,
+)
 from psok.agent.prompt import (
     budget_history,
     build_system_prompt,
@@ -128,8 +137,74 @@ class Event:
     """
 
     type: str  # assistant_delta | reasoning_delta | assistant_text | tool_call
-    # | confirmation_required | tool_result | warning | guard | error | done | memory
+    # | confirmation_required | tool_result | status | plan | step_started
+    # | step_done | warning | guard | error | done | memory
     data: dict[str, Any] = field(default_factory=dict)
+
+
+#: The named states a turn passes through. Every one of these already existed
+#: inside the loop and none of it was visible: the interface showed "Thinking"
+#: from the moment a turn opened until the first token arrived, whether the
+#: three seconds had gone on retrieval, a cold connector, a provider retry or
+#: the model itself. They are a closed set so an interface can style them and so
+#: a new one cannot appear unannounced.
+STATUSES = (
+    "retrieving",     # searching the vault for context
+    "recalling",      # reading long-term memory
+    "thinking",       # waiting on the model
+    "planning",       # waiting on the model, in plan mode
+    "generating",     # the model has started answering
+    "tool",           # running a builtin tool
+    "connector",      # running a connector's tool
+    "retrying",       # continuing after an empty or truncated reply
+    "switching",      # falling back to another provider
+    "completed",
+    "cancelled",
+    "failed",
+)
+# Deliberately absent: "syncing". Nothing inside a turn syncs -- the Microsoft
+# To Do mirror runs on its own fifteen-minute loop and on `POST /api/tasks/sync`,
+# neither of which is a turn. It is a *connector* state and lives in
+# `psok/mcp/lifecycle.py`, where an interface reads it. A name here that nothing
+# ever emits would be a reserved slot.
+
+
+def _conversation_fallback(conversation: Any) -> list[str] | None:
+    """This conversation's own fallback order, if it has been given one.
+
+    None means "no opinion" and defers to providers.yaml; an empty list means
+    "do not fall back", which is why a bad value degrades to None rather than to
+    `[]` -- the two say opposite things and a parse failure must not silently
+    pick the stricter one.
+    """
+    try:
+        raw = conversation["fallback"]
+    except (KeyError, IndexError):
+        return None  # a database that predates the column
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        log.warning("conversation has an unreadable fallback order: %r", raw)
+        return None
+    return [str(name) for name in parsed] if isinstance(parsed, list) else None
+
+
+def _cost(iterations: int, tool_calls: int, started: float) -> dict[str, Any]:
+    """What the turn cost, in the three numbers a person can read.
+
+    Every one of these was already being counted and none of it left the loop:
+    `execution_logs.duration_ms` has held the per-tool half since logging
+    shipped and nothing has ever read it. Attached to `done` rather than kept in
+    a table, because the question "why did that take two minutes" is asked
+    immediately or not at all.
+    """
+    return {
+        "steps": iterations,
+        "tools": tool_calls,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    }
 
 
 class Director:
@@ -143,6 +218,7 @@ class Director:
         stream: bool = False,
         retrieval: bool = True,
         memory: bool = True,
+        mode: str = "chat",
     ):
         self.registry = registry
         self.workspace_root = workspace_root
@@ -151,6 +227,12 @@ class Director:
         self.stream = stream
         self.retrieval = retrieval
         self.memory = memory
+        # "chat" acts; "plan" looks and hands back steps. A field rather than a
+        # sentence glued to the user's message: the sentence was persisted into
+        # the transcript and replayed on every later turn, and nothing enforced
+        # it -- the tool schemas, the permission gate and dispatch were
+        # identical either way. See `psok/agent/planning.py`.
+        self.mode = mode
         self.conversations = ConversationRepository()
         self.messages = MessageRepository()
 
@@ -201,7 +283,11 @@ class Director:
         # providers.yaml and a keychain round trip, and a turn is up to fifteen
         # iterations. `active` only moves forward, so a provider that failed is
         # not rediscovered on every later iteration of the same turn.
-        chain = build_chain(conversation["provider"], conversation["model"])
+        chain = build_chain(
+            conversation["provider"],
+            conversation["model"],
+            order=_conversation_fallback(conversation),
+        )
         budget = AttemptBudget()
         active = 0
         model = resolve(
@@ -219,7 +305,18 @@ class Director:
         # Fetched once for the turn, not once per iteration: it answers the
         # question the user actually asked, and search_documents is there for
         # everything the model only discovers it needs mid-turn.
+        planning = self.mode == "plan"
+        # A turn is "executing" when the message approves a plan. Progress
+        # through it is *reported* by the model rather than inferred from which
+        # tools it happened to call -- inferring it would be inventing a
+        # progress bar, and an invented one is worse than none.
+        executing = not planning and user_message.lstrip().lower().startswith("approved")
+        step_open: int | None = None
+        if self.retrieval:
+            yield Event("status", {"state": "retrieving"})
         retrieved_context = await self._retrieve(user_message)
+        if self.memory:
+            yield Event("status", {"state": "recalling"})
         recalled = await self._recall(conversation_id, user_message)
         hidden_servers = self._disabled_connectors(conversation_id)
 
@@ -227,6 +324,9 @@ class Director:
             conversation_id=conversation_id,
             workspace_root=self.workspace_root,
             events=asyncio.Queue(),
+            # Plan mode's enforcement half. The schemas are withheld below; this
+            # is what refuses a mutating tool named anyway.
+            read_only=planning,
         )
         started = time.monotonic()
         tool_calls_made = 0
@@ -268,11 +368,31 @@ class Director:
                 # out on every round trip and measured 29,620 tokens across 132
                 # tools, so budgeting without them overstates the room left by more
                 # than the system prompt costs.
+                if executing:
+                    system_prompt = f"{system_prompt}\n\n{EXECUTE_INSTRUCTION}"
+                if planning:
+                    # Appended to the system prompt, never to the transcript.
+                    # The old prefix lived in the message, so a conversation
+                    # asked for a plan once kept being asked for one forever.
+                    system_prompt = f"{system_prompt}\n\n{PLAN_INSTRUCTION}"
                 tool_schemas = (
-                    self.registry.schemas(hidden_servers=hidden_servers)
+                    self.registry.schemas(
+                        hidden_servers=hidden_servers, read_only=planning
+                    )
                     if model.capabilities.tools
                     else None
                 )
+                if not planning and executing and tool_schemas is not None:
+                    # Only where there is a plan to be part-way through. Offering
+                    # it on every chat turn would be a tool with nothing to
+                    # describe, which models call anyway.
+                    tool_schemas = [*tool_schemas, STEP_TOOL]
+                if planning and tool_schemas is not None:
+                    # Offered by the director, not registered: it changes
+                    # nothing, so there is nothing to dispatch, and a tool that
+                    # only exists in one mode has no business in a registry
+                    # shared by every conversation.
+                    tool_schemas = [*tool_schemas, PLAN_TOOL]
                 history = to_wire_messages(self.messages.history(conversation_id))
                 # Re-budgeted against whichever model is about to be called.
                 # Carrying a 200,000-token history into a 32,000-token
@@ -293,6 +413,7 @@ class Director:
                 response = None
                 streamed = False
                 streamed_text = []
+                yield Event("status", {"state": "planning" if planning else "thinking"})
                 try:
                     if (
                         self.stream
@@ -306,6 +427,11 @@ class Director:
                             cancel,
                         ):
                             if chunk.type == "text" and chunk.text:
+                                if not streamed_text:
+                                    # The moment the wait stops being a wait.
+                                    # Without it "Thinking" stayed on screen
+                                    # underneath text that was already arriving.
+                                    yield Event("status", {"state": "generating"})
                                 streamed_text.append(chunk.text)
                                 yield Event("assistant_delta", {"text": chunk.text})
                             elif chunk.type == "reasoning" and chunk.text:
@@ -334,6 +460,7 @@ class Director:
                     partial = "".join(streamed_text).strip()
                     if partial:
                         self.messages.append(conversation_id, "assistant", partial)
+                    yield Event("status", {"state": "cancelled"})
                     yield Event("guard", {"reason": "stopped by the user"})
                     self.conversations.touch(conversation_id)
                     return
@@ -368,6 +495,10 @@ class Director:
                             "%s failed (%s); falling back to %s", failed, kind, chain[active]
                         )
                         yield Event(
+                            "status",
+                            {"state": "switching", "provider": chain[active].provider},
+                        )
+                        yield Event(
                             "warning",
                             {"message": announcement(failed, reason_for(kind), chain[active])},
                         )
@@ -384,6 +515,7 @@ class Director:
                         "assistant",
                         f"{partial}\n\n{noted}" if partial else noted,
                     )
+                    yield Event("status", {"state": "failed"})
                     yield Event("error", {"message": message})
                     return
 
@@ -401,6 +533,7 @@ class Director:
             if response.text and not streamed:
                 # Already delivered chunk by chunk when the provider streamed;
                 # re-emitting it whole would render the same answer twice.
+                yield Event("status", {"state": "generating"})
                 yield Event("assistant_text", {"text": response.text})
 
             if not response.tool_calls:
@@ -418,12 +551,14 @@ class Director:
                     if answer.strip():
                         self.messages.append(conversation_id, "assistant", answer)
                         nudge = CONTINUE_AFTER_TRUNCATION
+                        yield Event("status", {"state": "retrying"})
                         yield Event(
                             "warning",
                             {"message": "the answer was cut off; continuing it"},
                         )
                     else:
                         nudge = CONTINUE_AFTER_EMPTY
+                        yield Event("status", {"state": "retrying"})
                         yield Event(
                             "warning",
                             {"message": "the model stopped without answering; continuing"},
@@ -440,7 +575,18 @@ class Director:
 
                 self.messages.append(conversation_id, "assistant", answer)
                 self.conversations.touch(conversation_id)
-                yield Event("done", {"text": answer, "iterations": iteration + 1})
+                if step_open is not None:
+                    yield Event("step_done", {"number": step_open})
+                    step_open = None
+                yield Event("status", {"state": "completed"})
+                yield Event(
+                    "done",
+                    {
+                        "text": answer,
+                        "iterations": iteration + 1,
+                        **_cost(iteration + 1, tool_calls_made, started),
+                    },
+                )
 
                 # After `done`, deliberately: extraction is a second model call,
                 # and blocking the terminal event on it would keep an interface's
@@ -451,6 +597,30 @@ class Director:
                 ):
                     yield event
                 return
+
+            if planning:
+                submitted = next(
+                    (c for c in response.tool_calls if c.name == PLAN_TOOL_NAME), None
+                )
+                if submitted is not None:
+                    plan = parse_plan(submitted.arguments)
+                    # Persisted as the assistant's own words. The frame is what
+                    # the interface renders, but the transcript is what the
+                    # *model* reads on the executing turn -- "approved" means
+                    # nothing if the thing approved is not in the history.
+                    self.messages.append(conversation_id, "assistant", plan.as_markdown())
+                    self.conversations.touch(conversation_id)
+                    yield Event("plan", plan.as_dict())
+                    yield Event("status", {"state": "completed"})
+                    yield Event(
+                        "done",
+                        {
+                            "text": plan.as_markdown(),
+                            "iterations": iteration + 1,
+                            **_cost(iteration + 1, tool_calls_made, started),
+                        },
+                    )
+                    return
 
             self.messages.append(
                 conversation_id,
@@ -466,6 +636,28 @@ class Director:
             )
 
             for call in response.tool_calls:
+                if call.name == STEP_TOOL_NAME:
+                    # Answered here, not dispatched: it changes nothing, so
+                    # there is nothing to run. The previous step closes when the
+                    # next one opens -- a model that forgets the last one leaves
+                    # it open rather than the interface claiming it finished.
+                    number = call.arguments.get("number")
+                    if step_open is not None and step_open != number:
+                        yield Event("step_done", {"number": step_open})
+                    step_open = number
+                    yield Event(
+                        "step_started",
+                        {"number": number, "title": call.arguments.get("title") or ""},
+                    )
+                    self.messages.append(
+                        conversation_id,
+                        "tool",
+                        f"step {number} noted",
+                        tool_call_id=call.id,
+                        tool_name=call.name,
+                    )
+                    continue
+
                 if tool_calls_made >= self.guards.max_tool_calls:
                     yield Event("guard", {"reason": "tool call limit reached"})
                     return
@@ -480,6 +672,16 @@ class Director:
                         " different approach, or tell the user what is blocking you."
                     )
                 else:
+                    tool = self.registry.get(call.name)
+                    server = getattr(tool, "server_name", None)
+                    yield Event(
+                        "status",
+                        {
+                            "state": "connector" if server else "tool",
+                            "tool": call.name,
+                            "server": server,
+                        },
+                    )
                     yield Event("tool_call", {"name": call.name, "arguments": call.arguments})
                     # Dispatch can suspend the turn waiting on a confirmation,
                     # so its events have to reach the interface before it
@@ -521,6 +723,7 @@ class Director:
                 )
 
                 if cancel is not None and cancel.is_set():
+                    yield Event("status", {"state": "cancelled"})
                     yield Event("guard", {"reason": "stopped by the user"})
                     self.conversations.touch(conversation_id)
                     return
@@ -530,28 +733,45 @@ class Director:
         self.conversations.touch(conversation_id)
 
     def _disabled_connectors(self, conversation_id: str) -> set[str]:
-        """Connectors this conversation has switched off.
+        """Connectors whose tools this turn must not be offered.
 
-        One MCP manager serves the whole process, so a conversation-scoped
-        toggle cannot be honoured by connecting a different set of servers --
-        the connections are shared. It is honoured here instead, by not
-        advertising their tools, and again at dispatch.
+        Two reasons, and they are different in kind:
+
+        * **Switched off for this conversation.** One MCP manager serves the
+          whole process, so a conversation-scoped toggle cannot be honoured by
+          connecting a different set of servers -- the connections are shared.
+          It is honoured here instead, by not advertising their tools, and again
+          at dispatch.
+        * **Connected but not signed in.** A stdio server starts, registers its
+          tools and answers `initialize` long before anyone attaches an account
+          to it, so `connected` was putting fifteen Gmail tools in front of a
+          model that could not call one of them. It called one anyway, got
+          `Connection closed`, concluded there was an outage and handed the work
+          back -- which is the bug this whole phase started from.
         """
         servers = {t.server_name for t in self.registry.list() if t.server_name}
         if not servers:
             return set()
+
+        hidden: set[str] = set()
         try:
             from psok.capabilities import CapabilityService, Kind
 
             service = CapabilityService()
-            return {
+            hidden |= {
                 name
                 for name in servers
                 if service.switched_off(Kind.CONNECTOR, name, conversation_id)
             }
         except Exception as exc:
             log.debug("could not read connector state, advertising all of them: %s", exc)
-            return set()
+
+        from psok.mcp import guidance
+
+        unsigned = guidance.unsigned_connectors() & servers
+        if unsigned:
+            log.info("withholding tools of connectors with no account: %s", sorted(unsigned))
+        return hidden | unsigned
 
     async def _recall(self, conversation_id: str, user_message: str) -> list[str]:
         """Standing facts about the user, for the top of the prompt.

@@ -16,6 +16,13 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
 
   const providers = health?.providers ?? []
   const defaults = health?.provider_defaults ?? {}
+  /* Configured and not answering. Having a key is not the same as being
+     reachable: a local endpoint declares no key at all, so `has_key` called
+     Ollama configured by definition and this menu offered it while nothing
+     was listening on its port -- nine consecutive `All connection attempts
+     failed` in the real database. Still listed, because the user configured
+     it on purpose; picking one is what says why it will not work. */
+  const unavailable = health?.providers_unavailable ?? {}
 
   useEffect(() => {
     const away = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
@@ -35,17 +42,19 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
       </div>
       {providers.length === 0 && (
         <div className="menu-empty">
-          No providers configured. Add one to ~/.psok/config/providers.yaml.
+          No providers configured. Add one in Settings → Models.
         </div>
       )}
       {providers.map((name) => {
         const suggested = defaults[name]
         const current = name === provider
+        const down = unavailable[name]
         return (
           <button
             key={name}
             type="button"
-            className={`menu-row${current ? ' active' : ''}`}
+            className={`menu-row${current ? ' active' : ''}${down ? ' menu-row--down' : ''}`}
+            title={down || undefined}
             onClick={() => {
               onChange({ provider: name, ...(suggested ? { model: suggested } : {}) })
               setCustom(suggested || '')
@@ -54,7 +63,9 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
             <span className="menu-gutter" />
             <span className="menu-label">
               {name}
-              <span className="menu-hint">{suggested || 'no default model'}</span>
+              <span className="menu-hint">
+                {down ? 'not answering' : (suggested || 'no default model')}
+              </span>
             </span>
             {current && <Icon name="check" size={14} />}
           </button>

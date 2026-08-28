@@ -784,7 +784,7 @@ def test_a_turn_stops_counting_as_running_at_its_terminal_frame(api, db, monkeyp
             seen.append({"when": "after done", "running": conversation_id in api._active_turns})
             yield Event("memory", {"created": [], "superseded": []})
 
-    async def fake_director(workspace):
+    async def fake_director(workspace, mode="chat"):
         return Director()
 
     monkeypatch.setattr(api, "_director", fake_director)

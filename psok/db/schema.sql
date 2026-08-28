@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS conversations (
     -- real conversations fell off the end of the list.
     -- Deliberately not a foreign key: a run outlives the automation it came from.
     automation_id          TEXT,
+    -- Which providers may answer for this conversation if `provider` cannot,
+    -- as a JSON array of names. NULL means the default: every other configured
+    -- provider, in providers.yaml's order. Per conversation rather than global
+    -- because the right fallback for a long careful piece of work is not the
+    -- right one for a throwaway question.
+    fallback               TEXT,
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -149,6 +155,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- and PSOK-local, because Graph does not expose My Day membership through
     -- the scopes this connector holds.
     my_day_on                TEXT,
+    -- Every category To Do holds for this task *except* the My Day one, as a
+    -- JSON array. Kept because Graph's categories field is all-or-nothing on
+    -- write: pushing `["My Day"]` would silently delete whatever else the user
+    -- had tagged the task with. Written by the pull, read by the push.
+    external_categories      TEXT,
     completed_at             TEXT,
     -- A local change that has not reached To Do yet. The push half of the sync
     -- reads exactly this; cleared when the upstream write returns.

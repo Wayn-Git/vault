@@ -37,32 +37,77 @@ The counts and the rows come from the same predicate, used twice
 (`_bucket_where`). A rail saying `Missed 5` above a list of four is not a state
 this can reach.
 
-## My Day is PSOK's own, and says so
+## My Day rides on a category, because To Do's own is not in its API
 
-Verified against a real account rather than from the API docs: a To Do task
-comes back with exactly
+Verified against the live account on 2026-08-28, four independent ways, none of
+them from the documentation:
 
-    id, title, status, importance, isReminderOn, createdDateTime,
-    dueDateTime, body, categories, lastModifiedDateTime, hasAttachments, @odata.etag
+- `$select=showInMyDay` and `$select=isInMyDay` both fail on **v1.0 and beta**
+  with `Could not find a property named ... on type 'microsoft.graph.todoTask'`.
+- The live `beta/$metadata` defines twenty-one properties on `todoTask` and
+  **not one contains "day"**.
+- There is no `myDay` well-known list — the account returns `defaultList`,
+  `flaggedEmails` and `none`.
+- The legacy `/me/outlook/tasks` surface is still alive on this account and has
+  no such field either; every MAPI extended-property probe came back empty.
 
-There is no My Day field, under any name. It cannot sync, so the page says so
-instead of implying a list that quietly differs from the phone.
+**Settled by controlled comparison on 2026-08-28.** The user named the five
+tasks that were in their My Day at that moment; comparing those five against the
+other 52 across both APIs and every field found **no field present only on My Day
+tasks, and no field whose values separate the two groups.** The only fields
+unique to the non-My-Day group were `completedDateTime`, `dueDateTime` and
+`recurrence` — ordinary task properties. My Day lives in To Do's client, not its
+API, and no amount of work on this side reaches it.
 
-That makes it the one bucket nothing fills on its own, which has a consequence
-worth stating: **it starts empty and stays empty until someone chooses.** It was
-briefly the default landing view, and on a machine with nothing due today that
-is an empty room — which reads as a broken page, not an empty one. So every row
-carries a My Day toggle, the empty state offers the overdue list as somewhere to
-start, and the view lands on My Day only when My Day has something in it.
+**So the carrier changed rather than the feature being dropped.** `categories`
+does round-trip — readable on the pull, writable on create and update — so the
+sun toggle writes a `My Day` tag on the task. Proven both directions against the
+real account: pressing the sun put `categories: ['My Day']` on the task read
+straight back from Graph, and tagging it in To Do set `my_day_on` on the next
+sync. Removing it follows in both directions.
 
+It is a tag *beside* To Do's My Day, not the same list, and the page says
+exactly that rather than implying they are one thing.
 
-Graph exposes My Day membership through `linkedResources` / `categories`
-depending on the client, and the `microsoft-todo` connector holds only
-`Tasks.ReadWrite`. So My Day is local, and the page states that rather than
-implying a list that silently differs from the phone.
+Two properties this has to hold, both of which cost a real bug if dropped:
 
-`my_day_on` is a **date**, not a flag. My Day therefore empties itself at
-midnight with nothing scheduled to do it.
+- **The push merges, it does not replace.** Graph's `categories` write is
+  all-or-nothing, so sending `["My Day"]` would delete every other tag the user
+  had. `external_categories` stores what the last pull saw so the push can add
+  to it.
+- **A pull never clears My Day off a row whose push has not landed.** The push
+  runs first and clears `dirty_at` on success; a row still dirty is one whose
+  change never reached To Do, and clearing it there would silently undo the
+  button the user just pressed.
+
+`my_day_on` is a **date**, not a flag, so the bucket is still a local-calendar
+idea; a tag that is still upstream refreshes it to today on each pull.
+
+## What is in My Day
+
+Four things, and the last one is easy to forget:
+
+- put there by hand (the sun, or the `My Day` tag in To Do),
+- scheduled for today,
+- due today,
+- **finished today.**
+
+That last clause exists because My Day showing only what is *left* makes it empty
+by the evening of a day you actually got things done — which reads as the page
+being broken rather than as the work being over. It is kept as its own clause
+because everything else in My Day is an open task and this deliberately is not.
+
+`completed_at` is what makes it possible, and the sync did not import it until
+2026-08-28: To Do knew three tasks had been finished that day and PSOK had
+recorded the completion time of one, so "what did I get done today" could not be
+answered from local data at all. `_apply` now maps `completedDateTime`.
+
+My Day is still the one bucket nothing else fills on its own, which has a
+consequence worth stating: **it starts empty until someone chooses.** It was briefly the
+default landing view, and on a machine with nothing due today that is an empty
+room — which reads as a broken page, not an empty one. So every row carries the
+toggle, the empty state offers the overdue list as somewhere to start, and the
+view lands on My Day only when My Day has something in it.
 
 ## Important is not priority
 
@@ -174,4 +219,6 @@ optimisation; it is what stops a large list cancelling itself.
 - **Steps / subtasks.** The connector exposes `checklistItems`; nothing reads
   them yet.
 - **Hard delete.** See above.
-- **My Day round-tripping.** See above.
+- **Using To Do's own My Day list.** No field for it exists in Graph; four
+  routes were checked live. The `My Day` category is the round-trip that does
+  work. See above.

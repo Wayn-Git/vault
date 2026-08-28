@@ -54,6 +54,11 @@ class ToolContext:
     conversation_id: str | None = None
     workspace_root: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Plan mode. The schemas of every mutating tool are withheld from the model,
+    # and this is the second half of that: a tool named anyway -- from an
+    # earlier turn, or invented -- is refused here rather than run. Withholding
+    # alone is a request; this is the enforcement.
+    read_only: bool = False
     # Where the dispatch path publishes anything the interface must see while a
     # call is still in flight -- today only a confirmation prompt, which
     # suspends the turn and cannot wait for the tool result to be reported.

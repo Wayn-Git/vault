@@ -14,6 +14,7 @@ import logging
 import time
 from typing import Any
 
+from psok.mcp import guidance
 from psok.mcp.client import MCPConnection, MCPConnectionError, OAuthRequired
 from psok.mcp.config import ServerConfig, load_servers
 from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
@@ -135,6 +136,10 @@ class MCPManager:
         out a backoff the user has no way of seeing.
         """
         self._clear_failure(name)
+        # The same events that mean "try again" are the ones that change whether
+        # an account is attached, and a cached "not signed in" outliving the
+        # sign-in is how a connector stays hidden after the user fixed it.
+        guidance.forget()
 
     # ------------------------------------------------------------------ connect
 
@@ -243,16 +248,17 @@ class MCPManager:
         async def handler(arguments: dict[str, Any], _: ToolContext) -> ToolResult:
             connection = self.connections.get(server_name)
             if connection is None:
-                return ToolResult.error(
-                    f"MCP server '{server_name}' is not connected. Reconnect it and retry."
-                )
+                # Named the server and told the model to "reconnect it", which
+                # it cannot do -- naming the screen and the button is what makes
+                # this relayable to the person who can.
+                return ToolResult.error(guidance.not_connected_instruction(server_name))
             try:
                 raw = await connection.call(tool_name, arguments)
             except OAuthRequired:
-                return ToolResult.error(
-                    f"'{server_name}' needs authorization. Ask the user to run"
-                    f" `psok mcp login {server_name}`, then retry."
-                )
+                # Was a CLI command. The user is in a browser; sending them to a
+                # terminal for a button that is two clicks away is the interface
+                # telling on itself.
+                return ToolResult.error(guidance.sign_in_instruction(server_name))
             except TimeoutError:
                 return ToolResult.error(f"'{tool_name}' on '{server_name}' timed out.")
             except Exception as exc:
@@ -289,9 +295,7 @@ class MCPManager:
                     # brought back is a fact to report, not one to keep paying a
                     # connect timeout for on every tool call in the turn.
                     return ToolResult.error(
-                        f"[{server_name}] {tool_name} failed: the connection dropped and"
-                        f" could not be re-established ({retry_exc}). Reconnect it from"
-                        " Connectors, or ask the user to sign in again."
+                        guidance.dropped_instruction(server_name, str(retry_exc))
                     )
                 connection = revived
             connection.breaker.record_success()
