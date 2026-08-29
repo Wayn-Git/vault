@@ -28,7 +28,7 @@ from psok.automation import (
     AutomationRepository,
     AutomationRunner,
 )
-from psok.config import configured_providers, paths
+from psok.config import configured_providers, load_tiers, paths
 from psok.db.connection import get_connection
 from psok.db.repositories import (
     ConversationRepository,
@@ -500,11 +500,25 @@ async def health() -> dict[str, Any]:
         # Kept separate so an interface can say "sign in to Vercel" rather than
         # colouring it the same red as a server that will not start.
         "connectors_awaiting_sign_in": sorted(waiting),
-        "providers": sorted(providers),
+        # In providers.yaml's own order, not alphabetical. The interface takes
+        # the first entry as the house default for a new conversation, so
+        # sorting made that an accident of spelling -- "groq" outranked
+        # "nvidia" by the letter g, and the file's stated preference was never
+        # consulted. The chain reads the same order for fallback
+        # (`psok/runtime/chain.py`), so the two now agree.
+        "providers": list(providers),
         # Listed above and known not to answer. Kept as a separate key rather
         # than filtered out of `providers`: a provider the user configured on
         # purpose should stay visible with a reason, not vanish.
         "providers_unavailable": unavailable,
+        # Which model does which job, so the interface can name the one it is
+        # about to escalate to rather than saying "a bigger one". Empty on a
+        # machine that has not tiered anything, which is not a fault: every
+        # caller falls back to the conversation's own model.
+        "tiers": {
+            name: {"provider": tier.provider, "model": tier.model}
+            for name, tier in load_tiers().items()
+        },
         # So an interface can prefill the model a provider already declares
         # rather than making the user retype what providers.yaml already says.
         "provider_defaults": {
@@ -877,7 +891,14 @@ def list_pins(conversation_id: str) -> list[dict[str, Any]]:
 #: transcript and replayed on every later turn, and nothing on this side even
 #: knew the mode existed -- so the only thing stopping a write in plan mode was
 #: the model choosing to obey prose. See `psok/agent/planning.py`.
-TURN_MODES = frozenset({"chat", "plan"})
+#:
+#: `reasoning` joined them on 2026-08-29. It starts the turn on the `heavy` tier
+#: (`psok/config.py`) instead of the conversation's own model, and is what the
+#: interface sends when the user accepts an escalation the fast model asked for.
+#: Distinct from plan mode rather than folded into it: withholding mutating
+#: tools and handing back an approvable plan is a different job from thinking
+#: harder about one.
+TURN_MODES = frozenset({"chat", "plan", "reasoning"})
 
 
 class TurnRequest(BaseModel):
@@ -2103,6 +2124,12 @@ def task_counts() -> dict[str, Any]:
     return {
         "buckets": {name: counts.get(name, 0) for name in TASK_BUCKETS},
         "lists": lists,
+        # Which of those lists is My Day. The interface needs it to stop showing
+        # the list twice -- once as the bucket at the top of the rail and again
+        # among the lists below it -- and the answer is the server's to give:
+        # the rule for which name counts lives in one place and is not restated
+        # in JavaScript.
+        "my_day_list_id": TaskRepository().my_day_list_id(),
         # So the interface can say "local only" honestly rather than implying a
         # list the user made here is on their phone.
         "connected": any(row["external_id"] for row in lists) if lists else False,
@@ -2242,6 +2269,104 @@ async def sync_tasks() -> dict[str, Any]:
     except SyncUnavailable as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"status": "ok", "summary": report.summary(), **report.as_dict()}
+
+
+# ---------------------------------------------------------------------------
+# mail
+#
+# Read straight from Gmail rather than through the `google-gmail` connector, and
+# the reason is in `psok/mail/gmail.py`: the connector answers in prose written
+# for a model to read, and a view built on that is a regular expression over
+# somebody else's help text. The agent still uses the connector; the screen uses
+# the API. Both sign in as the same account, because the credentials are the
+# ones the connector stored.
+# ---------------------------------------------------------------------------
+
+
+class MailReply(BaseModel):
+    body: str
+
+
+class MailLabels(BaseModel):
+    add: list[str] = []
+    remove: list[str] = []
+
+
+@app.get("/api/mail/account")
+async def mail_account() -> dict[str, Any]:
+    """Who mail is read as, and what that sign-in is allowed to do.
+
+    Answers rather than raising when nobody is signed in: this is the call the
+    screen makes first, and an empty inbox with a sentence beats an error.
+    """
+    from psok.mail import accounts
+
+    found = accounts()
+    if not found:
+        return {"address": None, "detail": "No Google account is signed in."}
+    account = found[0]
+    return {
+        "address": account.address,
+        "can_send": account.can_send,
+        "can_modify": account.can_modify,
+        # Every account the connector holds. More than one means it picks in
+        # single-user mode and PSOK cannot say which -- worth showing.
+        "others": [a.address for a in found[1:]],
+    }
+
+
+@app.get("/api/mail/threads")
+async def mail_threads(q: str = "in:inbox", limit: int = 25) -> list[dict[str, Any]]:
+    from psok.mail import MailUnavailable, threads
+
+    try:
+        return await threads(q, limit=limit)
+    except MailUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/mail/threads/{thread_id}")
+async def mail_thread(thread_id: str) -> dict[str, Any]:
+    from psok.mail import MailUnavailable, thread
+
+    try:
+        return await thread(thread_id)
+    except MailUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/mail/threads/{thread_id}/reply")
+async def mail_reply(thread_id: str, body: MailReply) -> dict[str, Any]:
+    from psok.mail import MailUnavailable, reply
+
+    if not body.body.strip():
+        raise HTTPException(400, "a reply needs something in it")
+    try:
+        return await reply(thread_id, body.body)
+    except MailUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/mail/messages/{message_id}/labels")
+async def mail_labels_modify(message_id: str, body: MailLabels) -> dict[str, Any]:
+    """Add and remove labels. Archiving is removing `INBOX`; there is no separate
+    archive call in Gmail's API and inventing one here would hide that."""
+    from psok.mail import MailUnavailable, modify_labels
+
+    try:
+        return await modify_labels(message_id, add=body.add, remove=body.remove)
+    except MailUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/mail/labels")
+async def mail_labels() -> list[dict[str, Any]]:
+    from psok.mail import MailUnavailable, labels
+
+    try:
+        return await labels()
+    except MailUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/calendar")

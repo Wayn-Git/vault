@@ -15,10 +15,11 @@ import { connectorState } from './PlusMenu.jsx'
 const VIEWS = [
   { id: 'chat', label: 'Chat', icon: 'chat', binding: 'mod+1' },
   { id: 'tasks', label: 'Tasks and calendar', icon: 'check', binding: 'mod+2' },
-  { id: 'capabilities', label: 'Skills and connectors', icon: 'grid', binding: 'mod+3' },
-  { id: 'automations', label: 'Automations (beta)', icon: 'clock', binding: 'mod+4' },
-  { id: 'memory', label: 'Memory', icon: 'spark', binding: 'mod+5' },
-  { id: 'logs', label: 'Activity', icon: 'logs', binding: 'mod+6' },
+  { id: 'mail', label: 'Mail', icon: 'mail', binding: 'mod+3' },
+  { id: 'capabilities', label: 'Skills and connectors', icon: 'grid', binding: 'mod+4' },
+  { id: 'automations', label: 'Automations (beta)', icon: 'clock', binding: 'mod+5' },
+  { id: 'memory', label: 'Memory', icon: 'spark', binding: 'mod+6' },
+  { id: 'logs', label: 'Activity', icon: 'logs', binding: 'mod+7' },
   { id: 'dash', label: 'Status', icon: 'dash' },
 ]
 

@@ -3179,6 +3179,123 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
 }
 
+/* Mail reuses the Tasks layout -- rail of places, list beside it -- because it
+   is the same shape of screen and a second one would only be different. What is
+   new here is the row: a mail row is three lines and a thread that opens under
+   it, where a task is one line and its controls. */
+.mail-row {
+  display: block;
+  padding: 10px 0;
+}
+
+.mail-row .task-actions {
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+  margin-top: -22px;
+}
+
+/* Unread is weight, not colour. A blue dot beside every row in an inbox that is
+   mostly unread is a column of dots; the subject reading heavier is legible at
+   a glance and costs nothing when everything is unread. */
+.mail-row--unread .mail-subject { font-weight: 620; color: var(--text); }
+.mail-row--unread .mail-from { color: var(--text); }
+
+.mail-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mail-open:focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--r-md); }
+
+.mail-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mail-from {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mail-when {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.mail-subject {
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mail-snippet {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 96px;
+}
+
+.mail-search {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.mail-thread {
+  margin-top: 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line);
+}
+
+.mail-message + .mail-message { margin-top: 16px; }
+
+/* A mail body is somebody else's line breaks. `pre-wrap` keeps the paragraphs
+   they wrote without letting a long URL push the column open. */
+.mail-body {
+  margin: 6px 0 0;
+  max-height: 460px;
+  overflow: auto;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mail-reply { margin-top: 16px; }
+.mail-reply textarea { width: 100%; resize: vertical; }
+
+.mail-reply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+@media (max-width: 820px) {
+  .mail-snippet { padding-right: 0; }
+  .mail-row .task-actions { margin-top: 6px; justify-content: flex-start; }
+}
+
 @media (max-width: 820px) {
   .task-layout { grid-template-columns: minmax(0, 1fr); }
   .task-rail {
@@ -3399,6 +3516,14 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   border-radius: var(--r-md, 10px);
   background: rgba(255, 255, 255, 0.02);
 }
+/* The escalation card borrows the plan card's shell -- same moment, same
+   shape: the turn ended, nothing ran, the user decides. The left edge is the
+   one difference, because this is a question about spending time rather than a
+   proposal to read. */
+.escalation-card {
+  border-left: 2px solid var(--accent, var(--text-dim));
+}
+
 .plan-head {
   display: flex;
   align-items: center;

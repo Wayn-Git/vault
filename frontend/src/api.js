@@ -254,6 +254,17 @@ export const api = {
   renameTaskList: (id, name) => j(`/task-lists/${id}`, json('PATCH', { name })),
   calendar: (days = 14) => j(`/calendar?days=${days}`),
   syncTasks: () => j('/tasks/sync', json('POST')),
+
+  // Mail. Straight from Gmail rather than through the connector -- the
+  // connector answers in prose written for a model, see psok/mail/gmail.py.
+  mailAccount: () => j('/mail/account'),
+  mailThreads: ({ q = 'in:inbox', limit = 25 } = {}) =>
+    j(`/mail/threads?q=${encodeURIComponent(q)}&limit=${limit}`),
+  mailThread: (id) => j(`/mail/threads/${encodeURIComponent(id)}`),
+  mailReply: (id, body) => j(`/mail/threads/${encodeURIComponent(id)}/reply`, json('POST', { body })),
+  mailLabels: () => j('/mail/labels'),
+  mailModifyLabels: (messageId, patch) =>
+    j(`/mail/messages/${encodeURIComponent(messageId)}/labels`, json('POST', patch)),
   createTask: (body) => j('/tasks', json('POST', body)),
   updateTask: (id, patch) => j(`/tasks/${id}`, json('PATCH', patch)),
   deleteTask: (id) => j(`/tasks/${id}`, json('DELETE')),

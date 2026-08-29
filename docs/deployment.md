@@ -134,7 +134,12 @@ Honest list, because finding these one at a time is worse.
 - **stdio MCP connectors** spawn subprocesses in the container. A connector that
   is a local binary has to be installed in the image to exist at all.
 - **OAuth sign-ins** need their redirect URL to be the Render host, registered
-  with the provider — the loopback URL a laptop uses will not come back.
+  with the provider — the loopback URL a laptop uses will not come back. For a
+  connector that runs its *own* flow this is not a setting to change but a wall:
+  `workspace-mcp` binds its callback listener on `localhost:8765` inside the
+  container, so the browser that opened the Google page has nowhere to deliver
+  the code to. The Google connectors are local-only until something else holds
+  that callback.
 - **Reminders have nowhere to arrive.** This is the one that surprises people,
   and it is not about the plan. `psok/notify.py` shells out to `notify-send`,
   `osascript` or `powershell` — it asks the platform what it has rather than

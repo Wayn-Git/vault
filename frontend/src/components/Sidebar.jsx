@@ -12,6 +12,7 @@ import { MOD_LABEL } from '../keys.js'
 
 const PLACES = [
   { id: 'tasks', label: 'Tasks', icon: 'check' },
+  { id: 'mail', label: 'Mail', icon: 'mail' },
   // Skills and connectors are one place: they are the same kind of thing, and
   // splitting them meant a third surface existed to browse both.
   { id: 'capabilities', label: 'Skills & connectors', icon: 'grid' },

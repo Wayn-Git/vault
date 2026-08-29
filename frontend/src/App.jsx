@@ -15,10 +15,12 @@ import Automations from './views/Automations.jsx'
 import Memory from './views/Memory.jsx'
 import Logs from './views/Logs.jsx'
 import Tasks from './views/Tasks.jsx'
+import Mail from './views/Mail.jsx'
 
 const VIEWS = {
   chat: Chat,
   tasks: Tasks,
+  mail: Mail,
   capabilities: Capabilities,
   automations: Automations,
   memory: Memory,
@@ -26,8 +28,8 @@ const VIEWS = {
   dash: Dashboard,
 }
 
-// What ⌘1…6 reaches, in the order the rail lists them.
-const ORDER = ['chat', 'tasks', 'capabilities', 'automations', 'memory', 'logs']
+// What ⌘1…7 reaches, in the order the rail lists them.
+const ORDER = ['chat', 'tasks', 'mail', 'capabilities', 'automations', 'memory', 'logs']
 
 /* Every binding in one listener.
 
@@ -76,7 +78,7 @@ function useGlobalKeys() {
       if (combo === 'mod+p') { e.preventDefault(); setView('chat'); chat.togglePin?.(); return }
       if (combo === 'f2' && activeId) { e.preventDefault(); setView('chat'); chat.beginRename?.(activeId); return }
 
-      const digit = /^mod\+([1-6])$/.exec(combo)
+      const digit = /^mod\+([1-7])$/.exec(combo)
       if (digit) {
         e.preventDefault()
         setView(ORDER[Number(digit[1]) - 1])
