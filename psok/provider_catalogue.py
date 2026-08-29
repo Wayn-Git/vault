@@ -75,7 +75,11 @@ class ProviderPreset:
         """
         if self.local:
             return None
-        return _CONVENTIONAL_ENV.get(self.slug, f"PSOK_{self.slug.upper()}_API_KEY")
+        # A hyphen is fine in a slug and not in an environment variable name --
+        # `ollama-cloud` would otherwise generate `PSOK_OLLAMA-CLOUD_API_KEY`,
+        # which no shell can export.
+        fallback = f"PSOK_{self.slug.upper().replace('-', '_')}_API_KEY"
+        return _CONVENTIONAL_ENV.get(self.slug, fallback)
 
 
 #: Names the vendors themselves document, so a key already exported for their
@@ -217,6 +221,86 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         docs_url="https://build.nvidia.com/models",
         note="Model ids are namespaced, e.g. `nvidia/nemotron-3-ultra-550b-a55b`.",
     ),
+    # --- free tiers that do not expire ------------------------------------
+    #
+    # Added 2026-08-30. Each model list below was fetched live that day, and the
+    # default named is one that endpoint actually returned. Chat completions
+    # need a key on all of them -- the listings are open, the inference is not
+    # -- so **tool calling on these is unverified**, which is the thing PSOK
+    # depends on most and the first thing to check when a key arrives.
+    #
+    # GitHub Models was asked for and is deliberately absent: its endpoint
+    # answers `410 github_models_retirement_brownout`, a scheduled outage ahead
+    # of retirement. Absent beats permanently-failing.
+    ProviderPreset(
+        slug="modelscope",
+        label="ModelScope",
+        base_url="https://api-inference.modelscope.cn/v1",
+        default_model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        keys_url="https://modelscope.cn/my/myaccesstoken",
+        docs_url="https://modelscope.cn/docs/model-service/API-Inference/intro",
+        note=(
+            "Alibaba's. 50 models on a free tier with no card, strongest on the"
+            " Qwen and DeepSeek families. Ids are namespaced by owner."
+        ),
+    ),
+    ProviderPreset(
+        slug="ovhcloud",
+        label="OVHcloud AI Endpoints",
+        base_url="https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+        default_model="gpt-oss-120b",
+        keys_url="https://endpoints.ai.cloud.ovh.net",
+        docs_url="https://endpoints.ai.cloud.ovh.net/catalog",
+        note=(
+            "EU-hosted, 24 open models, permanently free. There is an anonymous"
+            " tier at roughly two requests a minute per IP -- enough to prove it"
+            " works and not enough to use, so get a token."
+        ),
+    ),
+    ProviderPreset(
+        slug="llm7",
+        label="LLM7",
+        base_url="https://api.llm7.io/v1",
+        default_model="deepseek-v4-flash",
+        keys_url="https://token.llm7.io",
+        docs_url="https://api.llm7.io/v1/models",
+        note=(
+            "44 models behind one free OpenAI-compatible endpoint, including"
+            " proxied frontier ones. A relay rather than a host: what you send"
+            " passes through them, which is the trade for the price."
+        ),
+    ),
+    ProviderPreset(
+        slug="ollama-cloud",
+        label="Ollama Cloud",
+        base_url="https://ollama.com/v1",
+        default_model="gpt-oss:120b",
+        keys_url="https://ollama.com/settings/keys",
+        docs_url="https://ollama.com/search?c=cloud",
+        note=(
+            "The hosted side of the local runner, 19 models. Distinct from the"
+            " `ollama` entry above, which is this machine and needs no key."
+        ),
+    ),
+    ProviderPreset(
+        slug="cloudflare",
+        label="Cloudflare Workers AI",
+        # The account id lives in the path, so this is the one preset that does
+        # not work as written. Left as a placeholder rather than omitted: the
+        # rest of the entry -- the key reference, the default model, where to
+        # get a token -- is still worth not researching, and a URL that says
+        # ACCOUNT_ID fails visibly where a wrong one would fail as a 404 nobody
+        # could explain.
+        base_url="https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1",
+        default_model="@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        keys_url="https://dash.cloudflare.com/profile/api-tokens",
+        docs_url="https://developers.cloudflare.com/workers-ai/models/",
+        note=(
+            "Replace ACCOUNT_ID in the base URL with yours from the Cloudflare"
+            " dashboard, or every call 404s. 10,000 neurons a day, reset at"
+            " midnight UTC, run at the edge."
+        ),
+    ),
 )
 
 PRESETS_BY_SLUG: dict[str, ProviderPreset] = {p.slug: p for p in PROVIDER_PRESETS}
@@ -243,6 +327,13 @@ SEEDED = (
     "together",
     "fireworks",
     "nvidia",
+    "modelscope",
+    "ovhcloud",
+    "llm7",
+    "ollama-cloud",
+    # Not `cloudflare`: its base URL carries an account id, so a seeded entry
+    # would be one that cannot answer until it is edited -- which is exactly the
+    # "listed but dead" row this file exists to avoid.
 )
 
 

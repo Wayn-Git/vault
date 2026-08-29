@@ -54,6 +54,16 @@ create/pause/delete, audit trail, conversation delete.
   Console ownership, and `*.vercel.app` and `*.github.io` are public suffixes that cannot be
   verified. Unblocking this starts with buying a domain. Until then: test-user sign-in, renewed
   weekly.
+- **Five permanent-free-tier providers added to the catalogue (2026-08-30):** ModelScope
+  (50 models, Alibaba), OVHcloud AI Endpoints (24, EU-hosted), LLM7 (44, a relay), Ollama Cloud
+  (19), and Cloudflare Workers AI. Each model list was fetched live that day and the default
+  named is one the endpoint returned. **Chat completions need a key on all of them — the
+  listings are open, the inference is not — so tool calling is unverified on every one**, which
+  is the thing PSOK depends on most and the first thing to check when a key arrives. Cloudflare
+  is in the catalogue but **not seeded**: its account id lives in the URL path, so a seeded entry
+  would be a row that cannot answer until edited. **GitHub Models was asked for and left out** —
+  its endpoint answers `410 github_models_retirement_brownout`, a scheduled outage ahead of
+  retirement, and absent beats permanently-failing.
 - **Groq is the default provider (2026-08-29)**, `openai/gpt-oss-120b`, with NVIDIA behind it
   in the chain. `/api/health` now lists providers in **providers.yaml order** rather than
   alphabetically — the interface takes the first entry as the house default, so sorting made

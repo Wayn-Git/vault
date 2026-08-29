@@ -889,3 +889,37 @@ def test_no_tiers_is_the_ordinary_case_not_a_failure(tmp_path):
     assert load_tiers(path) == {}
     assert load_tiers(tmp_path / "absent.yaml") == {}
 
+
+def test_every_preset_can_be_written_into_a_providers_file():
+    """A preset exists to save research, so an entry it generates has to be
+    usable without any. The one exception is Cloudflare, whose account id lives
+    in the URL path -- and it is left out of `SEEDED` for exactly that reason,
+    rather than seeded as a row that cannot answer.
+
+    Mutation check: add "cloudflare" to `SEEDED`, or drop the placeholder from
+    its base URL so the defect stops being visible.
+    """
+    from psok.provider_catalogue import PRESETS_BY_SLUG, SEEDED, render_default_providers
+
+    for slug in SEEDED:
+        preset = PRESETS_BY_SLUG[slug]
+        assert "ACCOUNT_ID" not in (preset.base_url or ""), slug
+        assert preset.local or preset.api_key_ref, slug
+
+    assert "cloudflare" not in SEEDED
+    assert "ACCOUNT_ID" in PRESETS_BY_SLUG["cloudflare"].base_url
+    assert "ACCOUNT_ID" not in render_default_providers()
+
+
+def test_an_environment_variable_name_survives_a_hyphenated_slug():
+    """`ollama-cloud` is a legal slug and `PSOK_OLLAMA-CLOUD_API_KEY` is not a
+    legal environment variable -- no shell can export it, so the container path
+    that variable exists for would have been closed for that provider.
+
+    Mutation check: drop the `replace('-', '_')` from `api_key_env`.
+    """
+    from psok.provider_catalogue import PRESETS_BY_SLUG
+
+    assert PRESETS_BY_SLUG["ollama-cloud"].api_key_env == "PSOK_OLLAMA_CLOUD_API_KEY"
+    assert "-" not in PRESETS_BY_SLUG["ollama-cloud"].api_key_env
+
