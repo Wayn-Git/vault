@@ -169,3 +169,39 @@ backend's new event "does not arrive". It arrives. It is now logged.
 - **A classifier that picks the mode.** khoj's `aget_data_sources_and_output_format`
   is the router deliberately not built here: it costs a round trip on every
   message, and the toggle is one click.
+
+
+## A third mode, and a fourth thing the model can say (2026-08-29)
+
+`reasoning` joined `chat` and `plan`. It is not plan mode with a bigger model:
+plan mode withholds mutating tools and hands back something to approve, and
+reasoning mode does neither — it runs the ordinary loop on the `heavy` tier
+(`psok/config.py`), which is the model the user chose to wait for.
+
+**Tiers are not the fallback chain.** `psok/runtime/chain.py` answers "this
+provider is down, who else"; a tier answers "how hard is this work". Reading
+them as one thing would make a quota trip look like a decision the model made,
+and an escalation look like an outage.
+
+**The escalation protocol** is the third of its kind, after `submit_plan` and
+`begin_step`, and it works the same way: a tool the director offers, never
+registers, and answers itself. The fast model calls `escalate(reason)`; the turn
+ends with an `escalation` frame; nothing has run. The interface names both
+models and offers Escalate or Answer anyway, and **both re-send the same
+message** — in `reasoning` mode or in `chat`. There is no resume endpoint,
+because there is nothing to resume, and no "do not ask again" flag, because the
+escalation is persisted as the assistant's own words and the director reads the
+transcript. That survives a reload; a flag in the browser would not.
+
+Rejected on the way here, both already rejected once in this document for
+chat-versus-plan: a **classifier**, which costs a round trip on every message to
+answer a question most messages do not raise, and a **heuristic** on message
+length or file mentions, which guesses silently. The model is the only party
+that knows it is out of its depth. The cost of that choice is the one
+`begin_step` was accepted with: a model that never calls it produces no
+escalations, rather than wrong ones.
+
+Withheld when no `heavy` tier resolves — an offer PSOK cannot honour is worse
+than no offer — and withheld on a turn whose transcript already carries an
+escalation request, or "Answer anyway" would ask the same question forever.
+

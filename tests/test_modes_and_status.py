@@ -443,3 +443,148 @@ async def test_generating_is_announced_when_the_answer_starts(db, monkeypatch):
     states = [e.data["state"] for e in events if e.type == "status"]
     assert "generating" in states
     assert states.index("thinking") < states.index("generating")
+
+
+# --- escalation: the fast model asking for the slow one ---------------------
+
+
+def _heavy(monkeypatch, provider="nvidia", model="deepseek-v4-pro"):
+    """A resolvable `heavy` tier, without a providers.yaml or a network."""
+    heavy = ResolvedModel(
+        provider=provider,
+        model=model,
+        client=_Scripted([]),
+        capabilities=Capabilities(streaming=False, context_window=32_000),
+    )
+    monkeypatch.setattr(
+        "psok.agent.director.resolve_tier", lambda tier, **k: heavy if tier == "heavy" else None
+    )
+    return heavy
+
+
+@pytest.mark.asyncio
+async def test_the_model_can_hand_a_hard_job_to_a_bigger_one(db, monkeypatch):
+    """The only party that knows the job is too big is the model doing it. A
+    classifier would cost a round trip on every message to answer a question
+    most messages do not raise, and a heuristic on message length guesses
+    silently -- so the model says so, through a tool the director offers,
+    never registers, and answers itself.
+
+    The turn ends. Nothing has run, exactly as in plan mode, and the interface
+    asks before the slower model is spent.
+
+    Mutation check: stop appending `ESCALATE_TOOL` in `Director.run`, or
+    dispatch the call instead of intercepting it.
+    """
+    from psok.agent.escalation import ESCALATE_TOOL_NAME, ESCALATION_MARKER
+
+    client = _Scripted([
+        ModelResponse(
+            text=None,
+            tool_calls=[ToolCall(id="1", name=ESCALATE_TOOL_NAME,
+                                 arguments={"reason": "this needs a schema migration designed"})],
+        )
+    ])
+    _patch(monkeypatch, client)
+    _heavy(monkeypatch)
+
+    cid = ConversationRepository().create("fake", "fake-1", "t")
+    director = Director(registry=_registry(), retrieval=None, memory=None)
+    events = await _run(director, cid, "redesign the task schema")
+
+    assert ESCALATE_TOOL_NAME in client.seen_tools[0], "offered on an ordinary chat turn"
+
+    escalations = [e for e in events if e.type == "escalation"]
+    assert len(escalations) == 1
+    assert escalations[0].data["reason"] == "this needs a schema migration designed"
+    assert escalations[0].data["to_model"] == "nvidia/deepseek-v4-pro"
+    assert escalations[0].data["from_model"] == "fake/fake-1"
+    assert [e.type for e in events][-1] == "done", "the turn ends; nothing runs"
+
+    stored = MessageRepository().history(cid)
+    assert str(stored[-1].content).startswith(ESCALATION_MARKER), (
+        "persisted as the assistant's own words, so a reload still shows the question"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_same_question_is_not_asked_twice(db, monkeypatch):
+    """"Answer anyway" is the user re-sending the message. Without this the fast
+    model would escalate again and the two buttons would be one button.
+
+    Read from the transcript rather than from a flag on the request: a flag in
+    the interface does not survive a reload, and the transcript does.
+
+    Mutation check: drop the `was_escalated` guard in `Director.run`.
+    """
+    from psok.agent.escalation import ESCALATE_TOOL_NAME
+
+    client = _Scripted([ModelResponse(text="fine, here it is")])
+    _patch(monkeypatch, client)
+    _heavy(monkeypatch)
+
+    cid = ConversationRepository().create("fake", "fake-1", "t")
+    messages = MessageRepository()
+    messages.append(cid, "user", "redesign the task schema")
+    messages.append(cid, "assistant", "**Escalation requested.** it is big\n\nneeds more")
+
+    director = Director(registry=_registry(), retrieval=None, memory=None)
+    await _run(director, cid, "redesign the task schema")
+
+    assert ESCALATE_TOOL_NAME not in client.seen_tools[0], (
+        "the transcript already carries the request; asking again is a loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_heavy_tier_means_no_offer(db, monkeypatch):
+    """An offer PSOK cannot honour is worse than no offer. A machine with one
+    provider has nothing to escalate to, and the tool is simply absent rather
+    than present and failing.
+
+    Mutation check: offer `ESCALATE_TOOL` regardless of `resolve_tier`.
+    """
+    from psok.agent.escalation import ESCALATE_TOOL_NAME
+
+    client = _Scripted([ModelResponse(text="answered")])
+    _patch(monkeypatch, client)
+    monkeypatch.setattr("psok.agent.director.resolve_tier", lambda tier, **k: None)
+
+    cid = ConversationRepository().create("fake", "fake-1", "t")
+    director = Director(registry=_registry(), retrieval=None, memory=None)
+    await _run(director, cid, "do a thing")
+
+    assert ESCALATE_TOOL_NAME not in client.seen_tools[0]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_mode_runs_on_the_heavy_tier_and_does_not_offer_to_escalate(
+    db, monkeypatch
+):
+    """The user already chose to wait. Offering the bigger model to the bigger
+    model would be a loop with a confirmation in it.
+
+    Mutation check: resolve the conversation's own model in reasoning mode, or
+    keep offering the tool.
+    """
+    from psok.agent.escalation import ESCALATE_TOOL_NAME
+
+    client = _Scripted([ModelResponse(text="thought about it")])
+    _patch(monkeypatch, client)
+    heavy = _heavy(monkeypatch)
+    heavy.client = client
+
+    cid = ConversationRepository().create("fake", "fake-1", "t")
+    director = Director(registry=_registry(), retrieval=None, memory=None, mode="reasoning")
+    await _run(director, cid, "think hard about this")
+
+    assert ESCALATE_TOOL_NAME not in client.seen_tools[0]
+    assert "reasoning" in client.seen_system[0], "the mode reaches the system prompt"
+
+
+def test_reasoning_is_a_mode_the_api_accepts(client, psok_home):
+    """Mutation check: drop "reasoning" from `TURN_MODES`."""
+    from psok.api.main import TURN_MODES
+
+    assert TURN_MODES == {"chat", "plan", "reasoning"}
+

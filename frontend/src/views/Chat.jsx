@@ -241,6 +241,15 @@ function stepClass(item, index) {
   return ''
 }
 
+/* The three modes, in the order they cost. `reasoning` is the one the fast
+   model asks for on your behalf when it escalates; picking it up front is the
+   same request without the question. */
+const MODES = [
+  { id: 'chat', label: 'Chat', hint: 'Answer and act in one turn' },
+  { id: 'plan', label: 'Plan', hint: 'Ask for the plan before anything is run' },
+  { id: 'reasoning', label: 'Reasoning', hint: 'Start on the stronger, slower model' },
+]
+
 function PlanCard({ item, onApprove, onDiscard, onEditStep, disabled }) {
   return (
     <div className="plan-card">
@@ -291,9 +300,57 @@ function PlanCard({ item, onApprove, onDiscard, onEditStep, disabled }) {
   )
 }
 
-function Msg({ item, onPin, onApprovePlan, onDiscardPlan, onEditPlanStep, busy }) {
+/* The fast model asking for the slow one.
+
+   Rendered like a plan card because it is the same kind of moment: the turn has
+   ended, nothing has run, and the user decides what happens next. The model it
+   would move to is named rather than described as "a bigger one" -- the wait is
+   the cost being agreed to, and it is measured in minutes on this machine. */
+function EscalationCard({ item, onEscalate, onAnyway, disabled }) {
+  return (
+    <div className="plan-card escalation-card">
+      <div className="plan-head">
+        <Icon name="spark" size={14} />
+        <span>Needs a stronger model</span>
+      </div>
+      <p className="plan-summary">{item.reason}</p>
+      <p className="plan-step-detail">
+        {item.from_model} → <strong>{item.to_model}</strong>
+      </p>
+      {item.settled ? (
+        <p className="plan-settled">
+          {item.settled === 'escalated' ? 'Escalated.' : 'Answered on the faster model.'}
+        </p>
+      ) : (
+        <div className="plan-actions">
+          <button type="button" className="btn btn--primary btn--small" disabled={disabled} onClick={onEscalate}>
+            Escalate
+          </button>
+          <button type="button" className="btn btn--ghost btn--small" disabled={disabled} onClick={onAnyway}>
+            Answer anyway
+          </button>
+          <span className="plan-hint">Nothing has run. The stronger model is slower.</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Msg({
+  item, onPin, onApprovePlan, onDiscardPlan, onEditPlanStep, onEscalate, onAnyway, busy,
+}) {
   const role = item.kind
 
+  if (role === 'escalation') {
+    return (
+      <EscalationCard
+        item={item}
+        disabled={busy}
+        onEscalate={() => onEscalate?.(item.id)}
+        onAnyway={() => onAnyway?.(item.id)}
+      />
+    )
+  }
   if (role === 'plan') {
     return (
       <PlanCard
@@ -403,7 +460,11 @@ export default function Chat() {
   const [attachments, setAttachments] = useState([])
   // Plan mode is a real instruction, not a mode flag: it is prepended to the
   // message so the model outlines the work before touching anything.
-  const [plan, setPlan] = useState(false)
+  /* Three modes now, so a boolean stopped being enough. `chat` answers and
+     acts, `plan` hands back an approvable plan with mutating tools withheld,
+     and `reasoning` starts on the heavy tier -- the model the fast one asks for
+     when it escalates. */
+  const [mode, setMode] = useState('chat')
   const [atBottom, setAtBottom] = useState(true)
   const [lastSent, setLastSent] = useState('')
   const [pinsOpen, setPinsOpen] = useState(true)
@@ -598,6 +659,25 @@ export default function Chat() {
       // inside the loop and none of it was visible: the composer said
       // "Thinking" from the moment a turn opened until the first token, whether
       // the wait was retrieval, a cold connector or a provider retry.
+      // The fast model handing the job over. The message that caused it travels
+      // with the card: approving re-sends it in reasoning mode, and declining
+      // re-sends it in chat, where the backend withholds the tool because the
+      // transcript already records the request.
+      case 'escalation':
+        pushAssistant()
+        setItems((prev) => {
+          const asked = [...prev].reverse().find((it) => it.kind === 'user')
+          return [...prev, {
+            id: nextId(),
+            kind: 'escalation',
+            reason: evt.reason ?? '',
+            from_model: evt.from_model ?? '',
+            to_model: evt.to_model ?? '',
+            message: asked?.text ?? '',
+            settled: false,
+          }]
+        })
+        break
       case 'status':
         setStatus(evt.state ? { state: evt.state, tool: evt.tool, server: evt.server } : null)
         break
@@ -755,6 +835,32 @@ export default function Chat() {
     )))
   }, [])
 
+  /* Both buttons re-send the same message; only the mode differs. There is no
+     resume endpoint and there should not be one -- the turn ended, nothing ran,
+     and a second turn is exactly what this is. "Answer anyway" needs no flag:
+     the backend withholds the tool when the last assistant message is the
+     escalation record, which survives a reload where a flag here would not. */
+  const answerEscalation = useCallback(async (itemId, mode) => {
+    if (turnState !== 'idle' || !activeId) return
+    let message = ''
+    setItems((prev) => prev.map((it) => {
+      if (it.id !== itemId) return it
+      message = it.message
+      return { ...it, settled: mode === 'reasoning' ? 'escalated' : 'declined' }
+    }))
+    if (!message) return
+    try {
+      abortRef.current?.abort()
+      await openTurn(activeId, message, mode)
+    } catch (err) {
+      toast(err.message, 'bad')
+      setTurnState('idle')
+    }
+  }, [turnState, activeId, openTurn, toast])
+
+  const escalate = useCallback((itemId) => answerEscalation(itemId, 'reasoning'), [answerEscalation])
+  const answerAnyway = useCallback((itemId) => answerEscalation(itemId, 'chat'), [answerEscalation])
+
   const discardPlan = useCallback((itemId) => {
     // Local only. Nothing ran, so there is nothing to undo on the server, and
     // the plan stays in the transcript because the model said it.
@@ -804,13 +910,13 @@ export default function Chat() {
       // after `done`. Let go of it before opening the next one on the same
       // conversation, so two readers are never live at once.
       abortRef.current?.abort()
-      await openTurn(cid, message, plan ? 'plan' : 'chat')
+      await openTurn(cid, message, mode)
     } catch (err) {
       toast(err.message, 'bad')
       setTurnState('idle')
     }
   }, [
-    input, attachments, plan, turnState, activeId, draftProvider, draftModel,
+    input, attachments, mode, turnState, activeId, draftProvider, draftModel,
     refreshConvs, openTurn, toast, setActiveId,
   ])
 
@@ -1082,22 +1188,17 @@ export default function Chat() {
           </button>
 
           <div className="composer-modes">
-            <button
-              type="button"
-              className={`mode${plan ? '' : ' active'}`}
-              onClick={() => setPlan(false)}
-              title="Answer and act in one turn"
-            >
-              Chat
-            </button>
-            <button
-              type="button"
-              className={`mode${plan ? ' active' : ''}`}
-              onClick={() => setPlan(true)}
-              title="Ask for the plan before anything is run"
-            >
-              Plan
-            </button>
+            {MODES.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className={`mode${mode === entry.id ? ' active' : ''}`}
+                onClick={() => setMode(entry.id)}
+                title={entry.hint}
+              >
+                {entry.label}
+              </button>
+            ))}
           </div>
 
           <div className="composer-bar-right">
@@ -1261,6 +1362,8 @@ export default function Chat() {
                       onPin={onPin}
                       busy={turnState !== 'idle'}
                       onApprovePlan={approvePlan}
+                      onEscalate={escalate}
+                      onAnyway={answerAnyway}
                       onDiscardPlan={discardPlan}
                       onEditPlanStep={editPlanStep}
                     />

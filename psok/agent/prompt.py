@@ -24,6 +24,14 @@ the tools listed for you.
 
 Working principles:
 - Prefer acting over asking. Use a tool when you can answer with one.
+- Match the work to the question. If the whole answer is one tool call, make \
+one; if it is none, make none. A question about you -- what you are, what you \
+can do, what is in this prompt -- is answered from what you already have. \
+Listing files to demonstrate that you can list files is not an answer, it is a \
+detour the user is waiting through.
+- The <environment> block is authoritative. The date, the platform and the \
+workspace root are given to you there, already correct. Never run a command to \
+find out something you were handed.
 - Finish the job. Do not end your turn until the request is actually done. \
 Saying what you are about to do and then stopping is a failure, not an answer: \
 if you announce a step, take it in the same turn.
@@ -216,6 +224,59 @@ def to_wire_messages(history: list[Message]) -> list[dict]:
             entry["is_error"] = True
         out.append(entry)
     return out
+
+
+#: How PSOK names a connector's tool in the registry (`psok.tools.registry`).
+#: A name without it is a builtin.
+_MCP_MARKER = "__mcp__"
+
+
+def cap_tools(tools: list[Any], limit: int | None) -> tuple[list[Any], list[str]]:
+    """Fit the tool list into what the provider will accept.
+
+    Groq refuses a request carrying more than 128 tool schemas -- `400 'tools' :
+    maximum number of items is 128` -- and this machine offers 178 across
+    thirteen connectors, so every turn failed before a token moved with an error
+    naming a limit nothing in PSOK knew about.
+
+    Two decisions worth stating:
+
+    * **Builtins are kept first.** They are the tools PSOK itself is built on --
+      files, shell, tasks, calendar, retrieval -- and a turn that has lost
+      `list_files` is broken in a way a turn missing one of forty-four GitHub
+      tools is not.
+    * **The rest keep registry order,** which is `mcp.yaml`'s order, which is the
+      order the user added their connectors in. Not a ranking anybody chose, but
+      stable between turns: a model that saw a tool last turn and not this one
+      calls it anyway, and the refusal is confusing rather than instructive.
+
+    Returns the kept schemas and the names dropped, so the caller can say so.
+    Dropping tools silently would be the same failure as the 400, one layer
+    further from the person who can fix it by switching a connector off.
+    """
+    if not limit or len(tools) <= limit:
+        return tools, []
+    builtin = [t for t in tools if _MCP_MARKER not in getattr(t, "name", "")]
+    external = [t for t in tools if _MCP_MARKER in getattr(t, "name", "")]
+    kept = [*builtin, *external][:limit]
+    keep_names = {id(t) for t in kept}
+    dropped = [getattr(t, "name", "?") for t in tools if id(t) not in keep_names]
+    return kept, dropped
+
+
+def dropped_summary(dropped: list[str]) -> str:
+    """One sentence naming what was withheld and roughly where it came from."""
+    servers: dict[str, int] = {}
+    for name in dropped:
+        _, _, server = name.partition(_MCP_MARKER)
+        label = (server or "builtin").replace("_2d", "-")
+        servers[label] = servers.get(label, 0) + 1
+    listed = ", ".join(f"{count} from {name}" for name, count in sorted(servers.items()))
+    return (
+        f"this provider accepts a limited number of tools, so {len(dropped)} were withheld"
+        f" this turn ({listed}) — switch connectors off in Skills & connectors to choose"
+        " which the model gets"
+    )
 
 
 def budget_history(

@@ -16,6 +16,13 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from psok.agent.escalation import (
+    ESCALATE_TOOL,
+    ESCALATE_TOOL_NAME,
+    REASONING_INSTRUCTION,
+    parse_escalation,
+    was_escalated,
+)
 from psok.agent.planning import (
     EXECUTE_INSTRUCTION,
     PLAN_INSTRUCTION,
@@ -28,6 +35,8 @@ from psok.agent.planning import (
 from psok.agent.prompt import (
     budget_history,
     build_system_prompt,
+    cap_tools,
+    dropped_summary,
     extract_skill_invocations,
     to_wire_messages,
 )
@@ -35,7 +44,7 @@ from psok.db.repositories import ConversationRepository, MessageRepository
 from psok.runtime import availability
 from psok.runtime.chain import AttemptBudget, Link, announcement, build_chain, reason_for
 from psok.runtime.failures import FailureKind, should_fall_back, should_retry
-from psok.runtime.registry import resolve
+from psok.runtime.registry import resolve, resolve_tier
 from psok.runtime.types import ModelParameters, ModelResponse, ToolCall
 from psok.tools.base import ToolContext, ToolResult
 from psok.tools.registry import ToolRegistry
@@ -290,7 +299,13 @@ class Director:
         )
         budget = AttemptBudget()
         active = 0
-        model = resolve(
+        # Reasoning mode runs on the `heavy` tier -- the model the user chose to
+        # wait for. It is resolved rather than assumed: a machine with no tier
+        # configured for it answers on the conversation's own model, which is
+        # slower to nobody and wrong for nobody.
+        reasoning = self.mode == "reasoning"
+        heavy = resolve_tier("heavy") if reasoning else None
+        model = heavy or resolve(
             chain[0].provider,
             chain[0].model,
             max_retries=budget.allowance(len(chain) - 1) - 1,
@@ -306,6 +321,17 @@ class Director:
         # question the user actually asked, and search_documents is there for
         # everything the model only discovers it needs mid-turn.
         planning = self.mode == "plan"
+        # Whether this turn may hand itself over. Only from an ordinary chat
+        # turn, only when there is a heavier model to hand it to, and never
+        # twice: the transcript already carries the last request, so a user who
+        # chose "answer anyway" is not asked the same question again.
+        escalate_to = (
+            resolve_tier("heavy")
+            if not planning and not reasoning
+            else None
+        )
+        if escalate_to is not None and was_escalated(self.messages.history(conversation_id)):
+            escalate_to = None
         # A turn is "executing" when the message approves a plan. Progress
         # through it is *reported* by the model rather than inferred from which
         # tools it happened to call -- inferring it would be inventing a
@@ -332,6 +358,10 @@ class Director:
         tool_calls_made = 0
         call_fingerprints: dict[str, int] = {}
         continuations = 0
+        # Said once per turn, not once per iteration: the same tools are
+        # withheld every round trip, and fifteen identical warnings is noise
+        # covering the one line that mattered.
+        warned_about_tools = False
         # Carried into the next iteration's prompt only. It is an instruction
         # about how to continue, not part of what was said, so it never reaches
         # the transcript.
@@ -375,6 +405,8 @@ class Director:
                     # The old prefix lived in the message, so a conversation
                     # asked for a plan once kept being asked for one forever.
                     system_prompt = f"{system_prompt}\n\n{PLAN_INSTRUCTION}"
+                if reasoning:
+                    system_prompt = f"{system_prompt}\n\n{REASONING_INSTRUCTION}"
                 tool_schemas = (
                     self.registry.schemas(
                         hidden_servers=hidden_servers, read_only=planning
@@ -387,12 +419,30 @@ class Director:
                     # it on every chat turn would be a tool with nothing to
                     # describe, which models call anyway.
                     tool_schemas = [*tool_schemas, STEP_TOOL]
+                if escalate_to is not None and tool_schemas is not None:
+                    # Offered, never registered: there is nothing to dispatch,
+                    # the director answers it. Same shape as `submit_plan` and
+                    # `begin_step`, and for the same reason.
+                    tool_schemas = [*tool_schemas, ESCALATE_TOOL]
                 if planning and tool_schemas is not None:
                     # Offered by the director, not registered: it changes
                     # nothing, so there is nothing to dispatch, and a tool that
                     # only exists in one mode has no business in a registry
                     # shared by every conversation.
                     tool_schemas = [*tool_schemas, PLAN_TOOL]
+                # Some endpoints cap how many tools one request may carry -- Groq
+                # at 128, against the 178 this machine offers -- and the refusal
+                # is a 400 before a token moves. Trimmed here rather than at the
+                # adapter so the turn can say what it lost: a tool withheld
+                # silently is the same failure one layer further from the person
+                # who can fix it.
+                if tool_schemas is not None and model.capabilities.max_tools:
+                    tool_schemas, dropped = cap_tools(
+                        tool_schemas, model.capabilities.max_tools
+                    )
+                    if dropped and not warned_about_tools:
+                        warned_about_tools = True
+                        yield Event("warning", {"message": dropped_summary(dropped)})
                 history = to_wire_messages(self.messages.history(conversation_id))
                 # Re-budgeted against whichever model is about to be called.
                 # Carrying a 200,000-token history into a 32,000-token
@@ -597,6 +647,36 @@ class Director:
                 ):
                     yield event
                 return
+
+            if escalate_to is not None:
+                asked = next(
+                    (c for c in response.tool_calls if c.name == ESCALATE_TOOL_NAME), None
+                )
+                if asked is not None:
+                    escalation = parse_escalation(
+                        asked.arguments,
+                        from_model=f"{model.provider}/{model.model}",
+                        to_model=f"{escalate_to.provider}/{escalate_to.model}",
+                    )
+                    # Persisted as the assistant's own words, like a plan. It is
+                    # what the user reads if they reload, and it is what stops
+                    # the tool being offered again on the retry -- "answer
+                    # anyway" works because the transcript remembers being asked.
+                    self.messages.append(
+                        conversation_id, "assistant", escalation.as_markdown()
+                    )
+                    self.conversations.touch(conversation_id)
+                    yield Event("escalation", escalation.as_dict())
+                    yield Event("status", {"state": "completed"})
+                    yield Event(
+                        "done",
+                        {
+                            "text": escalation.as_markdown(),
+                            "iterations": iteration + 1,
+                            **_cost(iteration + 1, tool_calls_made, started),
+                        },
+                    )
+                    return
 
             if planning:
                 submitted = next(
