@@ -110,8 +110,6 @@ def _phrase(written) -> str:
         parts.append("reminding at the deadline")
     if row["important"]:
         parts.append("marked important")
-    if row["my_day_on"]:
-        parts.append("in My Day")
     if written.list_ref.name:
         parts.append(f"in {written.list_ref.name}")
         if written.list_ref.created:
@@ -139,7 +137,11 @@ async def update_task(args: dict[str, Any], _: ToolContext) -> ToolResult:
     except TaskError as exc:
         return ToolResult.error(str(exc))
     named = ", ".join(k for k in written.changed if k not in ("dirty_at", "reminded_at"))
-    return ToolResult.ok(f"updated task {written.task_id}: {named}")
+    # A move is the whole update when nothing else changed, and it is the one
+    # change the model cannot see in `changed` -- it happens upstream, not in a
+    # column this row holds.
+    summary = ", ".join(p for p in (named, written.routed_to) if p)
+    return ToolResult.ok(f"updated task {written.task_id}: {summary}")
 
 
 async def list_task_lists(args: dict[str, Any], _: ToolContext) -> ToolResult:
@@ -283,8 +285,10 @@ def tools() -> list[Tool]:
                     },
                     "add_to_my_day": {
                         "type": "boolean",
-                        "description": "Put it in today's My Day. Use when the user says they"
-                        " will do it today, which is different from it being due today.",
+                        "description": "Put it in the My Day list -- where today's work"
+                        " lives, in PSOK and in Microsoft To Do alike. Use when the user says"
+                        " they will do it today, which is different from it being due today."
+                        " A task belongs to one list, so this overrides `list`.",
                     },
                 },
                 "required": ["title"],
@@ -337,7 +341,10 @@ def tools() -> list[Tool]:
                     "important": {"type": "boolean"},
                     "add_to_my_day": {
                         "type": "boolean",
-                        "description": "true puts it in today's My Day, false takes it out.",
+                        "description": "true moves the task into the My Day list, false"
+                        " moves it back to the default list. To Do has no move, so this"
+                        " recreates the task: it gets a new id and does not carry its"
+                        " checklist items over.",
                     },
                     "list": {"type": "string", "description": _LIST},
                     "due_date_hint": {"type": "string"},
@@ -363,9 +370,9 @@ def tools() -> list[Tool]:
                     "bucket": {
                         "type": "string",
                         "enum": list(BUCKETS),
-                        "description": "my_day is what the user means to do today; missed is"
-                        " overdue and still open; important is flagged regardless of date;"
-                        " general has no date at all.",
+                        "description": "my_day is the My Day list -- what the user means to"
+                        " do today; missed is overdue and still open; important is flagged"
+                        " regardless of date; general has no date and is not in My Day.",
                     },
                     "list": {
                         "type": "string",

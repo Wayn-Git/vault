@@ -55,6 +55,25 @@ def _fold_list_name(name: str | None) -> str:
     return text.casefold()
 
 
+#: The To Do list that *is* My Day.
+#:
+#: My Day is not a flag on a task and not a tag: it is one list, kept in
+#: Microsoft To Do beside the others, which both PSOK and the phone open. That
+#: is the only arrangement where the same tasks appear in both places without a
+#: gesture unique to one of them -- To Do's own My Day is an overlay its API
+#: does not expose (see `psok/sync/microsoft_todo.py`), so anything built on it
+#: is invisible from here.
+#:
+#: Matched by name, folded the same way every other list name is, so "🌞 My Day"
+#: answers to it. "Today" is accepted because it is the other name people give
+#: the same list.
+MY_DAY_LIST_NAMES = ("my day", "today")
+
+
+def is_my_day_list(name: str | None) -> bool:
+    return _fold_list_name(name) in MY_DAY_LIST_NAMES
+
+
 # --------------------------------------------------------------------------
 # conversations + messages
 # --------------------------------------------------------------------------
@@ -447,7 +466,6 @@ class TaskRepository:
         external_etag: str | None = None,
         list_id: int | None = None,
         important: bool = False,
-        my_day_on: str | None = None,
         external_categories: str | None = None,
         completed_at: str | None = None,
         status: str | None = None,
@@ -456,9 +474,9 @@ class TaskRepository:
         cur = self.conn.execute(
             "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
             " priority, source, reminder_at, external_source, external_id, external_etag,"
-            " list_id, important, my_day_on, external_categories, completed_at, dirty_at,"
+            " list_id, important, external_categories, completed_at, dirty_at,"
             " status, last_synced_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
             " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
             (
                 title,
@@ -474,7 +492,6 @@ class TaskRepository:
                 external_etag,
                 list_id,
                 1 if important else 0,
-                my_day_on,
                 external_categories,
                 completed_at,
                 dirty_at,
@@ -504,7 +521,6 @@ class TaskRepository:
             "last_synced_at",
             "list_id",
             "important",
-            "my_day_on",
             "external_categories",
             "completed_at",
             "dirty_at",
@@ -595,28 +611,49 @@ class TaskRepository:
     # Missed forgot the previous evening's deadlines. Nothing announced it,
     # because there is no error in comparing two well-formed dates.
 
-    #: `date(due_at) <= today` catches an overdue task as well as one due today.
-    #: A task explicitly put in My Day stays there for the day even if its
-    #: deadline is next week -- that is what putting it there means.
-    _MY_DAY = (
-        "(my_day_on = :today"
-        " OR date(scheduled_at) = :today"
-        " OR date(due_at) = :today)"
-    )
-    #: Finished today, and therefore still part of today. My Day showing only
-    #: what is left makes it empty by the evening of a day you actually got
-    #: things done, which reads as the page being broken rather than as the work
-    #: being over. Kept as its own clause because everything else in My Day is
-    #: an open task and this deliberately is not.
-    _DONE_TODAY = "status = 'done' AND date(completed_at) = :today"
+    #: My Day is the contents of one list, and nothing else.
+    #:
+    #: It used to be a date stamp (`my_day_on`) fed by three different gestures
+    #: -- a sun in PSOK writing a "My Day" category, a `#myday` hashtag, and a
+    #: list of this name -- which meant the page could disagree with the phone
+    #: about what was in today, and usually did: tasks added through To Do's own
+    #: My Day carry none of the three, because that overlay is not in its API.
+    #: One list is the only version both ends can see. Cancelled rows are the
+    #: tasks a pull no longer found upstream, so they are not in the list any
+    #: more either.
+    _MY_DAY = "list_id = :my_day_list AND status != 'cancelled'"
     _MISSED = "due_at IS NOT NULL AND due_at < :today"
     _IMPORTANT = "important = 1"
-    _GENERAL = "due_at IS NULL AND scheduled_at IS NULL AND my_day_on IS NULL"
+    #: Everything nobody has scheduled or claimed for today. `:my_day_list` is
+    #: null when no such list exists, and `IS NOT` against null would then hide
+    #: every unfiled task, so the comparison is guarded rather than written bare.
+    _GENERAL = (
+        "due_at IS NULL AND scheduled_at IS NULL"
+        " AND (:my_day_list IS NULL OR list_id IS NOT :my_day_list)"
+    )
+
+    def my_day_list_id(self) -> int | None:
+        """The local id of the list that is My Day, or None if there is none.
+
+        Read on every bucket query rather than cached: the list can arrive from
+        a sync at any moment, and a stale cache would leave My Day empty until
+        a restart with nothing on screen explaining why.
+        """
+        for row in self.conn.execute(
+            "SELECT id, name FROM task_lists WHERE retired_at IS NULL ORDER BY position, id"
+        ):
+            if is_my_day_list(row["name"]):
+                return int(row["id"])
+        return None
 
     def _bucket_where(self, bucket: str, list_id: int | None = None) -> tuple[str, dict]:
-        params = {"today": _today(), "list_id": list_id}
+        params = {
+            "today": _today(),
+            "list_id": list_id,
+            "my_day_list": self.my_day_list_id(),
+        }
         if bucket == "my_day":
-            return f"(({self.OPEN} AND {self._MY_DAY}) OR ({self._DONE_TODAY}))", params
+            return self._MY_DAY, params
         if bucket == "missed":
             return f"{self.OPEN} AND {self._MISSED}", params
         if bucket == "important":

@@ -1489,6 +1489,38 @@ def test_a_database_from_an_older_version_still_opens(tmp_path):
     assert [m.fact for m in store.live()] == ["an old fact"]
 
 
+def test_a_column_this_version_stopped_writing_is_dropped(tmp_path):
+    """`tasks.my_day_on` held My Day when My Day was a date stamp. It is a list
+    now, so nothing writes the column -- and a column nothing writes that a
+    query could still reach is exactly the reserved slot this codebase refuses
+    to keep. Databases upgraded in place have to lose it too, not just fresh
+    ones.
+
+    The index goes first because SQLite will not drop a column an index names.
+
+    Mutation check: empty `RETIRED_COLUMNS`, or drop the column without the
+    index.
+    """
+    from psok.db import connection
+
+    conn = connection.connect(tmp_path / "old.db")
+    connection.migrate(conn)
+    # Put the old shape back, exactly as a database from the previous version
+    # would have it.
+    conn.execute("ALTER TABLE tasks ADD COLUMN my_day_on TEXT")
+    conn.execute(
+        "CREATE INDEX idx_tasks_my_day ON tasks(my_day_on) WHERE my_day_on IS NOT NULL"
+    )
+    conn.commit()
+
+    connection.migrate(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    assert "my_day_on" not in columns
+    indexes = {row[1] for row in conn.execute("PRAGMA index_list(tasks)")}
+    assert "idx_tasks_my_day" not in indexes
+
+
 def test_migrating_twice_changes_nothing(tmp_path):
     import sqlite3
 

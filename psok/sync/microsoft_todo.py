@@ -45,6 +45,7 @@ second subprocess and not a second sign-in.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -56,56 +57,30 @@ from psok.db.repositories import TaskListRepository, TaskRepository
 log = logging.getLogger(__name__)
 
 SERVER = "microsoft-todo"
-#: How My Day crosses the wire.
+#: Where My Day lives, and why it is not a field.
 #:
 #: To Do's own My Day is not reachable. Verified against the live account on
 #: 2026-08-28, not inferred from documentation: `$select=showInMyDay` and
 #: `isInMyDay` both fail with "Could not find a property named ... on type
 #: 'microsoft.graph.todoTask'" on v1.0 *and* beta; the live beta `$metadata`
 #: lists twenty-one properties on `todoTask` and not one of them contains
-#: "day"; there is no `myDay` well-known list; the legacy
-#: `/me/outlook/tasks` surface has no such field either; and every MAPI
-#: extended-property probe came back empty. My Day lives in To Do's client,
-#: not in its API.
+#: "day"; there is no `myDay` well-known list; the legacy `/me/outlook/tasks`
+#: surface has no such field either; and every MAPI extended-property probe
+#: came back empty. My Day lives in To Do's client, not in its API.
 #:
-#: `categories` does round-trip -- readable on the pull, writable on create and
-#: update -- so that is what carries it. The cost is honest and worth stating:
-#: this is a tag named "My Day" on the task, visible as a tag in the To Do app.
-#: It is not To Do's My Day list, and nothing can be.
-MY_DAY_CATEGORY = "My Day"
-
-#: A hashtag in the title does the same job, typed from the phone.
+#: A category named "My Day" was tried next, and round-tripped -- but failed at
+#: the thing that matters: a task added through To Do's own My Day carries no
+#: such tag, so PSOK's My Day and the phone's showed different tasks, which is
+#: the original problem restated. What both ends can see is an ordinary list.
+#: So My Day *is* a list here, named in `psok.db.repositories.MY_DAY_LIST_NAMES`,
+#: and putting a task in it means moving it there -- see `move_remote_task`.
 #:
-#: To Do's own onboarding task says "Add #hashtags to a task's title to
-#: categorise", so this is the app's native gesture rather than an invention --
-#: and the title is the one field that syncs verbatim and cannot be taken away.
-#: Matched case-insensitively and **left in the title**. Stripping it would be
-#: prettier and would quietly delete the marker: the push sends the local title
-#: back, so the first edit made in PSOK would take the task out of My Day in To
-#: Do. Same text in both apps is also the honest thing to show.
-MY_DAY_HASHTAGS = ("#myday", "#my-day", "#today")
+#: The cost, stated rather than hidden: To Do puts a task in exactly one list,
+#: so this is a move and not an overlay. A task in My Day is no longer in the
+#: list it came from, and To Do's own My Day still sits above it in the sidebar
+#: doing its own thing. Tasks have to be added to the list, not to that.
+MY_DAY_LIST_NAME = "My Day"
 
-#: A whole list can mean it too, which is the version that needs no per-task
-#: gesture at all. The cost is that To Do puts a task in exactly one list, so
-#: moving it here takes it out of wherever it lived -- unlike To Do's own My
-#: Day, which is an overlay. Worth having for anyone who works that way.
-MY_DAY_LIST_NAMES = ("my day", "today")
-
-
-def _hashtag_in(title: str) -> bool:
-    lowered = (title or "").lower()
-    return any(tag in lowered for tag in MY_DAY_HASHTAGS)
-
-
-def _strip_hashtags(title: str) -> str:
-    """The title without the marker, so PSOK does not show "Revision #myday"."""
-    out = title or ""
-    for tag in MY_DAY_HASHTAGS:
-        for variant in (f" {tag}", f"{tag} ", tag):
-            while variant.lower() in out.lower():
-                at = out.lower().index(variant.lower())
-                out = out[:at] + out[at + len(variant):]
-    return out.strip() or (title or "").strip()
 
 SOURCE = "microsoft-todo"
 
@@ -413,23 +388,18 @@ def _task_arguments(
 
 
 def _categories_for(row: Any) -> list[str]:
-    """The full category list to send, with My Day added or removed.
+    """The full category list to send back.
 
-    Built from the categories the last pull saw rather than from nothing, because
-    Graph's write is a replace: sending just `["My Day"]` would delete every
-    other tag the user had put on the task.
+    Built from the categories the last pull saw rather than from nothing,
+    because Graph's write is a replace: a shorter array deletes every tag left
+    out of it. PSOK writes none of its own -- My Day is a list -- so this hands
+    back exactly what the user already had.
     """
     try:
         kept = json.loads(row["external_categories"] or "[]")
     except (TypeError, ValueError, IndexError, KeyError):
-        kept = []
-    kept = [c for c in kept if isinstance(c, str) and c != MY_DAY_CATEGORY]
-    in_my_day = False
-    try:
-        in_my_day = bool(row["my_day_on"])
-    except (IndexError, KeyError):
-        pass
-    return [*kept, MY_DAY_CATEGORY] if in_my_day else kept
+        return []
+    return [c for c in kept if isinstance(c, str)]
 
 
 def _identity(payload: Any, *, what: str) -> dict[str, str]:
@@ -455,8 +425,8 @@ async def create_remote_task(
     reminder_at: str | None = None,
     priority: str | None = None,
     important: bool = False,
-    add_to_my_day: bool = False,
     list_id: str | None = None,
+    categories: list[str] | None = None,
     connection: Any | None = None,
 ) -> dict[str, str] | None:
     """Create this task in Microsoft To Do, if To Do is connected.
@@ -469,12 +439,9 @@ async def create_remote_task(
     Reaching for the published manager when the caller was handed a different
     one is how a sync run against an explicit manager silently created nothing.
 
-    `add_to_my_day` has to travel with the create rather than being left for the
-    next push. A row whose upstream create succeeded is written clean, so
-    nothing would ever push it -- and the first pull, finding no tag on a task
-    the user had just made for today, read that as the user having taken it out
-    and cleared My Day. Making a task for today un-made it a quarter of an hour
-    later.
+    A task made for today is created *in* the My Day list -- the caller passes
+    that list's id -- rather than created anywhere and marked afterwards. There
+    is nothing to mark: My Day is which list the task is in.
     """
     from psok.mcp import live
 
@@ -495,10 +462,75 @@ async def create_remote_task(
             reminder_at=reminder_at,
             priority=priority,
             important=important,
-            categories=[MY_DAY_CATEGORY] if add_to_my_day else None,
+            categories=categories,
         ),
     }
     return _identity(await _call_json(connection, "create_task", arguments), what="task")
+
+
+async def move_remote_task(
+    row: Any,
+    *,
+    to_list: str,
+    from_list: str,
+    connection: Any | None = None,
+) -> dict[str, str] | None:
+    """Move a task between To Do lists, and hand back its new identity.
+
+    **Graph has no move.** A `todoTask` belongs to the list in its URL, and
+    `PATCH .../lists/{a}/tasks/{id}` cannot rename that; there is no endpoint
+    that takes a destination. So a move is a create in the target followed by a
+    delete from the source, which has three consequences worth stating rather
+    than discovering:
+
+    - **The task gets a new id.** Every local mirror of it is repointed here;
+      anything holding the old id -- a link someone saved, an open To Do screen
+      -- is holding a task that no longer exists.
+    - **Only the fields sent survive.** Checklist items, attachments and the
+      creation date do not come along, because Graph will not accept them on a
+      create. Title, notes, dates, importance, status and tags do.
+    - **The order is create-then-delete, never the reverse.** If the delete
+      fails the user has the task twice, which they can see and fix; if the
+      create failed after a delete they would have lost it.
+
+    Returns None when nothing is connected, matching `create_remote_task`.
+    """
+    from psok.mcp import live
+
+    connection = connection or live.connection(SERVER)
+    if connection is None:
+        return None
+
+    created = await create_remote_task(
+        row["title"],
+        notes=row["notes"],
+        due_at=row["due_at"],
+        reminder_at=row["reminder_at"],
+        priority=row["priority"],
+        important=bool(row["important"]),
+        list_id=to_list,
+        categories=_categories_for(row),
+        connection=connection,
+    )
+    if created is None:
+        return None
+    # The status has to be a second call: `create_task` takes `status`, but a
+    # task created `completed` comes back with no completion date, and the
+    # column PSOK shows "done today" from would be empty.
+    if row["status"] and row["status"] != "todo":
+        await _call_json(
+            connection,
+            "update_task",
+            {
+                "listId": to_list,
+                "taskId": created["external_id"],
+                **_task_arguments(status=row["status"]),
+            },
+        )
+    await connection.call(
+        "delete_task", {"listId": from_list, "taskId": str(row["external_id"])}
+    )
+    return created
 
 
 async def _call_json(connection: Any, tool: str, arguments: dict) -> Any:
@@ -536,26 +568,41 @@ async def sync(manager: Any) -> SyncReport:
     # `dirty_at` and is retried next tick rather than stopping the pull.
     await _push(connection, repository, list_repository, report)
 
+    # The lists are fetched together and applied afterwards, in order. Serially
+    # this was one round trip per list end to end -- four lists, four waits,
+    # every ninety seconds -- and the calls have nothing to say to each other:
+    # each names its own list and the answers are independent. Applying them
+    # afterwards rather than as they land keeps the pull single-threaded where
+    # it touches SQLite, and keeps `report` counting in list order.
+    targets = [task_list for task_list in raw_lists if task_list.get("id")]
+    answers = await asyncio.gather(
+        *(
+            _paged(
+                connection,
+                "list_tasks",
+                {"listId": task_list["id"], "status": "all"},
+                "tasks",
+            )
+            for task_list in targets
+        ),
+        return_exceptions=True,
+    )
+
     seen: set[str] = set()
     truncated = False
-    for task_list in raw_lists:
-        list_id = task_list.get("id")
-        if not list_id:
-            continue
-        local_list = by_external.get(str(list_id))
-        try:
-            items = await _paged(
-                connection, "list_tasks", {"listId": list_id, "status": "all"}, "tasks"
-            )
-        except TruncatedListing:
+    for task_list, items in zip(targets, answers, strict=True):
+        if isinstance(items, TruncatedListing):
             truncated = True
             continue
+        if isinstance(items, BaseException):
+            raise items
+        local_list = by_external.get(str(task_list["id"]))
         for item in items:
             external_id = item.get("id")
             if not external_id:
                 continue
             seen.add(str(external_id))
-            _apply(repository, report, local_list, item, list_name=task_list.get("displayName"))
+            _apply(repository, report, local_list, item)
 
     if truncated:
         # Some list came back short. Retiring on that would cancel tasks that
@@ -744,33 +791,17 @@ def _apply(
     report: SyncReport,
     local_list: int | None,
     item: dict,
-    list_name: str | None = None,
 ) -> None:
     external_id = str(item["id"])
     title = (item.get("title") or "").strip() or "(untitled)"
-    tagged_by_hashtag = _hashtag_in(title)
     body = item.get("body")
     notes = body.get("content") if isinstance(body, dict) else body
     importance = str(item.get("importance") or "")
 
-    # My Day, carried as a category (see MY_DAY_CATEGORY). Everything else the
-    # task is tagged with is kept verbatim so the next push can merge rather
-    # than replace.
+    # Every tag the task carries, kept verbatim so the next push sends them back
+    # rather than replacing them with a shorter list. None of them mean anything
+    # to PSOK: My Day is `list_id`, decided by the list this task came out of.
     remote_categories = [c for c in (item.get("categories") or []) if isinstance(c, str)]
-    # Three ways to say "today", because To Do's own My Day cannot be read and
-    # people reach for different gestures: a category, a hashtag typed into the
-    # title, or a list kept for the purpose.
-    #
-    # The two are kept apart because they expire differently. A hashtag is in
-    # the title the user is looking at and a list is a place they chose: both
-    # are standing choices, re-affirmed every day they are left in place. The
-    # category is one PSOK writes, and nothing takes it off again -- so read as
-    # a standing choice it made My Day permanent, re-stamping tasks from weeks
-    # ago as today's on every pull. My Day is meant to empty overnight.
-    by_category = MY_DAY_CATEGORY in remote_categories
-    by_standing = tagged_by_hashtag or (list_name or "").strip().lower() in MY_DAY_LIST_NAMES
-    in_my_day = by_category or by_standing
-    others = [c for c in remote_categories if c != MY_DAY_CATEGORY]
 
     existing = repository.by_external(SOURCE, external_id)
 
@@ -788,7 +819,7 @@ def _apply(
         "important": 1 if importance == "high" else 0,
         "list_id": local_list,
         "external_etag": item.get("lastModifiedDateTime") or item.get("@odata.etag"),
-        "external_categories": json.dumps(others),
+        "external_categories": json.dumps(remote_categories),
     }
 
     if existing is None:
@@ -806,43 +837,12 @@ def _apply(
             list_id=local_list,
             important=bool(fields["important"]),
             status=fields["status"],
-            my_day_on=_today() if in_my_day else None,
             external_categories=fields["external_categories"],
         )
         report.created += 1
         return
 
     changed = {k: v for k, v in fields.items() if existing[k] != v}
-
-    # A tag that is still there keeps the task in today's My Day; one that has
-    # been taken off -- here or in the To Do app -- takes it out. Refreshed to
-    # today rather than left on an older date, because the tag persisting is the
-    # user saying it still belongs there.
-    #
-    # Never on a row whose push has not landed. The push runs first and clears
-    # `dirty_at` when it succeeds, so a row still dirty here is one whose local
-    # change never reached To Do -- and clearing My Day off the back of an
-    # upstream that has not been told about it yet would silently undo the sun
-    # the user had just pressed.
-    pending = bool(existing["dirty_at"])
-    was_in_my_day = bool(existing["my_day_on"])
-    # Set when the tag upstream is one PSOK wrote on an earlier day. The pull
-    # cannot take it off itself -- writing to Graph here would put a round trip
-    # inside the read half -- so the row is left dirty and the next push, which
-    # already sends the merged category list, drops it.
-    expire_tag = False
-    if not pending:
-        if by_standing:
-            if existing["my_day_on"] != _today():
-                changed["my_day_on"] = _today()
-        elif by_category:
-            if not was_in_my_day:
-                changed["my_day_on"] = _today()  # newly tagged, wherever from
-            elif existing["my_day_on"] != _today():
-                changed["my_day_on"] = None
-                expire_tag = True
-        elif was_in_my_day:
-            changed["my_day_on"] = None
 
     if not changed:
         repository.update(existing["id"], last_synced_at=_now())
@@ -854,10 +854,8 @@ def _apply(
         changed["reminded_at"] = None
     changed["last_synced_at"] = _now()
     # The push already ran, so upstream holds whatever was local. Anything
-    # arriving now is newer than the local edit and supersedes it -- unless the
-    # pull itself found something to send back, which only yesterday's My Day
-    # tag does.
-    changed["dirty_at"] = _now() if expire_tag else None
+    # arriving now is newer than the local edit and supersedes it.
+    changed["dirty_at"] = None
     repository.update(existing["id"], **changed)
     report.updated += 1
 
@@ -878,7 +876,3 @@ def _retire_missing(repository: TaskRepository, report: SyncReport, seen: set[st
 def _now() -> str:
     return datetime.now().isoformat(sep=" ", timespec="seconds")
 
-
-def _today() -> str:
-    """Local date. My Day is a local-calendar idea, not a UTC one."""
-    return datetime.now().strftime("%Y-%m-%d")

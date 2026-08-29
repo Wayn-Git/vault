@@ -150,15 +150,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- is To Do's `importance` and is advisory: a task can be important with no
     -- deadline and no priority, which is the whole point of the bucket.
     important                INTEGER NOT NULL DEFAULT 0,
-    -- The local date this was put in My Day, or NULL. A date rather than a
-    -- flag, so My Day empties itself at midnight without a job to do it --
-    -- and PSOK-local, because Graph does not expose My Day membership through
-    -- the scopes this connector holds.
-    my_day_on                TEXT,
-    -- Every category To Do holds for this task *except* the My Day one, as a
-    -- JSON array. Kept because Graph's categories field is all-or-nothing on
-    -- write: pushing `["My Day"]` would silently delete whatever else the user
-    -- had tagged the task with. Written by the pull, read by the push.
+    -- Every category To Do holds for this task, as a JSON array. Kept because
+    -- Graph's categories field is all-or-nothing on write: sending one tag
+    -- would silently delete whatever else the user had tagged the task with.
+    -- Written by the pull, read by the push. My Day is not among them -- it is
+    -- the list the task is in, `list_id`, and nothing else.
     external_categories      TEXT,
     completed_at             TEXT,
     -- A local change that has not reached To Do yet. The push half of the sync
@@ -169,8 +165,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_list ON tasks(list_id, status);
--- The three bucket scans, each of which runs on every Tasks page load.
-CREATE INDEX IF NOT EXISTS idx_tasks_my_day ON tasks(my_day_on) WHERE my_day_on IS NOT NULL;
+-- The bucket scans, each of which runs on every Tasks page load. My Day is a
+-- list, so `idx_tasks_list` above already covers it.
 CREATE INDEX IF NOT EXISTS idx_tasks_important ON tasks(important, status) WHERE important = 1;
 -- What the push half walks. Partial, because the overwhelming majority of rows
 -- are clean and a full scan every fifteen minutes would be pure waste.

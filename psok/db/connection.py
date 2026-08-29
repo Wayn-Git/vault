@@ -43,6 +43,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
     _adopt_existing_automation_runs(conn)
     _drop_empty_legacy_tables(conn)
+    _drop_retired_columns(conn)
     _normalise_task_timestamps(conn)
     _repair_placeholder_models(conn)
 
@@ -51,6 +52,43 @@ def migrate(conn: sqlite3.Connection) -> None:
 # on emptiness: a table nothing references but that somehow holds rows is a
 # surprise worth keeping, not tidying away.
 LEGACY_TABLES = ("integrations", "integration_state")
+
+
+# Columns an older PSOK wrote that this one has no code for, with the indexes
+# that have to go first -- SQLite refuses to drop a column an index still names.
+#
+# `tasks.my_day_on` held the date a task was put in My Day, back when My Day was
+# a stamp three separate gestures could write. It is a list now, so the column
+# has no writer, and a column with no writer that a query could still reach is
+# the "reserved slot" this codebase does not keep. The dates are not migrated
+# into the list: they were mostly written by a sun press days ago, and silently
+# moving old tasks into the user's live My Day list -- which would then push
+# them to their phone -- is a worse first impression than an empty list they
+# fill themselves.
+RETIRED_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("tasks", "my_day_on", ("idx_tasks_my_day",)),
+)
+
+
+def _drop_retired_columns(conn: sqlite3.Connection) -> None:
+    for table, column, indexes in RETIRED_COLUMNS:
+        try:
+            have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            continue
+        if column not in have:
+            continue
+        for index in indexes:
+            conn.execute(f"DROP INDEX IF EXISTS {index}")
+        try:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            log.info("dropped retired column %s.%s", table, column)
+        except sqlite3.OperationalError as exc:
+            # Old SQLite (DROP COLUMN landed in 3.35) or a view still naming it.
+            # Left in place rather than failing the migration: an unused column
+            # is harmless, and taking the database down on start is not.
+            log.error("could not drop retired column %s.%s: %s", table, column, exc)
+    conn.commit()
 
 
 # What an interface once sent when it did not yet know a provider's default.

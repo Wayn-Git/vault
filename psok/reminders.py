@@ -42,10 +42,15 @@ TICK_SECONDS = 30
 # something that was due yesterday is worse than being told nothing.
 LATE_AFTER = timedelta(minutes=5)
 
-# How often to pull external task sources. Far slower than the reminder scan:
-# this is somebody else's API, and a to-do list does not change every half
-# minute. A sync is also available on demand from the API and the CLI.
-SYNC_EVERY_SECONDS = 15 * 60
+# How often to pull external task sources. Slower than the reminder scan, but
+# not by the fifteen minutes it used to be: a task ticked off on the phone took
+# up to a quarter of an hour to reach the screen, which reads as the sync being
+# broken rather than periodic. One `list_task_lists` plus one `list_tasks` per
+# list, against a process that is already running and signed in -- and the list
+# pulls now go out together rather than one after another. A sync is also
+# available on demand from the API and the CLI, and the Tasks page asks for one
+# when it opens.
+SYNC_EVERY_SECONDS = 90
 
 
 def _now() -> datetime:

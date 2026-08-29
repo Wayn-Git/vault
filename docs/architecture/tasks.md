@@ -37,7 +37,7 @@ The counts and the rows come from the same predicate, used twice
 (`_bucket_where`). A rail saying `Missed 5` above a list of four is not a state
 this can reach.
 
-## My Day rides on a category, because To Do's own is not in its API
+## My Day is a list
 
 Verified against the live account on 2026-08-28, four independent ways, none of
 them from the documentation:
@@ -59,55 +59,88 @@ unique to the non-My-Day group were `completedDateTime`, `dueDateTime` and
 `recurrence` — ordinary task properties. My Day lives in To Do's client, not its
 API, and no amount of work on this side reaches it.
 
-**So the carrier changed rather than the feature being dropped.** `categories`
-does round-trip — readable on the pull, writable on create and update — so the
-sun toggle writes a `My Day` tag on the task. Proven both directions against the
-real account: pressing the sun put `categories: ['My Day']` on the task read
-straight back from Graph, and tagging it in To Do set `my_day_on` on the next
-sync. Removing it follows in both directions.
+### The category was the wrong answer, and the account proved it
 
-It is a tag *beside* To Do's My Day, not the same list, and the page says
-exactly that rather than implying they are one thing.
+The first fix kept `my_day_on` as a local date and carried it upstream as a
+`My Day` **category**. It round-tripped correctly and still did not work, for a
+reason no test could have found: the user adds today's tasks through **To Do's
+own My Day**, the overlay at the top of its sidebar. Those tasks carry no
+category, no hashtag and no special list — Graph returns them as ordinary tasks
+in *Tasks*. So PSOK's My Day and the phone's showed different tasks, which is
+the original complaint restated with more machinery behind it.
 
-Two properties this has to hold, both of which cost a real bug if dropped:
+Measured on the live account, 2026-08-29: the two tasks ever added to the user's
+own **My Day list** both arrived correctly; the six added that morning through
+To Do's built-in My Day came back filed in `Tasks`, indistinguishable from
+anything else.
 
-- **The push merges, it does not replace.** Graph's `categories` write is
-  all-or-nothing, so sending `["My Day"]` would delete every other tag the user
-  had. `external_categories` stores what the last pull saw so the push can add
-  to it.
-- **A pull never clears My Day off a row whose push has not landed.** The push
-  runs first and clears `dirty_at` on success; a row still dirty is one whose
-  change never reached To Do, and clearing it there would silently undo the
-  button the user just pressed.
+### So My Day is one ordinary list, at both ends
 
-`my_day_on` is a **date**, not a flag, so the bucket is still a local-calendar
-idea; a tag that is still upstream refreshes it to today on each pull.
+`MY_DAY_LIST_NAMES` in `psok/db/repositories.py` names it — "my day" or "today",
+folded past a leading emoji like every other list name, so `🌞 My Day` counts.
+The bucket is one clause:
+
+```sql
+list_id = :my_day_list AND status != 'cancelled'
+```
+
+There is no `my_day_on` column any more (the migration drops it), no category
+PSOK writes, and no hashtag. One mechanism, visible from both ends, editable
+from both ends.
+
+**The sun moves the task.** `TaskService.move` → `move_remote_task`, and because
+**Graph has no move**, that is a create in the target list followed by a delete
+from the source. Three consequences, stated rather than discovered:
+
+- **The task gets a new id.** `adopt_external` repoints the local row; anything
+  holding the old id is holding a task that no longer exists.
+- **Only what a create accepts survives** — title, notes, dates, importance,
+  status, tags. Checklist items and the original creation date do not.
+- **Create first, delete second, always.** A failed delete leaves a duplicate
+  the user can see and fix; a failed create after a delete has lost the task.
+  If either half fails the local row does **not** move, so PSOK and the phone
+  never disagree about which list holds it.
+
+The one property carried over from the category design: **the push sends the
+whole `categories` array back**, because Graph replaces rather than merges and a
+shorter array deletes the user's other tags. PSOK writes none of its own now, so
+`external_categories` exists purely to hand back what was already there.
+
+**What this costs.** To Do puts a task in exactly one list, so a task in My Day
+has left the list it came from — unlike To Do's own My Day, which is an overlay
+over the lists. And the built-in My Day still sits above it in the sidebar doing
+its own invisible thing: tasks added *there* are still unreachable, and always
+will be. The page says which one it is.
 
 ## What is in My Day
 
-Four things, and the last one is easy to forget:
+Whatever is in the list. Nothing else — not "due today", not "scheduled today".
 
-- put there by hand (the sun, or the `My Day` tag in To Do),
-- scheduled for today,
-- due today,
-- **finished today.**
+The wide version (put there by hand, *or* scheduled today, *or* due today, *or*
+finished today) was the previous design and had to go with the date stamp: a
+bucket half of which is a query over local dates cannot agree with a phone that
+has no idea what PSOK thinks is due today. What it bought — a page that fills
+itself — is not worth a My Day that means two different things in two places.
 
-That last clause exists because My Day showing only what is *left* makes it empty
-by the evening of a day you actually got things done — which reads as the page
-being broken rather than as the work being over. It is kept as its own clause
-because everything else in My Day is an open task and this deliberately is not.
+Completed tasks in the list **stay in it**, which is what To Do does too, and is
+the same instinct the old `_DONE_TODAY` clause served: My Day showing only what
+is *left* makes it empty by the evening of a day you actually got things done,
+which reads as the page being broken rather than as the work being over. They
+sink to the bottom (`_MY_DAY_ORDER`) because the open ones are the list and the
+done ones are the record. Cancelled rows — tasks a pull no longer found upstream
+— are excluded, because they are not in the list any more either.
 
-`completed_at` is what makes it possible, and the sync did not import it until
-2026-08-28: To Do knew three tasks had been finished that day and PSOK had
+`completed_at` is what makes the record readable, and the sync did not import it
+until 2026-08-28: To Do knew three tasks had been finished that day and PSOK had
 recorded the completion time of one, so "what did I get done today" could not be
 answered from local data at all. `_apply` now maps `completedDateTime`.
 
 My Day is still the one bucket nothing else fills on its own, which has a
-consequence worth stating: **it starts empty until someone chooses.** It was briefly the
-default landing view, and on a machine with nothing due today that is an empty
-room — which reads as a broken page, not an empty one. So every row carries the
-toggle, the empty state offers the overdue list as somewhere to start, and the
-view lands on My Day only when My Day has something in it.
+consequence worth stating: **it starts empty until someone chooses.** It was
+briefly the default landing view, and on a machine with nothing in the list that
+is an empty room — which reads as a broken page, not an empty one. So every row
+carries the sun, the empty state offers the overdue list as somewhere to start,
+and the view lands on My Day only when My Day has something in it.
 
 ## Important is not priority
 
@@ -219,6 +252,12 @@ optimisation; it is what stops a large list cancelling itself.
 - **Steps / subtasks.** The connector exposes `checklistItems`; nothing reads
   them yet.
 - **Hard delete.** See above.
-- **Using To Do's own My Day list.** No field for it exists in Graph; four
-  routes were checked live. The `My Day` category is the round-trip that does
-  work. See above.
+- **Using To Do's own My Day.** No field for it exists in Graph; four routes
+  were checked live, and a controlled comparison of the user's own tasks found
+  no field separating them. An ordinary list called My Day is what works
+  instead. See above.
+- **A `My Day` category, and a `#myday` hashtag in the title.** Both existed and
+  both were removed on 2026-08-29: they round-tripped, but a task added through
+  To Do's own My Day carries neither, so they described a different set of tasks
+  than the phone did. Two mechanisms claiming to be the same thing is worse than
+  one that is.

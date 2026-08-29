@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from psok.db.repositories import TaskListRepository, TaskRepository
+from psok.db.repositories import TaskListRepository, TaskRepository, is_my_day_list
 from psok.scheduling.engine import AmbiguousDate, find_conflicts, resolve_date_hint
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,10 @@ log = logging.getLogger(__name__)
 DEFAULT_WORK_BLOCK_MINUTES = 60
 
 SOURCE = "microsoft-todo"
+
+#: What a My Day list is called when PSOK has to make one. Any of the names in
+#: `MY_DAY_LIST_NAMES` is recognised; this is the one written.
+MY_DAY_LIST_NAME = "My Day"
 
 STATUSES = ("todo", "in_progress", "done", "cancelled")
 PRIORITIES = ("low", "medium", "high")
@@ -77,9 +81,6 @@ class Written:
 def _now() -> str:
     return datetime.now().isoformat(sep=" ", timespec="seconds")
 
-
-def _today() -> str:
-    return datetime.now().date().isoformat()
 
 
 def _hint(value: str | None, *, advice: str) -> datetime | None:
@@ -161,6 +162,100 @@ class TaskService:
         )
         return ListRef(id=list_id, name=wanted, external_id=external_id, created=True, note=note)
 
+    async def my_day_list(self) -> ListRef:
+        """The list that *is* My Day, created if the account has not got one.
+
+        Made upstream like any other list, so it appears in To Do beside the
+        rest and the phone can add to it. That is the entire mechanism: there is
+        no flag, no tag and no second copy -- see the note at the top of
+        `psok/sync/microsoft_todo.py` for why nothing else survives the trip.
+        """
+        for row in self.lists.all():
+            if is_my_day_list(row["name"]):
+                return await self._adopt(row)
+        return await self.create_list(MY_DAY_LIST_NAME)
+
+    async def _default_list(self) -> ListRef:
+        """Where a task goes when it leaves My Day.
+
+        To Do's own default list, except when that *is* My Day: `default()`
+        falls back to the first list when nothing is flagged, so on an account
+        whose only list is My Day, taking a task out of My Day would move it
+        into My Day. Anything else beats that; nothing else leaves the task
+        unfiled, which is what a local-only task already is.
+        """
+        rows = [row for row in self.lists.all() if not is_my_day_list(row["name"])]
+        if not rows:
+            return ListRef()
+        row = next((r for r in rows if r["is_default"]), rows[0])
+        return await self._adopt(row)
+
+    async def move(self, task_id: int, target: ListRef) -> str:
+        """Put a task in another list, upstream included. Returns a note.
+
+        Graph cannot move a task, so `move_remote_task` recreates it in the
+        target and deletes the original -- which means the id changes and the
+        local row has to be repointed at the new one. Doing that here rather
+        than leaving `dirty_at` for the push is deliberate: the push sends
+        `update_task` with the *new* list and the *old* task id, which To Do
+        answers with a 404 forever.
+        """
+        from psok.sync.microsoft_todo import move_remote_task
+
+        existing = self.tasks.get(task_id)
+        if existing is None:
+            raise TaskError(f"no task with id {task_id}")
+        if existing["list_id"] == target.id:
+            return ""
+
+        source = self.lists.get(existing["list_id"]) if existing["list_id"] else None
+        source_external = source["external_id"] if source is not None else None
+        if not existing["external_id"]:
+            # Never pushed, so there is nothing upstream to move. It goes to the
+            # right list locally and the push creates it there.
+            self.tasks.update(task_id, list_id=target.id)
+            return f"moved to {target.name}"
+        if not (source_external and target.external_id):
+            # The task exists upstream but one of the two lists does not, so
+            # there is no move to make -- and moving it locally would be undone
+            # by the next pull, which files a task where To Do says it lives.
+            raise TaskError(
+                f"'{existing['title']}' is in Microsoft To Do but"
+                f" {'its list' if not source_external else target.name} is not."
+                " Sync first, then move it."
+            )
+
+        try:
+            moved = await move_remote_task(
+                existing, to_list=target.external_id, from_list=source_external
+            )
+        except Exception as exc:
+            log.info("could not move task %s in Microsoft To Do: %s", task_id, exc)
+            # Left exactly where it was, in both places. Moving it locally over a
+            # failed upstream move would put PSOK and the phone into permanent
+            # disagreement about which list holds it.
+            raise TaskError(
+                f"could not move '{existing['title']}' to {target.name} in Microsoft To Do."
+                " It is still where it was."
+            ) from exc
+
+        if moved is None:
+            # Signed out between the check above and here. Refused rather than
+            # moved locally, for the reason the branch above gives.
+            raise TaskError(
+                "Microsoft To Do is not connected, so a task that lives there cannot be"
+                " moved between lists. Connect it from Connectors and try again."
+            )
+
+        self.tasks.adopt_external(
+            task_id,
+            source=SOURCE,
+            external_id=moved["external_id"],
+            external_etag=moved.get("external_etag") or None,
+        )
+        self.tasks.update(task_id, list_id=target.id)
+        return f"moved to {target.name} in Microsoft To Do"
+
     @staticmethod
     async def _create_list_upstream(name: str) -> tuple[str | None, str]:
         from psok.mcp import live
@@ -215,7 +310,11 @@ class TaskService:
         if scheduled_at and check_conflicts:
             self._refuse_on_conflict(scheduled_at, duration_estimate_minutes)
 
-        list_ref = await self.resolve_list(list_name)
+        # My Day *is* a list, so asking for today is asking for that list. It
+        # wins over a named one rather than being combined with it: To Do puts a
+        # task in exactly one list, so "in My Day, in Groceries" has no meaning
+        # to honour.
+        list_ref = await (self.my_day_list() if add_to_my_day else self.resolve_list(list_name))
         external, routed_to = await self._create_upstream(
             title,
             notes=notes,
@@ -223,7 +322,6 @@ class TaskService:
             reminder_at=reminder_at,
             priority=priority,
             important=important,
-            add_to_my_day=add_to_my_day,
             list_external_id=list_ref.external_id,
         )
 
@@ -243,7 +341,6 @@ class TaskService:
             external_etag=(external.get("external_etag") or None) if external else None,
             list_id=list_ref.id,
             important=important,
-            my_day_on=_today() if add_to_my_day else None,
             # Nothing upstream to update yet when the create already landed
             # there; a row that did not reach To Do is dirty so the next sync
             # carries it over rather than leaving it stranded locally.
@@ -273,7 +370,6 @@ class TaskService:
         reminder_at: datetime | None,
         priority: str | None,
         important: bool,
-        add_to_my_day: bool,
         list_external_id: str | None,
     ) -> tuple[dict[str, str] | None, str]:
         """Put the task in the user's real task list, where there is one.
@@ -293,7 +389,6 @@ class TaskService:
                 reminder_at=_stamp(reminder_at),
                 priority=priority,
                 important=important,
-                add_to_my_day=add_to_my_day,
                 list_id=list_external_id,
             )
         except Exception as exc:
@@ -339,8 +434,6 @@ class TaskService:
             fields["priority"] = priority
         if important is not None:
             fields["important"] = 1 if important else 0
-        if add_to_my_day is not None:
-            fields["my_day_on"] = _today() if add_to_my_day else None
         if duration_estimate_minutes is not None:
             fields["duration_estimate_minutes"] = int(duration_estimate_minutes)
 
@@ -353,12 +446,20 @@ class TaskService:
             if when is not None:
                 fields[column] = _stamp(when)
 
+        # Both of these are the same operation: My Day is a list, so the sun is
+        # a move to it and taking a task out of My Day is a move back to the
+        # default list. `add_to_my_day` wins over a named list for the reason
+        # `create` gives -- a task lives in one list, so the two cannot combine.
         list_ref = ListRef()
-        if list_name is not None:
-            list_ref = await self.resolve_list(list_name)
-            fields["list_id"] = list_ref.id
+        target: ListRef | None = None
+        if add_to_my_day is not None:
+            target = await (self.my_day_list() if add_to_my_day else self._default_list())
+        elif list_name is not None:
+            target = await self.resolve_list(list_name)
+        if target is not None:
+            list_ref = target
 
-        if not fields:
+        if not fields and target is None:
             raise TaskError("nothing to update")
 
         # Moving the time a reminder is owed makes an already-delivered one
@@ -367,13 +468,24 @@ class TaskService:
         if "reminder_at" in fields or "due_at" in fields:
             fields["reminded_at"] = None
 
+        # The move goes first and goes now: it recreates the task upstream under
+        # a new id, and the field edits below have to be marked against that id
+        # rather than the one it is about to stop having.
+        moved = ""
+        if target is not None:
+            moved = await self.move(task_id, target)
+            existing = self.tasks.get(task_id) or existing
+
+        if not fields:
+            return Written(task_id=task_id, list_ref=list_ref, routed_to=moved)
+
         # Every local change owes the connector an update. Marked rather than
         # pushed, so a checkbox never waits on a network round trip.
         if existing["external_id"]:
             fields["dirty_at"] = _now()
 
         self.tasks.update(task_id, **fields)
-        return Written(task_id=task_id, list_ref=list_ref, changed=fields)
+        return Written(task_id=task_id, list_ref=list_ref, changed=fields, routed_to=moved)
 
     async def complete(self, task_id: int, *, done: bool = True) -> Written:
         return await self.update(task_id, status="done" if done else "todo")
@@ -399,7 +511,7 @@ def describe_task(row: sqlite3.Row, list_name: str | None = None) -> str:
         bits.append(f"in {list_name}")
     if row["important"]:
         bits.append("important")
-    if row["my_day_on"]:
+    if is_my_day_list(list_name):
         bits.append("my day")
     for column, label in (
         ("due_at", "due"),
