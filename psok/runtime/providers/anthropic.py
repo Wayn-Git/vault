@@ -307,5 +307,6 @@ def initialize(
             # 200k is right for the Claude 3/4 line and wrong for a model that
             # declares a million; an entry that states its window wins.
             context_window=config.context_window or 200_000,
+            max_tools=config.max_tools,
         ),
     )

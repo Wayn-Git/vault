@@ -44,5 +44,6 @@ def initialize(
             # A local model's window is whatever the Modelfile says, which only
             # the person who pulled it knows.
             context_window=config.context_window or 32_768,
+            max_tools=config.max_tools,
         ),
     )

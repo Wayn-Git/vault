@@ -8,12 +8,15 @@ LM Studio, NVIDIA NIM, Groq and OpenRouter are supported with no code.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
-from psok.config import ProviderConfig, load_providers
+from psok.config import ProviderConfig, load_providers, load_tiers
 from psok.runtime.http import MAX_RETRIES
 from psok.runtime.providers import anthropic, google, ollama, openai_compat
 from psok.runtime.types import ResolvedModel
+
+log = logging.getLogger(__name__)
 
 #: `(config, model, *, max_retries) -> ResolvedModel`. The retry allowance is
 #: a keyword with a default, so an adapter written against the two-argument form
@@ -41,6 +44,30 @@ def is_known_provider(provider: str) -> bool:
     surface mid-turn, where the failure lands inside an already-open stream.
     """
     return provider in load_providers() or provider in PROVIDER_REGISTRY
+
+
+def resolve_tier(
+    tier: str, *, max_retries: int = MAX_RETRIES
+) -> ResolvedModel | None:
+    """The model configured for a job, or None when nothing is configured for it.
+
+    None is the ordinary answer on a machine with one provider, and every caller
+    treats it as "use the conversation's own model" rather than as a failure.
+    An offer PSOK cannot honour -- a heavy tier with nothing behind it -- is
+    worse than no offer, so this returning None is what withholds the escalation
+    tool rather than a separate flag somebody has to keep in step.
+    """
+    entry = load_tiers().get(tier)
+    if entry is None:
+        return None
+    try:
+        return resolve(entry.provider, entry.model, max_retries=max_retries)
+    except ProviderNotConfigured:
+        # The provider was configured when the file was read and is not now, or
+        # its key has gone. A tier that cannot be built is the same as one that
+        # was never named.
+        log.warning("tier '%s' names %s, which cannot be resolved", tier, entry.provider)
+        return None
 
 
 def resolve(

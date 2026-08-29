@@ -34,6 +34,23 @@ from psok.runtime.types import (
 )
 from psok.secrets import resolve_api_key
 
+#: What a provider calls the chain-of-thought it returns beside the answer.
+#: NVIDIA, DeepSeek and Ollama send `reasoning_content`; Groq's gpt-oss models
+#: send `reasoning`. Reading only the first meant a Groq turn's thinking was
+#: dropped on the floor -- and, worse, that the "a model that spent its whole
+#: budget thinking has not answered" guard below never saw it.
+REASONING_FIELDS = ("reasoning_content", "reasoning")
+
+
+def _reasoning_of(payload: dict) -> str | None:
+    """The thinking in a message or a delta, whichever field carries it."""
+    for field in REASONING_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 # Models that reject `reasoning_effort` alongside function tools on chat-completions.
 _REASONING_MODELS = ("o1", "o3", "o4", "gpt-5")
 
@@ -214,10 +231,10 @@ class OpenAICompatClient:
         usage = data.get("usage") or {}
         # Reasoning models (Nemotron, DeepSeek-R1 and friends) return chain-of-thought
         # in a sibling field. It is not the answer, so it must not become the answer.
-        reasoning = message.get("reasoning_content")
+        reasoning = _reasoning_of(message)
         return ModelResponse(
             text=message.get("content"),
-            reasoning=reasoning if isinstance(reasoning, str) and reasoning.strip() else None,
+            reasoning=reasoning,
             tool_calls=calls,
             stop_reason=choice.get("finish_reason"),
             input_tokens=usage.get("prompt_tokens"),
@@ -286,9 +303,9 @@ class OpenAICompatClient:
                 text_parts.append(delta["content"])
                 yield StreamEvent(type="text", text=delta["content"])
 
-            if delta.get("reasoning_content"):
-                reasoning_parts.append(delta["reasoning_content"])
-                yield StreamEvent(type="reasoning", text=delta["reasoning_content"])
+            if thought := _reasoning_of(delta):
+                reasoning_parts.append(thought)
+                yield StreamEvent(type="reasoning", text=thought)
 
             for fragment in delta.get("tool_calls") or []:
                 index = fragment.get("index", 0)
@@ -319,7 +336,7 @@ class OpenAICompatClient:
             # streaming rather than reporting silence as an answer.
             #
             # Reasoning deliberately does not count as an answer here. A
-            # thinking model that spends its whole budget in `reasoning_content`
+            # thinking model that spends its whole budget on reasoning
             # and stops produced no text and no tool call, skipped this branch
             # because `reasoning_parts` was non-empty, and the loop then burned
             # both continuations before ending the turn on an empty bubble.
@@ -400,5 +417,6 @@ def initialize(
             vision="gpt-4o" in resolved_model.lower(),
             reasoning=resolved_model.lower().startswith(_REASONING_MODELS),
             context_window=_context_window(resolved_model, config.context_window),
+            max_tools=config.max_tools,
         ),
     )

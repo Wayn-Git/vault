@@ -40,6 +40,12 @@ class Capabilities:
     vision: bool = False
     reasoning: bool = False
     context_window: int = 128_000
+    #: How many tool schemas this endpoint accepts in one request, where it caps
+    #: them. Groq answers `400 'tools' : maximum number of items is 128` and
+    #: this machine offers 178 across thirteen connectors, so every turn failed
+    #: before a token moved. `None` means no cap has been observed, which is not
+    #: the same as knowing there is none.
+    max_tools: int | None = None
 
 
 @dataclass

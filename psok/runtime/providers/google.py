@@ -215,5 +215,6 @@ def initialize(
             vision=True,
             reasoning=False,
             context_window=config.context_window or 1_000_000,
+            max_tools=config.max_tools,
         ),
     )

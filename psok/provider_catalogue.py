@@ -39,6 +39,10 @@ class ProviderPreset:
     base_url: str | None = None
     default_model: str | None = None
     context_window: int | None = None
+    #: The endpoint's cap on how many tool schemas one request may carry, where
+    #: it has one. Groq answers `400 'tools' : maximum number of items is 128`;
+    #: everyone else observed so far takes what they are given.
+    max_tools: int | None = None
     #: Native adapter name for providers that do not speak chat-completions.
     #: None means the OpenAI-compatible fall-through, which is most of them.
     adapter: str | None = None
@@ -112,6 +116,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         base_url="https://api.groq.com/openai/v1",
         default_model="llama-3.3-70b-versatile",
         context_window=131_072,
+        max_tools=128,
         keys_url="https://console.groq.com/keys",
         docs_url="https://console.groq.com/docs/models",
         note="Free tier, no card. Fast enough that the round trip stops being the bottleneck.",
@@ -264,6 +269,8 @@ def entry_for(preset: ProviderPreset) -> dict:
         entry["default_model"] = preset.default_model
     if preset.context_window:
         entry["context_window"] = preset.context_window
+    if preset.max_tools:
+        entry["max_tools"] = preset.max_tools
     return entry
 
 

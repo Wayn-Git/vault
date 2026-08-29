@@ -758,3 +758,134 @@ def test_a_fallback_naming_an_unconfigured_provider_is_refused(client, psok_home
 
     ok = client.patch(f"/api/conversations/{cid}", json={"fallback": []})
     assert ok.status_code == 200
+
+
+def test_thinking_is_read_whatever_the_provider_calls_it():
+    """NVIDIA, DeepSeek and Ollama send `reasoning_content`; Groq's gpt-oss
+    models send `reasoning`. Reading only the first dropped a Groq turn's
+    thinking silently -- and hid it from the guard that says a model which spent
+    its whole budget thinking has not answered.
+
+    Mutation check: read `payload.get("reasoning_content")` directly again.
+    """
+    from psok.runtime.providers.openai_compat import _reasoning_of
+
+    assert _reasoning_of({"reasoning_content": "nvidia's spelling"}) == "nvidia's spelling"
+    assert _reasoning_of({"reasoning": "groq's spelling"}) == "groq's spelling"
+    assert _reasoning_of({"content": "the answer"}) is None
+    assert _reasoning_of({"reasoning": "   "}) is None, "whitespace is not thinking"
+
+
+def test_a_providers_tool_cap_trims_rather_than_failing_the_turn():
+    """Groq refuses a request carrying more than 128 tool schemas -- `400
+    'tools' : maximum number of items is 128` -- and this machine offers 178
+    across thirteen connectors, so every Groq turn died before a token moved
+    with an error naming a limit nothing in PSOK knew about.
+
+    Builtins survive the trim first: a turn that has lost `list_files` is broken
+    in a way a turn missing one of forty-four GitHub tools is not.
+
+    Mutation check: return `tools` unchanged from `cap_tools`, or sort the
+    builtins after the connector tools.
+    """
+    from psok.agent.prompt import cap_tools, dropped_summary
+
+    class Schema:
+        def __init__(self, name):
+            self.name = name
+
+    tools = [
+        Schema("run_shell_command"),
+        Schema("list_files"),
+        *[Schema(f"tool{i}__mcp__github") for i in range(6)],
+    ]
+
+    kept, dropped = cap_tools(tools, 4)
+    assert [t.name for t in kept][:2] == ["run_shell_command", "list_files"]
+    assert len(kept) == 4
+    assert len(dropped) == 4
+
+    unchanged, nothing = cap_tools(tools, None)
+    assert unchanged is tools and nothing == [], "no declared cap, no trimming"
+    assert cap_tools(tools, 100)[1] == [], "under the cap, nothing is dropped"
+
+    sentence = dropped_summary(dropped)
+    assert "4 were withheld" in sentence
+    assert "github" in sentence, "the sentence names where they came from"
+    assert "Skills & connectors" in sentence, "and what to do about it"
+
+
+def test_a_declared_tool_cap_reaches_the_model_that_has_one():
+    """The cap is a property of the endpoint, so it travels with the provider
+    entry rather than being guessed from the model name.
+
+    Mutation check: drop `max_tools=config.max_tools` from the adapter.
+    """
+    from psok.config import ProviderConfig
+    from psok.runtime.providers import openai_compat
+
+    capped = openai_compat.initialize(
+        ProviderConfig(name="groq", base_url="https://x/v1", max_tools=128), model="m"
+    )
+    assert capped.capabilities.max_tools == 128
+
+    uncapped = openai_compat.initialize(
+        ProviderConfig(name="nvidia", base_url="https://y/v1"), model="m"
+    )
+    assert uncapped.capabilities.max_tools is None, "unknown is not unlimited, but it is not a cap"
+
+
+def test_tiers_name_a_model_per_job_and_ignore_the_ones_that_cannot_work(tmp_path):
+    """A tier answers "how hard is this work"; the fallback chain answers "this
+    provider is down". Keeping them apart is the point: a quota trip absorbed by
+    a slower provider is an outage, and an escalation is a decision the model
+    made, and an interface showing them as one thing would be lying about one.
+
+    A tier naming an unconfigured provider is dropped rather than raised — a
+    typo in one must not stop the other two or the file from loading.
+
+    Mutation check: drop the `provider not in known` guard from `load_tiers`.
+    """
+    from psok.config import Tier, load_tiers
+
+    path = tmp_path / "providers.yaml"
+    path.write_text(
+        """
+providers:
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    default_model: openai/gpt-oss-120b
+  - name: nvidia
+    base_url: https://integrate.api.nvidia.com/v1
+    default_model: nvidia/nemotron-3-super-120b-a12b
+tiers:
+  fast: {provider: groq, model: openai/gpt-oss-20b}
+  heavy: {provider: nvidia, model: deepseek-ai/deepseek-v4-pro-0813}
+  wishful: {provider: anthropic, model: claude-opus-4}
+  broken: {provider: groq}
+"""
+    )
+
+    tiers = load_tiers(path)
+    assert tiers == {
+        "fast": Tier(provider="groq", model="openai/gpt-oss-20b"),
+        "heavy": Tier(provider="nvidia", model="deepseek-ai/deepseek-v4-pro-0813"),
+    }
+    assert "wishful" not in tiers, "an unknown tier name is not a tier"
+    assert "broken" not in tiers, "a tier without a model cannot be resolved"
+
+
+def test_no_tiers_is_the_ordinary_case_not_a_failure(tmp_path):
+    """A machine with one provider has nothing to tier, and every caller falls
+    back to the conversation's own model. `resolve_tier` returning None is what
+    withholds the escalation tool, so it must not raise.
+
+    Mutation check: raise from `load_tiers` when the block is missing.
+    """
+    from psok.config import load_tiers
+
+    path = tmp_path / "providers.yaml"
+    path.write_text("providers:\n  - name: groq\n    base_url: https://x/v1\n")
+    assert load_tiers(path) == {}
+    assert load_tiers(tmp_path / "absent.yaml") == {}
+

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 def psok_home() -> Path:
@@ -74,6 +77,15 @@ class ProviderConfig:
     #: unrecognised -- so the budgeter was working against a number nobody had
     #: checked. A declared figure wins; the guess stays as the fallback.
     context_window: int | None = None
+    #: How many tool schemas this provider will accept in one request.
+    #:
+    #: Groq refuses more than 128 with `400 'tools' : maximum number of items
+    #: is 128`, and this machine offers 178 across thirteen connectors -- so
+    #: every turn failed before a token moved, with an error naming a limit
+    #: nothing in PSOK knew about. Declared per provider because it is a
+    #: property of the endpoint, not of the model, and unknown for most of them:
+    #: `None` means "no cap has been observed", not "unlimited".
+    max_tools: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -136,6 +148,69 @@ def configured_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
     return {name: cfg for name, cfg in load_providers(path).items() if has_key(cfg)}
 
 
+#: The jobs a model can be picked for, cheapest first.
+#:
+#: A tier answers "how hard is this work", which is a different question from
+#: the one `psok/runtime/chain.py` answers ("this provider is down, who else").
+#: Keeping them apart matters: a quota trip falling through to a slower provider
+#: is an outage being absorbed, and an escalation is a decision the model made,
+#: and an interface that showed them as the same thing would be lying about one
+#: of them.
+TIERS = ("fast", "default", "heavy")
+
+
+@dataclass(frozen=True)
+class Tier:
+    """A provider and model named for a job."""
+
+    provider: str
+    model: str
+
+
+def load_tiers(path: Path | None = None) -> dict[str, Tier]:
+    """The `tiers:` block of providers.yaml, or an empty map.
+
+    Empty is the ordinary case and not a fault: a machine with one provider has
+    nothing to tier, and every caller falls back to the conversation's own
+    provider and model. An entry naming a provider that is not configured is
+    dropped with a log line rather than raised -- a typo in one tier must not
+    stop the other two, or the file from loading at all.
+    """
+    p = path or paths().providers_yaml
+    if not p.exists():
+        return {}
+    raw = yaml.safe_load(p.read_text()) or {}
+    block = raw.get("tiers") or {}
+    if not isinstance(block, dict):
+        log.warning("providers.yaml: 'tiers' is not a mapping; ignoring it")
+        return {}
+
+    known = set(load_providers(path))
+    out: dict[str, Tier] = {}
+    for name, entry in block.items():
+        if name not in TIERS:
+            log.warning(
+                "providers.yaml: unknown tier '%s'; expected one of %s", name, ", ".join(TIERS)
+            )
+            continue
+        if not isinstance(entry, dict):
+            log.warning("providers.yaml: tier '%s' is not a mapping; ignoring it", name)
+            continue
+        provider, model = entry.get("provider"), entry.get("model")
+        if not provider or not model:
+            log.warning("providers.yaml: tier '%s' needs both a provider and a model", name)
+            continue
+        if provider not in known:
+            log.warning(
+                "providers.yaml: tier '%s' names provider '%s', which is not configured",
+                name,
+                provider,
+            )
+            continue
+        out[name] = Tier(provider=str(provider), model=str(model))
+    return out
+
+
 def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
     p = path or paths().providers_yaml
     if not p.exists():
@@ -152,6 +227,7 @@ def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
             "api_key_env",
             "default_model",
             "context_window",
+            "max_tools",
         }
         cfg = ProviderConfig(
             name=entry["name"],
@@ -161,6 +237,7 @@ def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
             api_key_env=entry.get("api_key_env"),
             default_model=entry.get("default_model"),
             context_window=_positive_int(entry.get("context_window")),
+            max_tools=_positive_int(entry.get("max_tools")),
             extra={k: v for k, v in entry.items() if k not in known},
         )
         out[cfg.name] = cfg
