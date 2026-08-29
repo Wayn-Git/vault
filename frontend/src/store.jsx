@@ -30,7 +30,11 @@ function savePrefs(patch) {
   }
 }
 
-const HEALTH_INTERVAL = 20000
+// How often the header re-asks whether connectors and providers are alive. Was
+// 20s, which meant a connector could be dead for most of a minute with the
+// screen still saying it was fine. The call is 17ms and answers from state the
+// process already holds.
+const HEALTH_INTERVAL = 8000
 
 export function AppProvider({ children }) {
   const prefs = useRef(loadPrefs()).current

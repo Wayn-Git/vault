@@ -54,6 +54,32 @@ class DiscoveredTool:
     name: str
     description: str
     input_schema: dict[str, Any]
+    #: What the server says this tool does, from MCP's own `annotations` field:
+    #: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`.
+    #: Read by `psok.mcp.risk` to decide whether a call needs confirming. It was
+    #: dropped on the floor until 2026-08-29, which is why every tool from every
+    #: connector was rated medium risk and prompted -- reading a mail asked for
+    #: permission exactly as loudly as sending one.
+    annotations: dict[str, Any] = field(default_factory=dict)
+
+
+def _annotations(tool: Any) -> dict[str, Any]:
+    """A tool's MCP annotations as a plain dict, whatever the SDK hands back.
+
+    The Python SDK models them as an object with snake_case fields while the
+    wire uses camelCase, and older servers send none at all. Normalising here
+    means `psok.mcp.risk` reads one shape and the SDK's version is not a second
+    thing to keep in step.
+    """
+    annotations = getattr(tool, "annotations", None)
+    if annotations is None:
+        return {}
+    if isinstance(annotations, dict):
+        return dict(annotations)
+    dump = getattr(annotations, "model_dump", None)
+    if callable(dump):
+        return {k: v for k, v in dump().items() if v is not None}
+    return {}
 
 
 async def _cancelled(future: asyncio.Future) -> None:
@@ -206,6 +232,7 @@ class MCPConnection:
                             name=t.name,
                             description=t.description or "",
                             input_schema=t.input_schema or {"type": "object", "properties": {}},
+                            annotations=_annotations(t),
                         )
                         for t in listed.tools
                     ]

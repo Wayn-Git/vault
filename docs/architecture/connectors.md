@@ -150,7 +150,7 @@ can sign in"`, and adding a connector that needs nothing answered
 Five entries, each `uvx workspace-mcp --single-user --tools <one service>`, over
 one Google account: five processes sharing one OAuth client, one credentials
 directory and one callback port. That sharing produced two of the traps in
-NEXT-SESSION.md — `sign_out` deleting the CSRF store the other four were mid-flow
+handover.md — `sign_out` deleting the CSRF store the other four were mid-flow
 against, and a port race that `WORKSPACE_MCP_PORT_FALLBACK_COUNT: "0"` correctly
 turns into a loud failure. One process told to serve five tool sets has neither,
 and is what `workspace-mcp` was built for.

@@ -17,7 +17,8 @@ from typing import Any
 from psok.mcp import guidance
 from psok.mcp.client import MCPConnection, MCPConnectionError, OAuthRequired
 from psok.mcp.config import ServerConfig, load_servers
-from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
+from psok.mcp.risk import classify
+from psok.tools.base import Tool, ToolContext, ToolResult, ToolSource
 from psok.tools.registry import ToolRegistry, mcp_tool_key
 
 log = logging.getLogger(__name__)
@@ -228,9 +229,15 @@ class MCPManager:
                     description=self._describe(config, discovered.description),
                     parameters=discovered.input_schema,
                     handler=self._make_handler(config.name, discovered.name),
-                    # PSOK cannot inspect what an external server actually does, so
-                    # its tools never sit at the lowest risk tier.
-                    risk=RiskLevel.MEDIUM,
+                    # From the server's own `annotations`, falling back to what
+                    # the name says -- see `psok/mcp/risk.py`. This was a flat
+                    # `MEDIUM` until 2026-08-29, on the reasoning that PSOK
+                    # cannot inspect somebody else's server. It can: MCP tools
+                    # carry `readOnlyHint` and `destructiveHint`, and discovery
+                    # was throwing the field away. The cost of not reading it
+                    # was a confirmation prompt on every search and every list,
+                    # which is how a permission gate stops being read.
+                    risk=classify(discovered.name, discovered.annotations),
                     source=ToolSource.MCP,
                     server_name=config.name,
                 )

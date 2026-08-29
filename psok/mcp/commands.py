@@ -533,6 +533,38 @@ def _accounts_of(config: ServerConfig) -> list[Path]:
     return [path for path in found if _json_key_present(path, entry.account_key)]
 
 
+def account_count(config: ServerConfig) -> int:
+    """How many accounts this connector's own store holds.
+
+    Only where the files *are* accounts. LinkedIn keeps a browser profile
+    directory, so counting its files reported six LinkedIn accounts on a machine
+    with one -- and the row then offered to settle which of them a single
+    sign-in was using. `account_from_filename` is the catalogue's existing
+    answer to "does a filename here name a person", and this reads the same
+    field the labels do so the two cannot disagree about one directory.
+    """
+    entry = entry_for(config)
+    if entry is not None and not entry.account_from_filename:
+        return 1 if is_signed_in(config) else 0
+    return len(_accounts_of(config))
+
+
+def grant_age_days(config: ServerConfig) -> int | None:
+    """How long ago this connector's newest account was signed in.
+
+    Read from the credential file's own mtime rather than from anything PSOK
+    stores: the file is written by the server when a sign-in completes and
+    rewritten on every token refresh it manages, so it is the only record of
+    when the account was last actually established. None where the connector
+    keeps no account files -- which is most of them.
+    """
+    accounts = _accounts_of(config)
+    if not accounts:
+        return None
+    newest = max(path.stat().st_mtime for path in accounts)
+    return max(0, int((time.time() - newest) // 86400))
+
+
 def _json_key_present(path: Path, key: str) -> bool:
     try:
         return bool(json.loads(path.read_text()).get(key))
@@ -1227,6 +1259,23 @@ def status(*, with_accounts: bool = False) -> list[dict]:
                 # the credential that is not editable once it is working.
                 "client_secret_env": entry.client_secret_env if entry else None,
                 "shares_account_with": shares_account_with(name),
+                # How old the sign-in is, and how long this provider lets one
+                # live. Google's is seven days while its OAuth app is in
+                # Testing, and a connector that silently stops working every
+                # week is the single most reported "OAuth is unstable" -- so the
+                # row carries enough to say so before a tool call finds out.
+                "grant_age_days": grant_age_days(config),
+                "grant_lifetime_days": entry.grant_lifetime_days if entry else None,
+                # More than one account in a store a server reads in single-user
+                # mode is a genuine ambiguity: PSOK cannot tell which one the
+                # server picked, and neither can the user unless it is said.
+                #
+                # Only where the files *are* accounts. LinkedIn's store is a
+                # browser profile directory, so counting its files reported six
+                # LinkedIn accounts on a machine with one -- the same mistake
+                # `account_from_filename` exists to stop the interface making
+                # when it prints a filename as an address.
+                "accounts": account_count(config),
                 "account": account(name) if with_accounts and signed_in else None,
                 # Kept for older callers; `signed_in` is the one to read.
                 "authorized": signed_in,

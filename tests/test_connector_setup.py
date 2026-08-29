@@ -413,3 +413,106 @@ async def test_a_first_sync_that_cannot_run_yet_is_not_a_failure(psok_home, monk
     monkeypatch.setattr(api, "_manager_with", lambda name: _noop())
 
     await api._first_sync("microsoft-todo")  # must not raise
+
+
+# ------------------------------------------------- a sign-in with a shelf life
+
+
+def test_a_grant_about_to_lapse_is_announced_before_it_does():
+    """Google expires a test user's consent seven days after it is given. The
+    grant, not the token -- so the refresh token stops working too and the
+    connector goes from working to signed-out with nothing in between, which is
+    most of what "the OAuth is unstable" means on this machine.
+
+    Nothing on this side can extend it while publishing is blocked, so the row
+    says how long is left and offers the one action that helps.
+
+    Mutation check: return None unconditionally from `_ageing_grant`.
+    """
+    from psok.mcp.lifecycle import state_of
+
+    def row(age):
+        return {
+            "name": "google-gmail",
+            "enabled": True,
+            "signed_in": True,
+            "grant_age_days": age,
+            "grant_lifetime_days": 7,
+        }
+
+    live = {"connected": True, "tools": 15}
+
+    fresh = state_of(row(1), live=live)
+    assert fresh.state == "ready" and fresh.action is None, "silent for most of its life"
+
+    warned = state_of(row(6), live=live)
+    assert warned.ready is True, "still usable: this is a warning, not a failure"
+    assert warned.action == "sign_in"
+    assert "expires in 1 day" in warned.detail
+
+    lapsed = state_of(row(9), live=live)
+    assert "probably lapsed" in lapsed.detail
+    assert lapsed.action == "sign_in"
+
+    unlimited = state_of(
+        {"name": "github", "enabled": True, "signed_in": True, "grant_age_days": 400},
+        live=live,
+    )
+    assert unlimited.action is None, "a connector with no declared lifetime never warns"
+
+
+def test_two_accounts_in_a_single_user_store_are_reported():
+    """`MCP_SINGLE_USER_MODE` means the server picks one of the accounts in its
+    credentials directory and PSOK cannot tell which. Two Google accounts were
+    sitting in that directory on the machine this was written on, and every
+    tool call was answering for whichever one the server chose.
+
+    Mutation check: drop the `accounts > 1` branch from `state_of`.
+    """
+    from psok.mcp.lifecycle import state_of
+
+    state = state_of(
+        {"name": "google-gmail", "enabled": True, "signed_in": True, "accounts": 2},
+        live={"connected": True, "tools": 15},
+    )
+    assert state.ready is True
+    assert "2 accounts" in state.detail
+    assert state.action == "sign_in"
+
+
+def test_a_browser_profile_is_not_six_accounts(psok_home, tmp_path, monkeypatch):
+    """LinkedIn's credential store is a browser profile directory, so counting
+    its files reported six LinkedIn accounts on a machine with one -- and the
+    row then offered to "settle which one" a single sign-in was using.
+
+    `account_from_filename` is the catalogue's existing answer to "does a
+    filename here name a person", and the count reads the same field the labels
+    do, so the two cannot disagree about one directory.
+
+    Mutation check: count `_accounts_of` unconditionally in `account_count`.
+    """
+    from psok.mcp import catalogue as cat
+    from psok.mcp import commands
+    from psok.mcp.config import ServerConfig, Transport
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    for name in ("Cookies", "History", "Preferences", "Local State", "a@b.com", "Cache"):
+        (profile / name).write_text("x")
+
+    linkedin = cat.get("linkedin")
+    assert linkedin is not None and linkedin.account_from_filename is False
+    monkeypatch.setattr(commands, "_credentials_dir", lambda config: profile)
+
+    config = ServerConfig(
+        name="linkedin", transport=Transport.STDIO, command="x", catalogue_id="linkedin"
+    )
+    assert commands.account_count(config) == 1, "one profile is one account, not six files"
+
+    # Google names its credential files by address, so there each file is a
+    # person and two of them really is an ambiguity worth reporting.
+    google = ServerConfig(
+        name="google-gmail", transport=Transport.STDIO, command="x", catalogue_id="google-gmail"
+    )
+    monkeypatch.setattr(commands, "_accounts_of", lambda config: [profile, profile])
+    assert commands.account_count(google) == 2

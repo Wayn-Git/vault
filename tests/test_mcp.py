@@ -154,31 +154,92 @@ def test_composite_keys_disambiguate_servers():
 
 
 class _FakeConnection:
-    def __init__(self, tools):
+    def __init__(self, tools, annotations=None):
         from psok.mcp.client import CircuitBreaker, DiscoveredTool
 
+        annotations = annotations or {}
         self.tools = [
-            DiscoveredTool(name=n, description=f"does {n}", input_schema={"type": "object"})
+            DiscoveredTool(
+                name=n,
+                description=f"does {n}",
+                input_schema={"type": "object"},
+                annotations=annotations.get(n, {}),
+            )
             for n in tools
         ]
         self.breaker = CircuitBreaker()
         self.connected = True
 
 
-def test_registered_mcp_tools_are_never_low_risk(psok_home):
-    """PSOK cannot inspect what an external server does, so it does not assume safety."""
+def test_a_tools_risk_comes_from_what_the_server_says_about_it(psok_home):
+    """Every MCP tool was `MEDIUM` until 2026-08-29, on the reasoning that PSOK
+    cannot inspect somebody else's server. It can: MCP carries `readOnlyHint`
+    and `destructiveHint` on every tool, and discovery was discarding the field.
+
+    The cost was a confirmation prompt on every search and every list across
+    thirteen connectors, which is how a permission gate stops being read.
+
+    Mutation check: put `risk=RiskLevel.MEDIUM` back in `_register_tools`.
+    """
     registry = ToolRegistry(ConfirmationService(auto_approve))
     manager = MCPManager(registry)
     config = ServerConfig(name="notes", transport=Transport.STDIO, command="x")
 
-    count = manager._register_tools(config, _FakeConnection(["search", "write"]))
-    assert count == 2
+    count = manager._register_tools(
+        config,
+        _FakeConnection(
+            ["read_note", "write_note", "wipe_notes"],
+            annotations={
+                "read_note": {"readOnlyHint": True},
+                "wipe_notes": {"destructiveHint": True},
+            },
+        ),
+    )
+    assert count == 3
 
-    tool = registry.get("search__mcp__notes")
-    assert tool is not None
-    assert tool.risk is not RiskLevel.LOW
-    assert tool.source is ToolSource.MCP
-    assert tool.server_name == "notes"
+    def risk(name):
+        tool = registry.get(f"{name}__mcp__notes")
+        assert tool is not None
+        assert tool.source is ToolSource.MCP and tool.server_name == "notes"
+        return tool.risk
+
+    assert risk("read_note") is RiskLevel.LOW, "declared read-only runs without asking"
+    assert risk("wipe_notes") is RiskLevel.HIGH
+    assert risk("write_note") is RiskLevel.MEDIUM, "undeclared and unrecognised stays as it was"
+
+
+def test_a_server_that_annotates_nothing_is_read_by_its_verbs(psok_home):
+    """Most servers annotate nothing at all -- of the four this machine runs,
+    the useful hints came from names. `search_gmail_messages` reading silently
+    while `send_gmail_message` still asks is the whole point of the change.
+
+    Mutation check: return `MEDIUM` from `_from_name`.
+    """
+    from psok.mcp.risk import classify
+
+    assert classify("search_gmail_messages") is RiskLevel.LOW
+    assert classify("list_tasks") is RiskLevel.LOW
+    assert classify("send_gmail_message") is RiskLevel.MEDIUM
+    assert classify("delete_task_list") is RiskLevel.HIGH
+    assert classify("blocklist_add") is RiskLevel.MEDIUM, "a prefix, not a substring"
+
+
+def test_a_name_may_raise_a_servers_claim_but_never_lower_it(psok_home):
+    """A server calling `delete_everything` read-only is wrong or lying, and
+    neither is a reason to run it silently. The reverse does not apply: a server
+    that declares destructive keeps that rating whatever the tool is called.
+
+    Mutation check: return `declared` unconditionally from `classify`.
+    """
+    from psok.mcp.risk import classify
+
+    assert classify("delete_everything", {"readOnlyHint": True}) is RiskLevel.HIGH
+    assert classify("get_status", {"destructiveHint": True}) is RiskLevel.HIGH
+    # snake_case is what the Python SDK hands back; camelCase is the wire.
+    assert classify("anything", {"read_only_hint": True}) is RiskLevel.LOW
+    assert classify("anything", {"title": "Anything"}) is RiskLevel.MEDIUM, (
+        "annotating a title is not a claim about what the call costs"
+    )
 
 
 def test_unregister_removes_only_that_servers_tools(psok_home):

@@ -462,6 +462,21 @@ const ROW_ACTIONS = {
   credentials: null,
 }
 
+/* The button a row offers, from the state the server computed.
+
+   `sign_in` means two different things depending on whether the connector is
+   working: on a connector with no account it is "Connect", and on a working one
+   whose grant is about to lapse -- a Google sign-in is good for seven days
+   while its OAuth app is in Testing -- it is "Sign in again", which starts a
+   fresh flow rather than reconnecting a process that is already up. */
+function rowAction(lifecycle) {
+  if (!lifecycle) return undefined
+  if (lifecycle.ready && lifecycle.action === 'sign_in') {
+    return { act: 'login', label: 'Sign in again' }
+  }
+  return ROW_ACTIONS[lifecycle.action]
+}
+
 /* A configured connector in the list: what it is, and how it is doing. */
 function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   const blocked = (server.missing_credentials || []).length > 0
@@ -469,7 +484,15 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   // the tool count: a running process whose account is missing was reporting
   // "122 tools live" for tools that would every one of them have failed.
   const state = reason ?? `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`
-  const tone = reason ? (live?.error ? 'error' : 'off') : 'live'
+  // A working connector can still have something to say -- a sign-in a day from
+  // lapsing, two accounts in a single-user store -- and it is not "off" for it.
+  // Colouring the row by the sentence rather than by the state made a warning
+  // read as a failure.
+  const tone = server.lifecycle?.ready
+    ? 'live'
+    : reason
+      ? (live?.error ? 'error' : 'off')
+      : 'live'
   // The server's own sentence for this state. Shown on hover rather than in the
   // row, which has no width for it — the row says *that* something is needed,
   // and the card you open says what and offers the button.
@@ -485,18 +508,18 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
         </span>
       </span>
       <span className={`conn-status conn-status--${tone}`}>{state}</span>
-      {ROW_ACTIONS[server.lifecycle?.action] !== undefined
-        ? ROW_ACTIONS[server.lifecycle.action] && (
+      {rowAction(server.lifecycle) !== undefined
+        ? rowAction(server.lifecycle) && (
           <span
             role="button"
             tabIndex={0}
             className="btn btn--small btn--primary"
-            onClick={(e) => { e.stopPropagation(); onAct(ROW_ACTIONS[server.lifecycle.action].act) }}
+            onClick={(e) => { e.stopPropagation(); onAct(rowAction(server.lifecycle).act) }}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') { e.stopPropagation(); onAct(ROW_ACTIONS[server.lifecycle.action].act) }
+              if (e.key === 'Enter') { e.stopPropagation(); onAct(rowAction(server.lifecycle).act) }
             }}
           >
-            {busy ? 'Working…' : ROW_ACTIONS[server.lifecycle.action].label}
+            {busy ? 'Working…' : rowAction(server.lifecycle).label}
           </span>
         )
         : server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
@@ -732,6 +755,24 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
 
   useEffect(() => { refresh() }, [refresh])
 
+  /* The cheap half of `refresh`, for the ticker below to call twice a minute
+     without re-fetching the catalogue and all 178 tool schemas -- 47KB of JSON
+     that changes when a connector is added, not while one is running. These two
+     are 116ms and 27ms, and they carry everything that moves: `lifecycle`, the
+     tool count, whether the process is up and who is signed in. */
+  const refreshServers = useCallback(async () => {
+    try {
+      const [srv, capabilities] = await Promise.all([api.mcpServers(true), api.capabilities()])
+      setServers(srv)
+      setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+      ])))
+    } catch {
+      /* A failed poll is not worth a toast: the next one is three seconds away,
+         and a backend that is down already says so in the header. */
+    }
+  }, [])
+
   /* `login` returns as soon as the flow starts, because a sign-in takes as long
      as the person takes. This poll is how the outcome arrives: an entry stays
      `waiting` while they are with the provider, then turns `done`, `failed`,
@@ -748,6 +789,11 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
+      // A connector can die, finish starting, or lose its account between
+      // renders, and until 2026-08-29 nothing asked -- the page only refetched
+      // when a sign-in changed state, so a row could say "ready" over a dead
+      // process until someone reloaded. This is what makes the screen current.
+      if (!cancelled) refreshServers()
       let rows
       try { rows = await api.mcpAuthorizations() } catch { return }
       if (cancelled) return
@@ -768,9 +814,24 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
         refreshHealth()
       }
     }
-    const timer = setInterval(tick, 3000)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [refresh, refreshHealth])
+    // Only while the page is actually being looked at. A hidden tab polling an
+    // API that can run shell commands, every three seconds, for as long as the
+    // browser is open, is a cost with no reader.
+    let timer = null
+    const start = () => { if (timer === null) timer = setInterval(tick, 3000) }
+    const stop = () => { if (timer !== null) { clearInterval(timer); timer = null } }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stop()
+      else { tick(); start() }
+    }
+    onVisibility()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      cancelled = true
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [refresh, refreshHealth, refreshServers])
 
   /* Start a sign-in again after one failed, expired, or was cancelled. The
      backend supersedes the dead attempt rather than refusing as "already in
@@ -1018,6 +1079,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
                 busy={busy[server.name]}
                 onOpen={() => setOpen(server.name)}
                 onAct={(action, options) => act(server, action, options)}
+                reason={server.lifecycle?.action ? server.lifecycle.detail : undefined}
               />
             ))}
           </div>

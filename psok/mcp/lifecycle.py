@@ -130,7 +130,58 @@ def state_of(
         )
 
     tools = live.get("tools") or 0
-    return ConnectorState("ready", f"Ready, {tools} tool{'' if tools == 1 else 's'}.", ready=True)
+    detail = f"Ready, {tools} tool{'' if tools == 1 else 's'}."
+
+    # Ready, but on a sign-in with a known shelf life. Google expires a test
+    # user's consent seven days after it is given -- the grant, not the token,
+    # so refreshing does not save it -- and the connector goes from working to
+    # signed-out with nothing in between. Saying so here is the difference
+    # between a weekly outage and a weekly chore.
+    ageing = _ageing_grant(row)
+    if ageing:
+        return ConnectorState("ready", f"{detail} {ageing}", action="sign_in", ready=True)
+
+    # Two accounts in a store the server reads in single-user mode: it picks
+    # one, PSOK cannot tell which, and the tools answer for whichever it was.
+    accounts = row.get("accounts") or 0
+    if accounts > 1:
+        return ConnectorState(
+            "ready",
+            f"{detail} {accounts} accounts are signed in and the server uses one of them"
+            " — sign out and back in to settle which.",
+            action="sign_in",
+            ready=True,
+        )
+
+    return ConnectorState("ready", detail, ready=True)
+
+
+#: How close to the end of a grant's life is worth mentioning.
+WARN_WITHIN_DAYS = 2
+
+
+def _ageing_grant(row: dict[str, Any]) -> str | None:
+    """A sentence about a sign-in that is about to lapse, or None.
+
+    Silent for most of the grant's life on purpose: a warning that is always on
+    is furniture, and this one is meant to be read on the day it appears.
+    """
+    lifetime = row.get("grant_lifetime_days")
+    age = row.get("grant_age_days")
+    if not lifetime or age is None:
+        return None
+    left = lifetime - age
+    if left > WARN_WITHIN_DAYS:
+        return None
+    if left <= 0:
+        return (
+            f"Its sign-in is {age} days old and this account's consent lasts {lifetime}"
+            " — it has probably lapsed. Sign in again."
+        )
+    return (
+        f"Its sign-in expires in {left} day{'' if left == 1 else 's'}"
+        f" — this account's consent lasts {lifetime}. Renew it before it lapses."
+    )
 
 
 def _join(items: list[str]) -> str:

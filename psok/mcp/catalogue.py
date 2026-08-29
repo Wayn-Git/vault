@@ -97,6 +97,16 @@ class CatalogueEntry:
     # where one cheap unauthenticated-shaped GET answers it.
     identity_url: str | None = None
     identity_field: str | None = None
+    # How long this connector's sign-in lasts before the provider revokes it,
+    # in days, where that is a known fixed figure rather than "until something
+    # goes wrong". Only Google has one here, and only because its OAuth app is
+    # in Testing: Google expires a test user's consent seven days after it is
+    # given, whatever the refresh token says. Publishing to production removes
+    # the cap and needs Branding fields that need a verified domain, so until a
+    # domain exists this is a fact of life to be announced rather than a bug to
+    # be fixed -- see docs/handover.md. A connector that says nothing here
+    # is one whose sign-in lasts until it does not.
+    grant_lifetime_days: int | None = None
 
     def to_server_config(self, name: str | None = None) -> ServerConfig:
         return ServerConfig(
@@ -144,13 +154,30 @@ GOOGLE_APPS: list[tuple[str, str, str, str]] = [
     ("chat", "Google Chat", "Communication", "Read spaces and send messages."),
 ]
 
+#: How long a Google sign-in survives while the OAuth app is in Testing.
+#:
+#: Google expires a test user's consent seven days after it is given -- not the
+#: access token, the *grant*, so the refresh token stops working too and the
+#: connector goes from working to signed-out with nothing in between. It is not
+#: a PSOK bug and there is no fix from this side while publishing is blocked
+#: (see docs/handover.md), so the connector says how old its sign-in is and
+#: offers to renew it before a tool call discovers the problem.
+GOOGLE_TESTING_GRANT_DAYS = 7
+
 GOOGLE_SETUP_HINT = (
     "Google requires your own OAuth client rather than a shared one. You only do\n"
     "this once — every Google app then shares it.\n"
     "  1. console.cloud.google.com -> APIs & Services -> enable the APIs you want\n"
-    "     (Gmail API, Calendar API, Drive API, …)\n"
-    "  2. OAuth consent screen -> External -> add yourself as a test user\n"
-    "  3. Credentials -> Create OAuth client ID -> *Web application*\n"
+    "     (Gmail API, Calendar API, Drive API, …), then Google Auth Platform ->\n"
+    "     Data Access -> add the matching scopes\n"
+    "  2. Google Auth Platform -> Audience -> External -> add yourself as a\n"
+    "     test user. Publishing to production would end the seven-day sign-in\n"
+    "     expiry a Testing app has, but the console refuses to publish until\n"
+    "     Branding carries a home page, privacy policy and terms URL, and each\n"
+    "     has to sit on a domain verified in Search Console — a *.vercel.app or\n"
+    "     *.github.io subdomain cannot be. So: test user, and expect to sign in\n"
+    "     again every seven days.\n"
+    "  3. Clients -> Create OAuth client -> *Web application*\n"
     "     Authorised redirect URI: http://localhost:8765/oauth2callback\n"
     "     (this exact URI — it is the server's own callback, not PSOK's)\n"
     "  4. Paste the client id and secret below, then press Connect."
@@ -222,6 +249,7 @@ def _google_apps() -> list[CatalogueEntry]:
                 auth_tool="start_google_auth",
                 credentials_path="~/.google_workspace_mcp/credentials",
                 shares_account_with="google",
+                grant_lifetime_days=GOOGLE_TESTING_GRANT_DAYS,
             )
         )
     return entries
@@ -250,6 +278,7 @@ def _google_merged() -> CatalogueEntry:
         auth_tool="start_google_auth",
         credentials_path="~/.google_workspace_mcp/credentials",
         shares_account_with="google",
+        grant_lifetime_days=GOOGLE_TESTING_GRANT_DAYS,
     )
 
 

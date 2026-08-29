@@ -10,7 +10,7 @@ only acts when told to.
 Five entries, each `uvx workspace-mcp --single-user --tools <one service>`,
 over one Google account. They share one OAuth client, one credentials directory
 and one callback port, and that sharing is what produced two of the traps in
-NEXT-SESSION.md:
+handover.md:
 
 * `sign_out` on one deleted `oauth_states.json` — the CSRF store the other four
   were mid-flow against — surfacing as "Invalid or expired OAuth state" and
