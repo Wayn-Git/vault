@@ -127,9 +127,10 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
 
 - [Architecture overview](docs/architecture/overview.md) — the layer model and a worked request
 - [The web interface](docs/interface.md) — how the React app is built, and every keyboard binding
-- [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
+- [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Modes](docs/architecture/modes.md) · [Tasks](docs/architecture/tasks.md) · [Turns](docs/architecture/turns.md) · [Connectors](docs/architecture/connectors.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
 - [Decision records](docs/architecture/decisions/) — ADRs with the alternatives and what they cost
-- [API contract](docs/NEXT-SESSION.md) — the 36 endpoints the interface is built against
+- [Handover](docs/handover.md) — the current state of the system and the API contract it is built against
+- [Ideas](docs/roadmap/ideas.md) — what is wanted next, and what each would actually cost
 
 ---
 

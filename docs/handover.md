@@ -40,6 +40,43 @@ create/pause/delete, audit trail, conversation delete.
   which is GitHub's). Fixed: `workspace-mcp` was killed when browser opened (port held by
   nothing); redirect-uri must be registered on Google Cloud client; `WORKSPACE_MCP_PORT_FALLBACK_COUNT: "0"`
   makes port-walk fail loudly (backfilled in `_fill_catalogue_env`).
+- **The OAuth app is stuck in *Testing*, and publishing is blocked (tried 2026-08-29).** A
+  Testing app's consent expires **seven days** after it is given — the credential file
+  `~/.google_workspace_mcp/credentials/<address>.json`, last written 2026-08-26, was three days
+  from dying. That expiry, not a PSOK bug, is what "Google signed itself out again" is.
+  Publishing to production would end it, but **Publish app refuses**, verbatim: *"Your app's
+  OAuth configuration is incomplete. You must enter the missing information to proceed. Please
+  visit the Branding page to finish configuring your app."* Google's own help pages describe
+  the home page / privacy policy / terms fields as *verification* requirements and the console
+  marks none of them with a required asterisk — the console enforces them at publish anyway,
+  which is worth knowing before anyone re-reads the docs and concludes otherwise. The fields
+  cannot simply be filled: each URL must sit on an **Authorized domain**, which needs Search
+  Console ownership, and `*.vercel.app` and `*.github.io` are public suffixes that cannot be
+  verified. Unblocking this starts with buying a domain. Until then: test-user sign-in, renewed
+  weekly.
+- **Groq is the default provider (2026-08-29)**, `openai/gpt-oss-120b`, with NVIDIA behind it
+  in the chain. `/api/health` now lists providers in **providers.yaml order** rather than
+  alphabetically — the interface takes the first entry as the house default, so sorting made
+  that an accident of spelling. Two things found by running it: Groq **refuses more than 128
+  tool schemas** (`400 'tools' : maximum number of items is 128`), now declared as `max_tools`
+  and trimmed by the director with one warning naming what was withheld; and Groq's free tier is
+  **8,000 tokens per minute**, which 178 tool schemas (11,582 tokens) exceed on their own — so a
+  turn falls back to NVIDIA until connectors are switched off. Measured cost per connector:
+  github 3,007 · chrome-devtools 1,771 · linkedin 1,456 · gmail 1,449 · playwright 1,206 ·
+  builtins 983 · to-do 952 · calendar 654 · fetch 104.
+- **Only Gmail scopes were ever granted.** The credential file lists `openid`,
+  `userinfo.email/profile` and six `gmail.*` — no Calendar, Drive, Docs or Sheets, while
+  `GOOGLE_MERGED_TOOLS` names five services. A merged connector would register tools for four
+  services the token cannot call. Add the scopes under Data Access before re-consenting.
+- **`google-docs`, `google-drive`, `google-sheets` removed 2026-08-29** — all three were
+  `failed / not running` and the grant has no scopes for them. `psok mcp remove` only clears
+  PSOK's own keychain entry, so the shared `~/.google_workspace_mcp/credentials` was untouched
+  and Gmail stayed signed in. `merge-google --apply` was **not** run: its dry run merges all five
+  services into one process, which would register drive/docs/sheets tools that 403 on first call.
+- **The second Google account was signed out 2026-08-29.** Two addresses sat in the shared
+  credentials directory and `MCP_SINGLE_USER_MODE` picks one, which nothing could report — the
+  connector row now says when a store holds more than one. `ejramwayne@gmail.com.json` was moved
+  to `~/.psok/signed-out-accounts/` rather than deleted.
 - **Vercel, MS To Do, LinkedIn, Spotify** added + started before shipping. Vercel accepts
   dynamic registration (201) — nothing to register by hand. To Do returns device code. LinkedIn
   19 tools, Spotify 22 (needs a Spotify dev app).
@@ -105,7 +142,7 @@ live-verified 2026-08-27**; phases 3 (providers and fallback), 4
 Order is payoff order; each phase is independently shippable and has its own
 verification. Do not start the next until the current one's checks pass.
 
-Context and measurements: [AUDIT-2026-08-27.md](AUDIT-2026-08-27.md),
+Context and measurements: [audit-2026-08-27.md](audit-2026-08-27.md),
 [architecture/tasks.md](architecture/tasks.md),
 [architecture/turns.md](architecture/turns.md),
 [architecture/providers.md](architecture/providers.md),
@@ -276,15 +313,22 @@ bug and neither has a fix from this side:
   surface is alive and has no such field either; and every MAPI
   extended-property probe came back empty. Four independent routes, all closed.
 
-  **Fixed by changing the carrier, 2026-08-28.** `categories` round-trips —
-  readable on the pull, writable on create and update — so the sun toggle writes
-  a `My Day` tag and the pull reads it back. Proven both ways against the real
-  account: sun on → `categories: ['My Day']` in To Do read straight back from
-  Graph; tagged in To Do → `my_day_on` set on the next sync; removal follows in
-  both directions. The push **merges** rather than replaces, because Graph's
-  write is all-or-nothing and would otherwise delete the user's other tags, and
-  a pull will not clear My Day off a row whose push has not landed. It is a tag
-  beside To Do's My Day, not the same list — the page says exactly that.
+  **The category was tried and removed. My Day is a list now (2026-08-29).**
+  `categories` round-trips, so the sun wrote a `My Day` tag — and it still did
+  not work, for a reason only the live account showed: today's tasks are added
+  through **To Do's own My Day**, the overlay at the top of its sidebar, and
+  those carry no tag, no hashtag and no list. Measured 2026-08-29: the two tasks
+  ever put in the user's own My Day *list* synced correctly; the six added that
+  morning through the built-in My Day came back filed in `Tasks`. So My Day is
+  now one ordinary list — named in `MY_DAY_LIST_NAMES`, matched past a leading
+  emoji — and the bucket is `list_id = :my_day_list`. `my_day_on`, the category
+  and the `#myday` hashtag are all gone; the column is dropped by a migration.
+  The sun **moves** the task, and Graph has no move, so that is a create in the
+  target plus a delete from the source: the task gets a new id, loses its
+  checklist, and the local row does not move at all if either half fails. The
+  cost is stated on the page: a task in My Day has left the list it came from,
+  and tasks added to To Do's *own* My Day remain unreachable — nothing can fix
+  that from here.
 - **`list_task_lists` returns 3 lists where the To Do app shows 4.** "Getting
   started" (7 tasks) is not returned, with `hasMore: false` and
   `maxResults: 100`. Likely a client-side onboarding list not backed by Graph.
@@ -297,10 +341,63 @@ from a complete one — and `_retire_missing` cancels every task a pull did not
 see. It now raises `TruncatedListing` and skips retirement rather than
 cancelling real tasks.
 
+## What changed 2026-08-29
+
+Seven complaints, all measured before being acted on:
+
+1. **My Day is a list.** See the limitations note above and
+   [architecture/tasks.md](architecture/tasks.md).
+2. **133 conversations deleted**, keeping the newest hand-typed one. Backup at
+   `~/.psok/psok.db.backup-before-conv-purge-*`.
+3. **Read-only connector tools stopped asking permission** — 85 of 178 tools now run silently.
+4. **The screen keeps up**: health polls every 8s (was 20s), and the Connectors page refetches
+   `/api/mcp/servers` on its existing 3s ticker while the tab is visible, so a connector that dies
+   is reported without a reload. It stops polling on a hidden tab.
+5. **Sync every 90 seconds** (was 900), lists pulled **concurrently**, and the Tasks page asks for
+   one when it opens.
+6. **Groq is the default model**, with the tool cap and quota findings above.
+7. **A Mail view** (`⌘3`), reading Gmail directly.
+
+8. **Three model tiers and a reasoning mode** (2026-08-29, later the same day). `providers.yaml`
+   gained a `tiers:` block — `fast` groq/gpt-oss-20b (0.50s), `default` groq/gpt-oss-120b
+   (0.60s), `heavy` nvidia/deepseek-v4-pro (112.6s). A tier answers "how hard is this work";
+   the fallback chain answers "who else, when this one is down", and conflating them would make
+   a quota trip look like a decision. `reasoning` joins `chat` and `plan` as a mode and starts
+   on `heavy`. The fast model can hand a job over with an **`escalate` tool** — offered, never
+   registered, answered by the director, exactly like `submit_plan` — which ends the turn with
+   an `escalation` frame the user answers. Not a classifier (a round trip on every message) and
+   not a heuristic (guesses silently): the model is the only party that knows it is out of its
+   depth. Withheld when no `heavy` tier resolves, and never twice in a row.
+9. **`convert_file`** — images, audio, video, documents and PDF, through ffmpeg, ImageMagick,
+   LibreOffice, ghostscript and pandoc, all on this machine. Not ConvertAPI (it uploads personal
+   documents, against ADR-0013) and not VERT (a Svelte app running those same three engines in
+   WebAssembly, so a browser and a wasm layer to reach binaries on `PATH`). Verified on real
+   files: png→jpg, wav→mp3, docx→pdf, pdf→png, each checked with `file` afterwards.
+10. **The system prompt stopped asking for demonstrations.** "Can you make tool calls?" took
+    **55s, 6 steps and 5 tool calls** — it listed the repo, read two SKILL.md files and shelled
+    out to `date` while the date sat in the `<environment>` block it had been handed.
+    `BASE_PROMPT` said "prefer acting" with nothing on the other side of the scale; it now says
+    to match the work to the question, and that `<environment>` is authoritative.
+
+Plus, found by running it: `google-docs/drive/sheets` removed, the second Google account signed
+out, a sign-in with a known shelf life now says how long it has left, and Groq's `reasoning` field
+(as opposed to NVIDIA's `reasoning_content`) is read rather than dropped.
+
+**The lever nobody has pulled:** 178 tools cost 11,582 tokens of schema on *every* round trip, and
+Groq's free tier is 8,000 tokens a minute — so the fast provider cannot be used until the tool
+surface shrinks. `github` (3,007) + `chrome-devtools` (1,771) + `linkedin` (1,456) +
+`playwright` (1,206) is 7,440 of it. Switching those off leaves 62 tools at 4,142 tokens, which
+fits, and gives the model a surface it can actually choose from. Nothing in code decides this: it
+is four switches in Skills & connectors.
+
 ## Next steps (roughly in payoff order)
 
-0. **Finish Google sign-in** — human half only (press Connect, approve). Preflight passes, URL
-   published with TTL, `8765` held.
+0. **Google sign-in expires weekly and there is no cheap fix.** Publishing is blocked (see
+   Environment facts); a domain, three hosted pages and a Search Console verification are the
+   price of ending it. Meanwhile the grant has to be renewed roughly every seven days: sign out
+   of the Google connector, sign in again. Add the Calendar/Drive/Docs/Sheets scopes under Data
+   Access first if those connectors are wanted — only Gmail was ever granted. Preflight passes,
+   URL published with TTL, `8765` held.
 1. **`nvidia/nemotron-3-ultra-550b-a55b` is dead** — listed by `/v1/models` but 404s with an
    empty body on `chat/completions`, while `nemotron-3-super-120b-a12b` and
    `nemotron-3-nano-30b-a3b` answer fine. Default switched and 130 conversations repointed
@@ -343,7 +440,7 @@ Deliberately not wildcard (API runs shell). Verified live.
 | Delete all | `DELETE /api/conversations` (409 if any turn runs) |
 | History | `GET /api/conversations/{id}/messages` |
 | Pin / list pins | `POST /api/conversations/{id}/messages/{message_id}/pin`, `GET /api/conversations/{id}/pins` |
-| Streamed turn | `POST /api/conversations/{id}/turn` `{message, workspace?, mode?}` → SSE (mode `chat`\|`plan`, 400 otherwise) |
+| Streamed turn | `POST /api/conversations/{id}/turn` `{message, workspace?, mode?}` → SSE (mode `chat`\|`plan`\|`reasoning`, 400 otherwise) |
 | Stop turn | `POST /api/conversations/{id}/turn/stop` |
 | Pending confirmations | `GET /api/confirmations` |
 | Approve/deny | `POST /api/confirmations/{request_id}` |
@@ -361,6 +458,11 @@ Deliberately not wildcard (API runs shell). Verified live.
 | Every tool | `GET /api/tools` |
 | File as path | `POST /api/attachments` |
 | Tasks / calendar | `GET /api/tasks`, `GET /api/calendar` |
+| Who mail reads as | `GET /api/mail/account` (never raises: answers `address: null` when nobody is signed in) |
+| Mail list / one thread | `GET /api/mail/threads?q=&limit=`, `GET /api/mail/threads/{id}` (409 when signed out) |
+| Reply in thread | `POST /api/mail/threads/{id}/reply` `{body}` |
+| Label / archive a message | `POST /api/mail/messages/{id}/labels` `{add, remove}` — archiving is removing `INBOX` |
+| Gmail labels | `GET /api/mail/labels` |
 | Add/change/cancel task | `POST /api/tasks`, `PATCH,DELETE /api/tasks/{id}` (writes to MS To Do when connected) |
 | Abandon sign-in | `DELETE /api/mcp/servers/{name}/login` |
 | Pull To Do now | `POST /api/tasks/sync` |
@@ -399,6 +501,10 @@ Frames (`data: {json}`):
 - `status {state, tool?, server?}` — named state, closed set (`retrieving`/`recalling`/`thinking`/
   `planning`/`generating`/`tool`/`connector`/`retrying`/`switching`/`completed`/`cancelled`/`failed`)
 - `plan {summary, steps[]}` — plan mode's answer; render with Approve / Discard, nothing has run
+- `escalation {reason, from_model, to_model}` — the fast model asking for the heavy one. Turn is
+  over and nothing ran: render Escalate / Answer anyway, both of which **re-send the same
+  message**, in `reasoning` mode and `chat` mode respectively. No resume endpoint and no flag —
+  the backend withholds the tool because the transcript records the request.
 - `warning {message}` — stream cut off / turn continuing an empty reply / **provider fell back**
   (*"nvidia was unreachable — answering with groq/llama-3.3-70b instead"*, one line, not terminal)
 - `guard {reason}` — loop limit / user stop
@@ -447,6 +553,15 @@ approving read-only must not approve destructive. Show what's being remembered. 
 
 First use of any MCP server needs a one-time trust confirmation — expect two prompts.
 
+**A connector's tools are no longer all `MEDIUM` (2026-08-29).** They were, on the reasoning that
+PSOK cannot inspect somebody else's server — and with 156 of 178 tools coming from connectors,
+every search and every list raised a prompt, which is how a gate stops being read. It can inspect
+them: MCP carries `readOnlyHint` and `destructiveHint` on every tool and discovery was discarding
+the field. `psok/mcp/risk.py` reads it, falls back to the verb the name starts with for servers
+that annotate nothing, and never *lowers* a declaration — a server calling `delete_everything`
+read-only is wrong or lying. Live result on this machine: **85 low, 59 medium, 34 high** where it
+had been 156 medium.
+
 ## Interface behavior
 
 1. **Conversations** — create/list/rename (`F2`/`⋯`)/delete (2-click confirm)/filter/switch (`⌘↑↓`);
@@ -472,7 +587,9 @@ First use of any MCP server needs a one-time trust confirmation — expect two p
 7. **Audit/permissions/memory** — trail w/ follow mode; standing approvals w/ revoke
    (Settings→Permissions); facts w/ switch + retire.
 8. **Attachments** — drop/paste/pick (`⌘U`) → `~/.psok/attachments/<id>/<name>`, message carries path.
-9. **Plan mode** — composer toggle sending `mode: "plan"`. Mutating tools are **withheld by the
+9. **Modes: chat / plan / reasoning** — a three-way composer toggle, not a boolean.
+   `reasoning` starts on the `heavy` tier, and is what Escalate on an escalation card sends.
+   **Plan mode** — sending `mode: "plan"`. Mutating tools are **withheld by the
    registry** and refused at dispatch, so a write is impossible rather than discouraged; the
    model hands back `submit_plan` and the UI renders steps with Approve and run / Discard.
    Approval is an ordinary chat turn. The instruction lives on the system prompt, so it is no
@@ -492,16 +609,25 @@ First use of any MCP server needs a one-time trust confirmation — expect two p
     and the push half sends it before the pull, which is what removes the need for a merge
     algorithm. Lists mirrored; names matched past leading emoji (`🛒 Groceries` answers to
     "groceries"). Buckets — My Day / Missed / Important / General — are queries, never stored
-    state. **My Day travels as a `My Day` category** (2026-08-28) — To Do's own is not in its
-    API, so the sun tags the task instead; it shows in To Do and syncs both ways.
+    state, **except My Day, which is a list** (2026-08-29): the To Do list called `My Day`
+    *is* the bucket, the sun moves a task in or out of it, and the rail does not show it
+    twice. To Do's own My Day is still unreachable — anything added there is invisible here.
     See [architecture/tasks.md](architecture/tasks.md).
-13. **Settings→Models** — writes `providers.yaml` rather than describing it. Configured rows carry
+13. **Mail** (`⌘3`, new 2026-08-29) — inbox / unread / starred / sent / all, Gmail search syntax,
+    a thread reader, star, mark read, archive and a plain-text reply. Read **straight from Gmail**,
+    not through the connector: `search_gmail_messages` answers in prose written for a model
+    (`📧 MESSAGES:`, `Message ID:`), and a screen built on that is a regular expression over
+    somebody else's help text. `psok/mail/gmail.py` uses the refresh token the connector already
+    stored, reads that file and never writes it. HTML mail is reduced to text **on the server** —
+    an inbox is the most hostile input this system has, and a view that renders what arrives in it
+    is a different feature with a different threat model. The page says when a message was reduced.
+14. **Settings→Models** — writes `providers.yaml` rather than describing it. Configured rows carry
     `ready` / `needs a key` / `not answering`; the rest of the 13-entry catalogue is one Add each,
     plus a row for any OpenAI-compatible endpoint. Key goes to the keychain and no route hands one
     back. Remove drops the entry and **keeps the key** (`psok secrets delete` is the other decision).
-14. **Settings→Data** — clear convs or facts, each behind 2-click confirm + count first. Tasks,
+15. **Settings→Data** — clear convs or facts, each behind 2-click confirm + count first. Tasks,
     audit, index, creds untouched.
-15. **Pins** — header pin or `⌘P`; strip above transcript. Deliberately inert (not sent to model,
+16. **Pins** — header pin or `⌘P`; strip above transcript. Deliberately inert (not sent to model,
     no recall effect). Column on `messages`; streaming msg can't pin until read back.
 
 ## Deliberately not built
@@ -510,8 +636,11 @@ Projects/artifacts/plugins/voice/"cowork" (nothing backs them; absent > dead row
 composer (no portable Linux w/o compositor; Playwright covers the real case). Extended-thinking
 toggles (absorbed in adapters). Pins-that-mean-something (would be a different feature). Anything
 multi-user (ADR-0001). Automations answering permission prompts (deny + report). Recurring tasks
-(no schema slot; reminders ≠ recurrence). Two-way task sync — **built 2026-08-27**, My Day included **2026-08-28** (`dirty_at`
-push-then-pull avoids merge algo; lists mirrored; vanished tasks stay `cancelled` not deleted).
+(no schema slot; reminders ≠ recurrence). Two-way task sync — **built 2026-08-27**, My Day included **2026-08-28**, My Day rebuilt as a
+list **2026-08-29** (`dirty_at` push-then-pull avoids merge algo; lists mirrored; vanished tasks
+stay `cancelled` not deleted). A `My Day` category and a `#myday` hashtag both existed and were
+**removed**: a task added through To Do's own My Day carries neither, so they named a different
+set of tasks than the phone did.
 Per-step progress events (`step_started`/`step_done`) — they need the executing model to announce
 step boundaries, a second protocol; without one the interface would invent which step it is on.
 Editing a plan in place (Discard is local; change the request and plan again). A classifier that
@@ -519,8 +648,9 @@ picks chat vs plan (a round trip on every message; the toggle is one click).
 Notification delivery guarantees (best-effort `notify-send`). A UI control for the per-conversation
 fallback chain (the column and the PATCH field exist and are tested; nothing sets them from the
 screen yet). Adding or reordering plan steps (titles are editable; adding one the model never
-proposed is writing a plan, not approving one). **My Day round-tripping** — proven
-impossible through this API, see the limitations note above.
+proposed is writing a plan, not approving one). **Reading To Do's own My Day** — proven
+impossible through this API, see the limitations note above; a list called My Day is what works
+instead.
 
 ## Ground rules
 
@@ -534,7 +664,7 @@ impossible through this API, see the limitations note above.
   (keyring leak: a full `pytest` once deleted a real GitHub token). Any new store gets same treatment.
 - **Fuller audit 2026-08-27:** Gmail "Connection closed", turn-latency with numbers, cold automation
   stall, interface needs. Corrects some claims above. See
-  [AUDIT-2026-08-27.md](AUDIT-2026-08-27.md).
+  [audit-2026-08-27.md](audit-2026-08-27.md).
 
 **Read this before starting; update before ending.** Exists so state isn't re-derived from git log
 each time. Stale → fix in place.

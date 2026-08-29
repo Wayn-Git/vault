@@ -1,6 +1,0 @@
-# PSOK model providers. api_key_ref points at an OS keychain entry -- never a
-# literal key. Written by PSOK; hand edits survive, hand-written comments do not.
-#
-# A listed provider is not an offered one: an entry whose key is missing is
-# skipped by the model picker until `psok secrets set <ref>` fills it in.
-providers: []
