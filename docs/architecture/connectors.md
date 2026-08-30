@@ -24,7 +24,7 @@ Two mistakes, and only fixing both is a fix:
 
 ## Tools that cannot work are not offered
 
-`psok/mcp/guidance.py` answers one question: which connectors are running with
+`backend/mcp/guidance.py` answers one question: which connectors are running with
 no account attached. It asks `commands.is_signed_in`, which reads the server's
 *own* credential store rather than PSOK's keychain — reading the wrong one is
 what made a connector that had never seen a Google account report itself signed
@@ -69,7 +69,7 @@ clicks away.
 
 ## One state per connector
 
-`psok/mcp/lifecycle.py`. The Connectors tab used to show `enabled`,
+`backend/mcp/lifecycle.py`. The Connectors tab used to show `enabled`,
 `signed_in`, `missing_credentials`, an error string and a separate
 pending-authorization poll, and leave the reader to work out from those five
 whether anything more was needed. That is how a connector reporting 122 tools
@@ -145,7 +145,7 @@ can sign in"`, and adding a connector that needs nothing answered
 
 ## Collapsing the Google connectors
 
-`psok/mcp/migrations.py`, run by `psok mcp merge-google`.
+`backend/mcp/migrations.py`, run by `psok mcp merge-google`.
 
 Five entries, each `uvx workspace-mcp --single-user --tools <one service>`, over
 one Google account: five processes sharing one OAuth client, one credentials

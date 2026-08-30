@@ -15,11 +15,11 @@ import shutil
 
 import pytest
 
-from psok.mcp import commands as mcp_commands
-from psok.mcp.config import load_servers
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import ToolContext
-from psok.tools.registry import ToolRegistry
+from backend.mcp import commands as mcp_commands
+from backend.mcp.config import load_servers
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import ToolContext
+from backend.tools.registry import ToolRegistry
 
 pytestmark = [
     pytest.mark.live,
@@ -28,7 +28,7 @@ pytestmark = [
 
 
 async def _connect(server_id: str):
-    from psok.mcp.manager import MCPManager
+    from backend.mcp.manager import MCPManager
 
     mcp_commands.add_from_catalogue(server_id)
     registry = ToolRegistry(ConfirmationService(auto_approve))
@@ -98,8 +98,8 @@ async def test_disconnect_removes_the_tools_again(psok_home):
 @pytest.mark.skipif(shutil.which("curl") is None, reason="needs curl")
 async def test_github_requires_authorization_with_useful_guidance(psok_home):
     """GitHub's real server should refuse anonymously and say what to do about it."""
-    from psok.mcp.client import MCPConnectionError
-    from psok.mcp.manager import MCPManager
+    from backend.mcp.client import MCPConnectionError
+    from backend.mcp.manager import MCPManager
 
     mcp_commands.add_from_catalogue("github")
     manager = MCPManager(ToolRegistry(ConfirmationService(auto_approve)), open_browser=False)

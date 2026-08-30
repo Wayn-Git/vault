@@ -11,15 +11,22 @@ import json
 import pytest
 from conftest import GOOGLE_CLIENT_ID, GOOGLE_SECRET
 
-from psok.mcp import catalogue as cat
-from psok.mcp import commands as mcp_commands
-from psok.mcp.config import ServerConfig, Source, Transport, add_server, load_servers, remove_server
-from psok.mcp.manager import MCPManager, normalize_result
-from psok.mcp.oauth import REDIRECT_URI, KeychainTokenStorage, client_metadata
-from psok.mcp.ssrf import UnsafeURL, check_url
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import RiskLevel, ToolSource
-from psok.tools.registry import ToolRegistry, mcp_tool_key
+from backend.mcp import catalogue as cat
+from backend.mcp import commands as mcp_commands
+from backend.mcp.config import (
+    ServerConfig,
+    Source,
+    Transport,
+    add_server,
+    load_servers,
+    remove_server,
+)
+from backend.mcp.manager import MCPManager, normalize_result
+from backend.mcp.oauth import REDIRECT_URI, KeychainTokenStorage, client_metadata
+from backend.mcp.ssrf import UnsafeURL, check_url
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import RiskLevel, ToolSource
+from backend.tools.registry import ToolRegistry, mcp_tool_key
 
 # ------------------------------------------------------------------- config
 
@@ -66,7 +73,7 @@ def test_env_interpolation(psok_home, monkeypatch):
 
 
 def test_api_key_resolves_from_the_keychain(psok_home):
-    from psok.secrets import set_secret
+    from backend.secrets import set_secret
 
     set_secret("psok-test/apikey", "sekrit")
     config = ServerConfig(
@@ -125,7 +132,7 @@ def test_setting_an_oauth_client_keeps_the_secret_out_of_config(psok_home):
     assert "super-secret" not in text
     assert "Iv1.abc" in text
 
-    from psok.secrets import get_secret
+    from backend.secrets import get_secret
 
     assert get_secret("psok-mcp/github.client_secret") == "super-secret"
 
@@ -155,7 +162,7 @@ def test_composite_keys_disambiguate_servers():
 
 class _FakeConnection:
     def __init__(self, tools, annotations=None):
-        from psok.mcp.client import CircuitBreaker, DiscoveredTool
+        from backend.mcp.client import CircuitBreaker, DiscoveredTool
 
         annotations = annotations or {}
         self.tools = [
@@ -215,7 +222,7 @@ def test_a_server_that_annotates_nothing_is_read_by_its_verbs(psok_home):
 
     Mutation check: return `MEDIUM` from `_from_name`.
     """
-    from psok.mcp.risk import classify
+    from backend.mcp.risk import classify
 
     assert classify("search_gmail_messages") is RiskLevel.LOW
     assert classify("list_tasks") is RiskLevel.LOW
@@ -231,7 +238,7 @@ def test_a_name_may_raise_a_servers_claim_but_never_lower_it(psok_home):
 
     Mutation check: return `declared` unconditionally from `classify`.
     """
-    from psok.mcp.risk import classify
+    from backend.mcp.risk import classify
 
     assert classify("delete_everything", {"readOnlyHint": True}) is RiskLevel.HIGH
     assert classify("get_status", {"destructiveHint": True}) is RiskLevel.HIGH
@@ -338,7 +345,7 @@ async def test_oauth_http_client_asks_for_json_so_github_does_not_form_encode():
     """
     import httpx2
 
-    from psok.mcp.oauth import mcp_http_client_factory
+    from backend.mcp.oauth import mcp_http_client_factory
 
     class DummyAuth(httpx2.Auth):
         async def async_auth_flow(self, request):
@@ -371,8 +378,8 @@ async def test_oauth_http_client_asks_for_json_so_github_does_not_form_encode():
 
 
 async def test_preregistered_client_is_seeded_so_registration_is_skipped(psok_home):
-    from psok.mcp.oauth import seed_preregistered_client
-    from psok.secrets import set_secret
+    from backend.mcp.oauth import seed_preregistered_client
+    from backend.secrets import set_secret
 
     set_secret("psok-mcp/gh.client_secret", "shh")
     config = ServerConfig(
@@ -394,7 +401,7 @@ async def test_preregistered_client_is_seeded_so_registration_is_skipped(psok_ho
 
 
 def test_registration_404_becomes_actionable_guidance(psok_home):
-    from psok.mcp.client import MCPConnection, OAuthRegistrationUnsupported
+    from backend.mcp.client import MCPConnection, OAuthRegistrationUnsupported
 
     connection = MCPConnection(
         ServerConfig(name="github", transport=Transport.STREAMABLE_HTTP, url="https://x/mcp")
@@ -405,7 +412,7 @@ def test_registration_404_becomes_actionable_guidance(psok_home):
 
 
 def test_nested_exception_groups_are_unwrapped_to_the_real_cause(psok_home):
-    from psok.mcp.client import MCPConnection
+    from backend.mcp.client import MCPConnection
 
     connection = MCPConnection(ServerConfig(name="x", transport=Transport.STDIO, command="true"))
     nested = ExceptionGroup("outer", [ExceptionGroup("inner", [ValueError("the actual problem")])])
@@ -415,7 +422,7 @@ def test_nested_exception_groups_are_unwrapped_to_the_real_cause(psok_home):
 
 
 async def test_circuit_breaker_opens_then_recovers(psok_home):
-    from psok.mcp.client import CircuitBreaker
+    from backend.mcp.client import CircuitBreaker
 
     breaker = CircuitBreaker(max_failures=2, cooldown_seconds=0.05)
     breaker.record_failure()
@@ -436,9 +443,9 @@ def test_an_env_secret_lives_in_the_keychain_not_the_config(psok_home):
     """A stdio server that takes its credentials through the environment -- the
     Google one, for instance -- had nowhere to put them but mcp.yaml. Every
     other credential in PSOK is a keychain reference; these are too now."""
-    from psok.mcp.commands import add_custom, set_env
-    from psok.mcp.config import config_path, load_servers
-    from psok.secrets import delete_secret
+    from backend.mcp.commands import add_custom, set_env
+    from backend.mcp.config import config_path, load_servers
+    from backend.secrets import delete_secret
 
     ref = "psok-mcp/google.env.GOOGLE_OAUTH_CLIENT_SECRET"
     try:
@@ -461,10 +468,10 @@ def test_an_env_secret_lives_in_the_keychain_not_the_config(psok_home):
 def test_a_missing_env_secret_is_reported_not_passed_as_a_reference(psok_home, monkeypatch):
     """Passing the literal string 'keychain:...' as a credential would make the
     server fail with something unrecognisable."""
-    from psok.mcp.commands import add_custom
-    from psok.mcp.config import add_server, load_servers
+    from backend.mcp.commands import add_custom
+    from backend.mcp.config import add_server, load_servers
 
-    monkeypatch.setattr("psok.secrets.get_secret", lambda ref: None)
+    monkeypatch.setattr("backend.secrets.get_secret", lambda ref: None)
     add_custom("google", "stdio", command="uvx")
     config = load_servers()["google"]
     config.env["TOKEN"] = "keychain:psok-mcp/google.env.TOKEN"
@@ -474,8 +481,8 @@ def test_a_missing_env_secret_is_reported_not_passed_as_a_reference(psok_home, m
 
 
 def test_env_still_interpolates_from_the_environment(psok_home, monkeypatch):
-    from psok.mcp.commands import add_custom, set_env
-    from psok.mcp.config import load_servers
+    from backend.mcp.commands import add_custom, set_env
+    from backend.mcp.config import load_servers
 
     monkeypatch.setenv("PSOK_TEST_REGION", "eu-west-1")
     add_custom("thing", "stdio", command="run")
@@ -577,8 +584,8 @@ def test_signing_out_forgets_the_account_the_server_itself_holds(psok_home, monk
 
 
 def test_signing_out_of_an_oauth_server_drops_its_token(psok_home):
-    from psok.mcp.oauth import has_tokens, token_ref
-    from psok.secrets import set_secret
+    from backend.mcp.oauth import has_tokens, token_ref
+    from backend.secrets import set_secret
 
     mcp_commands.add_from_catalogue("github")
     set_secret(token_ref("github"), '{"access_token": "gho_x", "token_type": "bearer"}')
@@ -811,7 +818,7 @@ def test_credentials_reach_the_json_file_a_server_actually_reads(psok_home, monk
     assert written["clientSecret"] == "s3cret"
     assert written["redirectUri"] == "http://127.0.0.1:8888/callback"
     # The keychain stays the source of truth (ADR-0012).
-    from psok.secrets import get_secret
+    from backend.secrets import get_secret
 
     assert get_secret("psok-mcp/spotify.client_secret") == "s3cret"
     assert config_file.stat().st_mode & 0o777 == 0o600
@@ -838,7 +845,7 @@ def test_a_sign_in_tool_is_only_sent_the_arguments_it_declares(psok_home):
     """These were hardcoded to Google's shape. Microsoft To Do's sign_in takes
     none, and handing it `user_google_email` would send a Google address to
     Microsoft."""
-    from psok.mcp.client import DiscoveredTool
+    from backend.mcp.client import DiscoveredTool
 
     class _Conn:
         def __init__(self, schema):

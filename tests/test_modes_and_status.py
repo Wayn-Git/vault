@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from psok.agent.director import STATUSES, Director
-from psok.agent.planning import PLAN_TOOL_NAME, parse_plan
-from psok.db.repositories import ConversationRepository, MessageRepository
-from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult
-from psok.tools.registry import ToolRegistry
+from backend.agent.director import STATUSES, Director
+from backend.agent.planning import PLAN_TOOL_NAME, parse_plan
+from backend.db.repositories import ConversationRepository, MessageRepository
+from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+from backend.tools.registry import ToolRegistry
 
 
 def _tool(name: str, risk: RiskLevel) -> Tool:
@@ -59,7 +59,7 @@ def _patch(monkeypatch, client):
         client=client,
         capabilities=Capabilities(streaming=False, context_window=32_000),
     )
-    monkeypatch.setattr("psok.agent.director.resolve", lambda *a, **k: model)
+    monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
 
 
 async def _run(director, cid, message="do a thing"):
@@ -285,7 +285,7 @@ async def test_done_carries_what_the_turn_cost(db, monkeypatch):
 def client(psok_home):
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     with TestClient(app) as c:
         yield c
@@ -295,7 +295,7 @@ def test_an_unknown_mode_is_refused_before_the_stream_opens(client, psok_home):
     """A mode nobody honours would silently act when the user asked for a plan.
     Rejected up front, like an unknown provider, rather than inside an open SSE
     body where the failure reads as a truncated response."""
-    from psok.config import configured_providers
+    from backend.config import configured_providers
 
     provider = next(iter(configured_providers()), None)
     if provider is None:
@@ -324,7 +324,7 @@ async def test_an_executing_turn_reports_progress_through_the_plan(db, monkeypat
 
     Mutation check: delete the `STEP_TOOL_NAME` branch in the tool loop.
     """
-    from psok.agent.planning import STEP_TOOL_NAME
+    from backend.agent.planning import STEP_TOOL_NAME
 
     client = _Scripted(
         [
@@ -360,7 +360,7 @@ async def test_an_executing_turn_reports_progress_through_the_plan(db, monkeypat
 
 async def test_begin_step_is_only_offered_when_a_plan_is_being_carried_out(db, monkeypatch):
     """A tool with nothing to describe is one models call anyway."""
-    from psok.agent.planning import STEP_TOOL_NAME
+    from backend.agent.planning import STEP_TOOL_NAME
 
     client = _Scripted([ModelResponse(text="ok"), ModelResponse(text="ok")])
     _patch(monkeypatch, client)
@@ -378,7 +378,7 @@ async def test_begin_step_is_only_offered_when_a_plan_is_being_carried_out(db, m
 async def test_an_unfinished_step_is_left_open_rather_than_claimed_finished(db, monkeypatch):
     """A model that starts a step and never mentions it again has not finished
     it, and saying it did would be the interface inventing the outcome."""
-    from psok.agent.planning import STEP_TOOL_NAME
+    from backend.agent.planning import STEP_TOOL_NAME
 
     client = _Scripted(
         [
@@ -402,7 +402,7 @@ async def test_an_unfinished_step_is_left_open_rather_than_claimed_finished(db, 
 def test_an_edited_plan_travels_with_the_approval():
     """The model's original is already in the transcript, so approving without
     sending the edit would approve the plan the user just changed."""
-    from psok.agent.planning import APPROVAL_MESSAGE, Plan, PlanStep, approval_message
+    from backend.agent.planning import APPROVAL_MESSAGE, Plan, PlanStep, approval_message
 
     assert approval_message(None) == APPROVAL_MESSAGE
     edited = approval_message(Plan(steps=[PlanStep(title="Do it differently")]))
@@ -422,7 +422,7 @@ def test_no_status_is_declared_without_being_emitted():
     import re
     from pathlib import Path
 
-    source = Path("psok/agent/director.py").read_text()
+    source = Path("backend/agent/director.py").read_text()
     emitted = set(re.findall(r'"state": "(\w+)"', source))
     emitted |= {
         name
@@ -457,7 +457,7 @@ def _heavy(monkeypatch, provider="nvidia", model="deepseek-v4-pro"):
         capabilities=Capabilities(streaming=False, context_window=32_000),
     )
     monkeypatch.setattr(
-        "psok.agent.director.resolve_tier", lambda tier, **k: heavy if tier == "heavy" else None
+        "backend.agent.director.resolve_tier", lambda tier, **k: heavy if tier == "heavy" else None
     )
     return heavy
 
@@ -476,7 +476,7 @@ async def test_the_model_can_hand_a_hard_job_to_a_bigger_one(db, monkeypatch):
     Mutation check: stop appending `ESCALATE_TOOL` in `Director.run`, or
     dispatch the call instead of intercepting it.
     """
-    from psok.agent.escalation import ESCALATE_TOOL_NAME, ESCALATION_MARKER
+    from backend.agent.escalation import ESCALATE_TOOL_NAME, ESCALATION_MARKER
 
     client = _Scripted([
         ModelResponse(
@@ -517,7 +517,7 @@ async def test_the_same_question_is_not_asked_twice(db, monkeypatch):
 
     Mutation check: drop the `was_escalated` guard in `Director.run`.
     """
-    from psok.agent.escalation import ESCALATE_TOOL_NAME
+    from backend.agent.escalation import ESCALATE_TOOL_NAME
 
     client = _Scripted([ModelResponse(text="fine, here it is")])
     _patch(monkeypatch, client)
@@ -544,11 +544,11 @@ async def test_no_heavy_tier_means_no_offer(db, monkeypatch):
 
     Mutation check: offer `ESCALATE_TOOL` regardless of `resolve_tier`.
     """
-    from psok.agent.escalation import ESCALATE_TOOL_NAME
+    from backend.agent.escalation import ESCALATE_TOOL_NAME
 
     client = _Scripted([ModelResponse(text="answered")])
     _patch(monkeypatch, client)
-    monkeypatch.setattr("psok.agent.director.resolve_tier", lambda tier, **k: None)
+    monkeypatch.setattr("backend.agent.director.resolve_tier", lambda tier, **k: None)
 
     cid = ConversationRepository().create("fake", "fake-1", "t")
     director = Director(registry=_registry(), retrieval=None, memory=None)
@@ -567,7 +567,7 @@ async def test_reasoning_mode_runs_on_the_heavy_tier_and_does_not_offer_to_escal
     Mutation check: resolve the conversation's own model in reasoning mode, or
     keep offering the tool.
     """
-    from psok.agent.escalation import ESCALATE_TOOL_NAME
+    from backend.agent.escalation import ESCALATE_TOOL_NAME
 
     client = _Scripted([ModelResponse(text="thought about it")])
     _patch(monkeypatch, client)
@@ -584,7 +584,7 @@ async def test_reasoning_mode_runs_on_the_heavy_tier_and_does_not_offer_to_escal
 
 def test_reasoning_is_a_mode_the_api_accepts(client, psok_home):
     """Mutation check: drop "reasoning" from `TURN_MODES`."""
-    from psok.api.main import TURN_MODES
+    from backend.api.main import TURN_MODES
 
     assert TURN_MODES == {"chat", "plan", "reasoning"}
 

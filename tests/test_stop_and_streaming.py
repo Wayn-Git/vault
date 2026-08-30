@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from psok.agent.director import Stopped, _race_cancel, _stream_until_cancelled
+from backend.agent.director import Stopped, _race_cancel, _stream_until_cancelled
 
 
 async def _slow(seconds: float = 30.0):
@@ -112,8 +112,8 @@ async def test_a_cancelled_tool_call_does_not_block_the_next_one():
 
     Mutation check: drop the `waiter` race in `MCPConnection._serve`.
     """
-    from psok.mcp.client import MCPConnection
-    from psok.mcp.config import ServerConfig, Transport
+    from backend.mcp.client import MCPConnection
+    from backend.mcp.config import ServerConfig, Transport
 
     config = ServerConfig(name="slow", transport=Transport.STDIO, command="true")
     config.timeout_seconds = 30
@@ -165,8 +165,8 @@ async def test_a_reasoning_only_stream_is_not_an_answer(monkeypatch):
 
     Mutation check: put `not reasoning_parts` back into that condition.
     """
-    from psok.runtime.providers import openai_compat
-    from psok.runtime.types import ModelResponse
+    from backend.runtime.providers import openai_compat
+    from backend.runtime.types import ModelResponse
 
     client = openai_compat.OpenAICompatClient(
         base_url="https://example.invalid/v1", api_key="k", model="thinky"
@@ -191,7 +191,7 @@ async def test_a_reasoning_only_stream_is_not_an_answer(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_an_error_frame_inside_a_200_is_raised_not_dropped(monkeypatch):
-    from psok.runtime.providers import openai_compat
+    from backend.runtime.providers import openai_compat
 
     client = openai_compat.OpenAICompatClient(
         base_url="https://example.invalid/v1", api_key="k", model="m"
@@ -211,8 +211,8 @@ async def test_anthropic_raises_on_an_in_stream_error(monkeypatch):
 
     Mutation check: delete the `kind == "error"` branch in `anthropic.stream`.
     """
-    from psok.runtime.providers import anthropic
-    from psok.runtime.providers.openai_compat import ProviderStreamError
+    from backend.runtime.providers import anthropic
+    from backend.runtime.providers.openai_compat import ProviderStreamError
 
     client = anthropic.AnthropicClient(
         base_url="https://example.invalid", api_key="k", model="claude-x"

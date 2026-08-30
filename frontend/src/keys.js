@@ -56,7 +56,7 @@ export const SHORTCUTS = [
   { group: 'Anywhere', binding: 'mod+,', label: 'Settings' },
   { group: 'Anywhere', binding: 'mod+m', label: 'Memory on or off' },
   { group: 'Anywhere', binding: 'mod+b', label: 'Show or hide the rail' },
-  { group: 'Anywhere', binding: 'mod+1…6', label: 'Jump to a view' },
+  { group: 'Anywhere', binding: 'mod+1…7', label: 'Jump to a view' },
   { group: 'Anywhere', binding: 'shift+?', label: 'This list' },
   { group: 'Anywhere', binding: 'escape', label: 'Close what is open, or stop the turn' },
 

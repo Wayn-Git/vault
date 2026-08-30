@@ -170,7 +170,7 @@ try {
 
   // Skills and connectors are one page with two tabs, and each tab carries both
   // what is added and what could be. The directory overlay is gone.
-  await page.keyboard.press('Control+3')
+  await page.keyboard.press('Control+4')
   await page.waitForSelector('.cap-tabs', { timeout: 6000 })
   await page.locator('.cap-tab', { hasText: 'Connectors' }).click()
   // The connectors page is a list of rows now, not a table -- one row opens
@@ -403,8 +403,8 @@ try {
   }
 
   for (const [combo, label] of [
-    ['Control+2', 'Tasks'], ['Control+3', 'Skills & connectors'],
-    ['Control+4', 'Automations'], ['Control+6', 'Activity'],
+    ['Control+2', 'Tasks'], ['Control+4', 'Skills & connectors'],
+    ['Control+5', 'Automations'], ['Control+7', 'Activity'],
   ]) {
     await page.keyboard.press(combo)
     await page.waitForTimeout(300)
@@ -464,7 +464,7 @@ try {
     check('its result is visible when expanded',
       (await page.locator('.tool-card').first().innerText()).includes('psok-smoke-ok'))
 
-    await page.keyboard.press('Control+6')
+    await page.keyboard.press('Control+7')
     await page.waitForTimeout(1200)
     const activity = await page.locator('body').innerText()
     check('the audit trail shows it', /run_shell_command/.test(activity))
@@ -487,7 +487,7 @@ try {
   //
   // Created and deleted, not run: a scheduled turn costs a real model call, and
   // the gate it runs behind is covered by the unit tests.
-  await page.keyboard.press('Control+4')
+  await page.keyboard.press('Control+5')
   await page.waitForSelector('.cap-head', { timeout: 6000 })
   check('automations are marked beta where they appear',
     (await page.locator('.rail-place .beta').count()) > 0

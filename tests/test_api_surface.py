@@ -10,10 +10,10 @@ import pytest
 from conftest import GOOGLE_SECRET
 from fastapi.testclient import TestClient
 
-from psok.api.main import _DIST, app
-from psok.mcp import commands as mcp
-from psok.mcp.config import KEYCHAIN_PREFIX, config_path, load_servers
-from psok.secrets import get_secret
+from backend.api.main import _DIST, app
+from backend.mcp import commands as mcp
+from backend.mcp.config import KEYCHAIN_PREFIX, config_path, load_servers
+from backend.secrets import get_secret
 
 pytestmark = pytest.mark.usefixtures("psok_home")
 
@@ -141,7 +141,7 @@ def test_configuring_an_unknown_server_is_a_404(client):
 def test_standing_approvals_can_be_read_back_and_revoked(client):
     """"Don't ask again" is a grant. A grant nobody can list is one nobody can
     notice, and one nobody can take back."""
-    from psok.db.repositories import ConfirmationPreferenceRepository
+    from backend.db.repositories import ConfirmationPreferenceRepository
 
     repo = ConfirmationPreferenceRepository()
     repo.remember("run_shell_command:read-only", "allow", "high")
@@ -178,8 +178,8 @@ async def test_a_prompt_says_which_conversation_it_suspended():
     decision about a tool call whose context was not on screen."""
     import asyncio
 
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool, ToolContext
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool, ToolContext
 
     seen = []
 
@@ -224,8 +224,8 @@ def test_ping_is_cheap_and_does_not_survey_providers(psok_home, monkeypatch):
     """
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
-    from psok.runtime import availability
+    from backend.api.main import app
+    from backend.runtime import availability
 
     def refuse(*_a, **_k):
         raise AssertionError("ping must not survey providers")
@@ -247,8 +247,8 @@ def test_a_key_can_be_stored_on_a_host_with_no_keychain(psok_home, monkeypatch, 
     """
     from fastapi.testclient import TestClient
 
-    from psok import secrets
-    from psok.api.main import app
+    from backend import secrets
+    from backend.api.main import app
 
     store = tmp_path / "secrets.json"
     monkeypatch.setenv("PSOK_SECRETS_FILE", str(store))
@@ -274,8 +274,8 @@ def test_without_that_variable_the_answer_names_it(psok_home, monkeypatch):
     """
     from fastapi.testclient import TestClient
 
-    from psok import secrets
-    from psok.api.main import app
+    from backend import secrets
+    from backend.api.main import app
 
     monkeypatch.delenv("PSOK_SECRETS_FILE", raising=False)
     monkeypatch.setattr(secrets, "_keyring", _no_keychain)
@@ -311,7 +311,7 @@ def test_every_preset_says_which_environment_variable_carries_its_key(psok_home)
 
     Mutation check: drop `api_key_env` from `entry_for`.
     """
-    from psok.provider_catalogue import PROVIDER_PRESETS, entry_for
+    from backend.provider_catalogue import PROVIDER_PRESETS, entry_for
 
     for preset in PROVIDER_PRESETS:
         entry = entry_for(preset)

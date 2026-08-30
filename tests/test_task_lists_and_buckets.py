@@ -10,8 +10,8 @@ import asyncio
 
 import pytest
 
-from psok.db.repositories import TaskListRepository, TaskRepository
-from psok.tasks.service import TaskError, TaskService
+from backend.db.repositories import TaskListRepository, TaskRepository
+from backend.tasks.service import TaskError, TaskService
 
 
 def _service() -> TaskService:
@@ -34,7 +34,7 @@ def test_a_task_is_filed_into_the_list_it_came_from(db):
     Mutation check: replace `local_list` with `None` in either the `create(...)`
     call or the `fields` dict in `_apply`, and one of these fails.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     lists = TaskListRepository()
     groceries = lists.create("Groceries", external_source=SOURCE, external_id="list-g")
@@ -59,7 +59,7 @@ def test_lists_are_mirrored_renamed_and_retired(db):
     Mutation check: make `_sync_lists` delete instead of retire and the second
     assertion raises a foreign-key-shaped failure instead.
     """
-    from psok.sync.microsoft_todo import SyncReport, _sync_lists
+    from backend.sync.microsoft_todo import SyncReport, _sync_lists
 
     lists = TaskListRepository()
     report = SyncReport()
@@ -91,7 +91,7 @@ def test_a_local_list_is_adopted_not_duplicated(db):
     Mutation check: drop the orphan-adoption branch in `_sync_lists` and the
     count below becomes 2.
     """
-    from psok.sync.microsoft_todo import SyncReport, _sync_lists
+    from backend.sync.microsoft_todo import SyncReport, _sync_lists
 
     lists = TaskListRepository()
     local = lists.create("Groceries")  # made before anything was signed in
@@ -269,7 +269,7 @@ def test_a_local_change_is_marked_for_the_next_push(db):
     a task ticked in PSOK never reaches the phone -- which is the bug this
     whole direction exists to fix.
     """
-    from psok.sync.microsoft_todo import SOURCE
+    from backend.sync.microsoft_todo import SOURCE
 
     repo = TaskRepository()
     task_id = repo.create("Mirrored", external_source=SOURCE, external_id="x-1")
@@ -285,7 +285,7 @@ def test_a_purely_local_task_is_not_marked_dirty_but_is_unsynced(db):
     The two halves of the push are different calls, and confusing them sends
     an update for a task To Do has never heard of.
     """
-    from psok.sync.microsoft_todo import SOURCE
+    from backend.sync.microsoft_todo import SOURCE
 
     repo = TaskRepository()
     task_id = repo.create("Local only")
@@ -315,7 +315,7 @@ def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
 
     Mutation check: drop `changed["dirty_at"] = None` in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     _apply(repo, SyncReport(), None, {"id": "p-1", "title": "Before", "status": "notStarted"})
@@ -330,7 +330,7 @@ def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
 
 def test_importance_survives_the_round_trip(db):
     """To Do has one axis where PSOK has two; high importance is the user's flag."""
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply, _task_arguments
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply, _task_arguments
 
     repo = TaskRepository()
     _apply(
@@ -350,7 +350,7 @@ def test_importance_survives_the_round_trip(db):
 
 def test_a_cancelled_task_is_completed_upstream(db):
     """To Do has no cancelled. Leaving it open means it never leaves the phone."""
-    from psok.sync.microsoft_todo import _task_arguments
+    from backend.sync.microsoft_todo import _task_arguments
 
     assert _task_arguments(status="cancelled")["status"] == "completed"
     assert _task_arguments(status="in_progress")["status"] == "inProgress"
@@ -371,7 +371,7 @@ def test_a_t_separated_timestamp_is_normalised(db):
     both forms, so it reproduces a correct value exactly, which the second
     assertion pins.
     """
-    from psok.db.connection import _normalise_task_timestamps
+    from backend.db.connection import _normalise_task_timestamps
 
     repo = TaskRepository()
     task_id = repo.create("Mixed")
@@ -454,7 +454,7 @@ def test_a_task_already_upstream_is_adopted_not_created_twice(db):
     Mutation check: delete the `existing`/`match` adopt branch in `_push` and
     `created` below becomes 1 instead of 0.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _push
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _push
 
     lists = TaskListRepository()
     list_id = lists.create("Tasks", external_source=SOURCE, external_id="l-1", is_default=True)
@@ -478,7 +478,7 @@ def test_a_task_already_upstream_is_adopted_not_created_twice(db):
 
 def test_two_local_rows_with_one_title_do_not_adopt_the_same_task(db):
     """Popping the match is what stops both rows claiming one upstream id."""
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _push
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _push
 
     lists = TaskListRepository()
     list_id = lists.create("Tasks", external_source=SOURCE, external_id="l-1", is_default=True)
@@ -527,15 +527,15 @@ def test_connect_all_refuses_to_start_a_sign_in_nobody_is_watching(db, monkeypat
     Mutation check: default `connect_all`'s `interactive` back to True and the
     unauthorised server is attempted instead of skipped.
     """
-    from psok.mcp.config import ServerConfig, Transport, add_server
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.config import ServerConfig, Transport, add_server
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     add_server(ServerConfig(name="needs-auth", transport=Transport.STREAMABLE_HTTP,
                             url="https://example.invalid/mcp", oauth=True))
     add_server(ServerConfig(name="plain", transport=Transport.STDIO, command="true"))
 
-    from psok.capabilities import CapabilityService, Kind
+    from backend.capabilities import CapabilityService, Kind
     caps = CapabilityService()
     caps.set_enabled(Kind.CONNECTOR, "needs-auth", True)
     caps.set_enabled(Kind.CONNECTOR, "plain", True)
@@ -558,17 +558,17 @@ def test_connect_all_refuses_to_start_a_sign_in_nobody_is_watching(db, monkeypat
 
 def test_a_signed_in_connector_is_not_skipped(db, monkeypatch):
     """The guard is "would this open a browser", not "is this an OAuth server"."""
-    from psok.mcp.config import ServerConfig, Transport
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.config import ServerConfig, Transport
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     config = ServerConfig(name="github", transport=Transport.STREAMABLE_HTTP,
                           url="https://example.invalid/mcp", oauth=True)
     manager = MCPManager(ToolRegistry())
     assert manager.needs_sign_in(config) is True
 
-    from psok.mcp.oauth import token_ref
-    from psok.secrets import set_secret
+    from backend.mcp.oauth import token_ref
+    from backend.secrets import set_secret
     set_secret(token_ref("github"), '{"access_token": "x", "token_type": "bearer"}')
     assert manager.needs_sign_in(config) is False
 
@@ -588,8 +588,8 @@ def test_a_stale_token_does_not_buy_a_five_minute_wait(db):
     Mutation check: drop either `interactive` guard in `build_auth_provider`
     and the corresponding handler waits instead of raising.
     """
-    from psok.mcp.config import ServerConfig, Transport
-    from psok.mcp.oauth import SignInRequired, build_auth_provider
+    from backend.mcp.config import ServerConfig, Transport
+    from backend.mcp.oauth import SignInRequired, build_auth_provider
 
     config = ServerConfig(
         name="vercel", transport=Transport.STREAMABLE_HTTP,
@@ -616,13 +616,13 @@ def test_a_placeholder_model_is_never_stored(db):
     """
     from fastapi import HTTPException
 
-    from psok.api.main import _validate_model
+    from backend.api.main import _validate_model
 
     with pytest.raises(HTTPException):
         _validate_model("nope-not-a-provider", "x")
 
     # With a provider that declares a default, the placeholder is filled in.
-    from psok.config import load_providers
+    from backend.config import load_providers
 
     provider = next(
         (n for n, c in load_providers().items() if c.default_model), None
@@ -636,9 +636,9 @@ def test_a_placeholder_model_is_never_stored(db):
 
 def test_conversations_stored_with_a_placeholder_are_repaired(db):
     """Rows that predate the refusal are pointed at a real model on migrate."""
-    from psok.config import load_providers
-    from psok.db.connection import _repair_placeholder_models
-    from psok.db.repositories import ConversationRepository
+    from backend.config import load_providers
+    from backend.db.connection import _repair_placeholder_models
+    from backend.db.repositories import ConversationRepository
 
     provider = next((n for n, c in load_providers().items() if c.default_model), None)
     if provider is None:
@@ -689,7 +689,7 @@ def test_the_list_a_task_comes_back_in_decides_my_day(db):
 
     Mutation check: pass `None` instead of `local_list` in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     lists = TaskListRepository()
@@ -720,7 +720,7 @@ async def test_the_lists_are_pulled_together_and_one_short_answer_spares_the_res
     """
     import json as _json
 
-    from psok.sync.microsoft_todo import SOURCE, sync
+    from backend.sync.microsoft_todo import SOURCE, sync
 
     calls = []
 
@@ -778,8 +778,8 @@ async def test_a_move_is_a_create_then_a_delete_and_the_row_follows(db, monkeypa
     """
     import json as _json
 
-    from psok.mcp import live
-    from psok.sync.microsoft_todo import SOURCE
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE
 
     calls = []
 
@@ -827,9 +827,9 @@ async def test_a_move_that_fails_upstream_leaves_the_task_where_it_was(db, monke
     Mutation check: move the row before awaiting `move_remote_task`, or swallow
     the exception in `TaskService.move`.
     """
-    from psok.mcp import live
-    from psok.sync.microsoft_todo import SOURCE
-    from psok.tasks.service import TaskError
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE
+    from backend.tasks.service import TaskError
 
     class Refusing:
         connected = True
@@ -859,7 +859,7 @@ def test_the_push_sends_back_every_tag_it_was_given(db):
 
     Mutation check: return `[]` from `_categories_for`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply, _categories_for
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply, _categories_for
 
     repo = TaskRepository()
     _apply(
@@ -878,7 +878,7 @@ def test_completion_time_comes_back_from_to_do(db):
 
     Mutation check: drop `completed_at` from `_apply`'s `fields`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     item = {
@@ -956,7 +956,7 @@ def test_a_title_is_stored_exactly_as_to_do_has_it(db):
 
     Mutation check: strip anything from `title` in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     item = {"id": "h-1", "title": "Revision #myday", "status": "notStarted"}
@@ -1022,7 +1022,7 @@ def test_buckets_use_the_local_date_not_utc(db, monkeypatch):
     """
     from datetime import datetime, timedelta
 
-    from psok.db import repositories
+    from backend.db import repositories
 
     # Wherever this actually runs, look at the clock from a point where the
     # local date and the UTC date disagree.
@@ -1065,8 +1065,8 @@ async def test_a_task_made_for_today_is_created_in_the_my_day_list(db, monkeypat
     """
     import json as _json
 
-    from psok.mcp import live
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     sent = []
 
@@ -1118,7 +1118,7 @@ def test_a_completion_time_is_not_dragged_into_the_previous_day(db):
 
     Mutation check: send `completedDateTime` through the ordinary `_timestamp`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     _apply(
@@ -1143,7 +1143,7 @@ def test_a_pull_keeps_the_time_of_day_psok_already_recorded(db):
 
     Mutation check: take `completedDateTime` unconditionally in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     _apply(repo, SyncReport(), None, {"id": "z-2", "title": "Ship", "status": "notStarted"})

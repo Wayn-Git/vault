@@ -37,7 +37,7 @@ See [data-model.md](data-model.md) for the full schema. The detail that matters 
 
 There is no recurrence support, and no column reserving a place for it. An earlier version of this file claimed `tasks.recurrence_rule` existed; it never did — `git log -S` finds no commit that added it. Corrected 2026-08-27.
 
-`tasks.reminder_at` and `tasks.reminded_at` are a different thing from either. A reminder is one timestamp and one notification, not a schedule: `psok/reminders.py` scans `COALESCE(reminder_at, due_at)` every thirty seconds while `psok serve` runs, claims `reminded_at` with a conditional update, and then notifies — in that order, so a machine with no notification daemon misses one reminder rather than repeating it forever. It fires while PSOK is open, the same rule automations state, and for the same reason.
+`tasks.reminder_at` and `tasks.reminded_at` are a different thing from either. A reminder is one timestamp and one notification, not a schedule: `backend/reminders.py` scans `COALESCE(reminder_at, due_at)` every thirty seconds while `psok serve` runs, claims `reminded_at` with a conditional update, and then notifies — in that order, so a machine with no notification daemon misses one reminder rather than repeating it forever. It fires while PSOK is open, the same rule automations state, and for the same reason.
 
 Both columns are local naive time, like every other timestamp the engine resolves. That is load-bearing and not obvious: SQLite compares these as strings, so a UTC clock on one side of the comparison delivers every reminder late by the machine's offset.
 

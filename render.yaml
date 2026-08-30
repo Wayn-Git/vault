@@ -34,7 +34,7 @@ services:
     # One worker on purpose. PSOK holds MCP subprocesses, the reminder loop and
     # the automation runner in process state, and a second worker would start a
     # second copy of all three against the same SQLite file.
-    startCommand: uvicorn psok.api.main:app --host 0.0.0.0 --port $PORT --workers 1
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT --workers 1
 
     healthCheckPath: /api/ping
 
@@ -54,7 +54,7 @@ services:
       # A container has no OS keychain, so `keyring` cannot store a provider key
       # and the interface's "add a key" would fail with a 503. This moves key
       # storage to a file on the private disk, 0600. It is deliberate and
-      # narrow: see the module docstring in psok/secrets.py for what it is and
+      # narrow: see the module docstring in backend/secrets.py for what it is and
       # is not worth.
       - key: PSOK_SECRETS_FILE
         value: /var/psok/secrets.json

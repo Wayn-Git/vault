@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-from psok.agent.prompt import build_system_prompt, extract_skill_invocations
-from psok.capabilities import DEFAULT_ENABLED, CapabilityService, Kind
-from psok.skills.loader import seed_builtin_skills
+from backend.agent.prompt import build_system_prompt, extract_skill_invocations
+from backend.capabilities import DEFAULT_ENABLED, CapabilityService, Kind
+from backend.skills.loader import seed_builtin_skills
 
 # ------------------------------------------------------------------- defaults
 
@@ -163,7 +163,7 @@ def test_the_same_skill_is_not_pinned_twice(db, psok_home):
 
 
 def test_connector_listing_reports_state_and_auth(db, psok_home):
-    from psok.mcp.commands import add_from_catalogue
+    from backend.mcp.commands import add_from_catalogue
 
     add_from_catalogue("github")
     add_from_catalogue("memory")
@@ -176,7 +176,7 @@ def test_connector_listing_reports_state_and_auth(db, psok_home):
 
 
 def test_enabled_name_helpers_agree_with_the_listing(db, psok_home):
-    from psok.mcp.commands import add_from_catalogue
+    from backend.mcp.commands import add_from_catalogue
 
     add_from_catalogue("memory")
     service = CapabilityService(db)
@@ -188,10 +188,10 @@ def test_enabled_name_helpers_agree_with_the_listing(db, psok_home):
 
 async def test_disabled_connectors_are_never_connected(db, psok_home):
     """The toggle has to stop the process being spawned, not just hide the tools."""
-    from psok.mcp.commands import add_from_catalogue
-    from psok.mcp.manager import MCPManager
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.commands import add_from_catalogue
+    from backend.mcp.manager import MCPManager
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     add_from_catalogue("memory")
     manager = MCPManager(ToolRegistry(ConfirmationService(auto_approve)), open_browser=False)
@@ -202,9 +202,9 @@ async def test_disabled_connectors_are_never_connected(db, psok_home):
 
 
 def _registry_with_one_connector():
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
-    from psok.tools.registry import ToolRegistry
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from backend.tools.registry import ToolRegistry
 
     async def handler(args, ctx):
         return ToolResult.ok("ran")
@@ -229,8 +229,8 @@ async def test_a_connector_off_for_one_conversation_is_hidden_and_undispatchable
     cannot express this -- the connections are shared. Scoping was accepted and
     stored but never applied, leaving a per-conversation toggle that did nothing
     once the server was globally on."""
-    from psok.db.repositories import ConversationRepository
-    from psok.tools.base import ToolContext
+    from backend.db.repositories import ConversationRepository
+    from backend.tools.base import ToolContext
 
     service = CapabilityService()
     service.set_enabled(Kind.CONNECTOR, "memory", True)  # on globally
@@ -267,7 +267,7 @@ async def test_a_server_connected_by_hand_is_usable_without_a_toggle(db):
     and treating "no opinion" as "refuse" made every tool from that path
     undispatchable -- the gate has to refuse what was switched off, not what was
     never switched on."""
-    from psok.tools.base import ToolContext
+    from backend.tools.base import ToolContext
 
     assert not CapabilityService().is_enabled(Kind.CONNECTOR, "memory")  # default off
     registry = _registry_with_one_connector()
@@ -278,10 +278,10 @@ async def test_a_server_connected_by_hand_is_usable_without_a_toggle(db):
 
 async def test_the_loop_withholds_a_disabled_connectors_tools(db, monkeypatch):
     """End to end: what the model is offered, not just what the registry can filter."""
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
 
     offered: list[list[str]] = []
 
@@ -313,14 +313,14 @@ async def test_the_loop_withholds_a_disabled_connectors_tools(db, monkeypatch):
 
 def test_capability_lookup_failure_does_not_lose_every_skill(db, psok_home, monkeypatch):
     """Capability state is an optimisation, not a gate."""
-    import psok.agent.prompt as prompt_module
+    import backend.agent.prompt as prompt_module
 
     seed_builtin_skills()
 
     def explode(*_a, **_k):
         raise RuntimeError("database gone")
 
-    monkeypatch.setattr("psok.capabilities.CapabilityService.__init__", explode)
+    monkeypatch.setattr("backend.capabilities.CapabilityService.__init__", explode)
     assert "psok-intro" in prompt_module.build_system_prompt()
 
 
@@ -334,7 +334,7 @@ def test_every_kind_round_trips(db, kind):
 def test_the_prompt_distinguishes_advertised_skills_from_loaded_ones():
     """A blanket "always read SKILL.md first" instruction made the model fetch a
     skill it had already been given in full, costing a turn every invocation."""
-    from psok.agent.prompt import BASE_PROMPT
+    from backend.agent.prompt import BASE_PROMPT
 
     assert "<active_skill>" in BASE_PROMPT or "active_skill" in BASE_PROMPT
     assert "do not read its file again" in BASE_PROMPT
@@ -342,12 +342,12 @@ def test_the_prompt_distinguishes_advertised_skills_from_loaded_ones():
 
 async def test_director_pins_a_slash_invoked_skill(db, psok_home, monkeypatch):
     """End to end: the marker reaches prompt assembly as a pinned skill."""
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     seed_builtin_skills()
     seen: dict[str, str] = {}

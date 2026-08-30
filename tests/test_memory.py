@@ -12,12 +12,12 @@ import hashlib
 
 import pytest
 
-from psok.agent.director import Director
-from psok.db.repositories import ConversationRepository
-from psok.memory import MemoryDiff, MemoryService, MemoryStore, parse_diff
-from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.registry import ToolRegistry
+from backend.agent.director import Director
+from backend.db.repositories import ConversationRepository
+from backend.memory import MemoryDiff, MemoryService, MemoryStore, parse_diff
+from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.registry import ToolRegistry
 
 DIMENSIONS = 16
 EXTRACTION_MARKER = "You maintain a long-term memory"
@@ -68,15 +68,15 @@ def scripted(monkeypatch):
     """Resolve every provider to one scripted model, in both director and service."""
 
     def install(model: ScriptedModel) -> ScriptedModel:
-        import psok.agent.director as director_module
+        import backend.agent.director as director_module
 
         monkeypatch.setattr(
             director_module,
             "resolve",
             lambda *a, **k: ResolvedModel("f", "f", model, Capabilities(streaming=False)),
         )
-        monkeypatch.setattr("psok.retrieval.search.Embedder", lambda *a, **k: FakeEmbedder())
-        monkeypatch.setattr("psok.retrieval.embeddings.Embedder", lambda *a, **k: FakeEmbedder())
+        monkeypatch.setattr("backend.retrieval.search.Embedder", lambda *a, **k: FakeEmbedder())
+        monkeypatch.setattr("backend.retrieval.embeddings.Embedder", lambda *a, **k: FakeEmbedder())
         return model
 
     return install
@@ -278,8 +278,8 @@ async def test_nothing_worth_remembering_emits_no_event(db, scripted):
 async def test_a_configured_memory_model_is_used_instead_of_the_conversations(db, monkeypatch):
     """ai-runtime.md gives extraction its own row: it runs on every turn, so it
     wants a small cheap model rather than whichever one is answering."""
-    import psok.agent.director as director_module
-    from psok.config import paths
+    import backend.agent.director as director_module
+    from backend.config import paths
 
     paths().ensure()
     paths().providers_yaml.write_text(
@@ -302,7 +302,7 @@ async def test_a_configured_memory_model_is_used_instead_of_the_conversations(db
         return ResolvedModel(provider, model or "", ScriptedModel(), Capabilities(streaming=False))
 
     monkeypatch.setattr(director_module, "resolve", fake_resolve)
-    monkeypatch.setattr("psok.retrieval.embeddings.Embedder", lambda *a, **k: FakeEmbedder())
+    monkeypatch.setattr("backend.retrieval.embeddings.Embedder", lambda *a, **k: FakeEmbedder())
 
     cid = ConversationRepository().create("big", "big-model")
     await _turn(_director(), cid, "hello")

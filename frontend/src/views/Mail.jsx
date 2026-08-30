@@ -11,7 +11,7 @@ import { SkeletonRows } from '../components/Skeleton.jsx'
    answers in prose written for a model to read -- "📧 MESSAGES:", "Message ID:"
    -- and a screen built on it would be a regular expression over somebody
    else's help text. PSOK talks to Gmail directly using the account the
-   connector signed in; see psok/mail/gmail.py.
+   connector signed in; see backend/mail/gmail.py.
 
    Bodies arrive as text. HTML mail is reduced to text on the server rather than
    rendered, because an inbox is the most hostile input this system has and a

@@ -74,7 +74,7 @@ Each of these was exercised end to end, not just wired up.
 
 **Multi-provider runtime.** One initialize-function contract per provider, a registry, and a fallback where any unrecognised provider name resolves to a generic OpenAI-compatible adapter driven by config. Provider quirks stay inside their adapter.
 
-**20 builtin tools** across filesystem, shell, desktop, tasks, calendar, document search and the open web — plus every tool any connected MCP server exposes, in the same flat namespace. The model cannot tell them apart; you can.
+**23 builtin tools** across filesystem, shell, desktop, tasks, calendar, file conversion, document search and the open web — plus every tool any connected MCP server exposes, in the same flat namespace. The model cannot tell them apart; you can.
 
 **A permission gate with real sandboxing.** Every tool declares a static risk floor the model can raise but never lower. Shell commands run under Bubblewrap on Linux and Seatbelt on macOS. Paths under `~/.ssh`, `~/.aws` and similar always confirm, and no stored preference can silence them.
 
@@ -125,6 +125,24 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
         SQLite (+vec, +FTS5) · filesystem for documents · OS keychain for secrets
 ```
 
+Two directories carry it, named for which side of the wire they are on:
+
+```
+backend/          the Python package — API, agent loop, runtime, tools, MCP, retrieval
+  agent/          the loop, the prompt, planning and escalation
+  api/main.py     every HTTP and SSE endpoint
+  runtime/        provider adapters behind one contract, plus the fallback chain
+  tools/builtin/  filesystem, shell, desktop, tasks, calendar, convert, documents, web
+  mcp/            transports, OAuth, catalogue, lifecycle, risk
+  retrieval/      chunking, embeddings, the hybrid index
+  mail/           Gmail, read directly rather than through the connector
+  db/             schema, connection, repositories
+frontend/         the React app — built by Vite, served by the same process
+docs/             architecture, ADRs, deployment, handover
+```
+
+`backend` is the import name (`from backend.tasks.service import TaskService`); `psok` stays the command you type, the keychain service, and the name of `~/.psok`.
+
 - [Architecture overview](docs/architecture/overview.md) — the layer model and a worked request
 - [The web interface](docs/interface.md) — how the React app is built, and every keyboard binding
 - [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Modes](docs/architecture/modes.md) · [Tasks](docs/architecture/tasks.md) · [Turns](docs/architecture/turns.md) · [Connectors](docs/architecture/connectors.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
@@ -138,9 +156,8 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
 
 Stated plainly, because half-built features are worse than absent ones and this repository deliberately contains none:
 
-- **First-party service integrations.** Gmail, Calendar and GitHub are reachable as MCP connectors instead.
-- **Recurring tasks and background jobs.** Scheduling resolves and stores; nothing wakes up on its own.
-- **Deleting a conversation.** No endpoint — nothing in the architecture called for one.
+- **A daemon.** Automations and reminders wake up on their own, but only while `psok serve` is running. Nothing outlives the interface — an unattended turn that needs a permission answer at 3am has nobody to ask, so the gate denies anything outside a standing approval and records what it wanted.
+- **First-party service integrations, except mail.** Calendar and GitHub are reachable as MCP connectors. Gmail is the one exception: it is read directly, using the refresh token the connector already stored, because fifteen tools written to be read by a model are the wrong shape for a screen.
 - **Projects, artifacts, plugins, voice input.** No backing anywhere in the system.
 - **Anything multi-user.** Out of scope by design ([ADR-0001](docs/architecture/decisions/)).
 
@@ -151,13 +168,13 @@ Provider adapters for Anthropic and OpenAI were only ever run against mocks — 
 ## Verifying it yourself
 
 ```bash
-pytest                    # 259 unit tests
+pytest                    # 563 unit tests
 pytest -m live            # 5 more against real MCP servers (spawns processes, uses network)
-ruff check psok tests
+ruff check backend tests
 
 cd frontend
 npm run lint && npm run build
-npm run smoke             # 34 checks in a real browser against a running `psok serve`
+npm run smoke             # 62 checks in a real browser against a running `psok serve`
 ```
 
 The smoke suite is the one that matters: it drives Chromium against a live model and asserts what a person would see — a turn streaming, markdown rendering once and not twice, a shell call suspending the turn and the prompt answering to the keyboard, a skill installing from the directory and uninstalling again, the audit trail carrying the call.

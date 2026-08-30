@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from psok.tools.base import ToolContext
-from psok.tools.builtin.convert import convert_file, plan_conversion
+from backend.tools.base import ToolContext
+from backend.tools.builtin.convert import convert_file, plan_conversion
 
 
 def _ctx(root: Path) -> ToolContext:
@@ -68,7 +68,7 @@ async def test_a_missing_engine_is_named_not_guessed_at(tmp_path, monkeypatch):
 
     Mutation check: drop the `shutil.which` check and let the subprocess fail.
     """
-    monkeypatch.setattr("psok.tools.builtin.convert.shutil.which", lambda name: None)
+    monkeypatch.setattr("backend.tools.builtin.convert.shutil.which", lambda name: None)
     source = tmp_path / "notes.md"
     source.write_text("# hello")
 

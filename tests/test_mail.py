@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from psok.mail import gmail
+from backend.mail import gmail
 
 
 def _b64(text: str) -> str:

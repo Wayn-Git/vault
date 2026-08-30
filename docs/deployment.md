@@ -51,7 +51,7 @@ PSOK_CORS_ORIGINS=https://psok.vercel.app,https://psok-git-main-you.vercel.app
 provider key in the interface answers 503 and says so; with it, keys go to a
 JSON file on the private disk, created 0600. That is a real reduction in
 protection compared with a keychain and it is stated rather than hidden — see
-the docstring at the top of `psok/secrets.py`. The alternative, below, avoids it.
+the docstring at the top of `backend/secrets.py`. The alternative, below, avoids it.
 
 **Provider keys.** Every preset now writes an `api_key_env` into
 `providers.yaml`, so a key can arrive as an ordinary environment variable and
@@ -141,7 +141,7 @@ Honest list, because finding these one at a time is worse.
   the code to. The Google connectors are local-only until something else holds
   that callback.
 - **Reminders have nowhere to arrive.** This is the one that surprises people,
-  and it is not about the plan. `psok/notify.py` shells out to `notify-send`,
+  and it is not about the plan. `backend/notify.py` shells out to `notify-send`,
   `osascript` or `powershell` — it asks the platform what it has rather than
   assuming a desktop. A container has none of them, so `_notifier()` returns
   None, logs once, and drops the message. The loop still runs and still stamps

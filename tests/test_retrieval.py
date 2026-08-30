@@ -11,11 +11,11 @@ import hashlib
 
 import pytest
 
-from psok.retrieval import store
-from psok.retrieval.chunking import chunk_markdown, estimate_tokens
-from psok.retrieval.indexer import Indexer, discover
-from psok.retrieval.search import SearchService
-from psok.tools.base import ToolContext
+from backend.retrieval import store
+from backend.retrieval.chunking import chunk_markdown, estimate_tokens
+from backend.retrieval.indexer import Indexer, discover
+from backend.retrieval.search import SearchService
+from backend.tools.base import ToolContext
 
 DIMENSIONS = 16
 
@@ -182,7 +182,7 @@ async def test_marking_stale_forces_a_reindex(db, vault):
 
 
 async def test_write_file_tool_invalidates_the_index(db, vault):
-    from psok.tools.builtin.filesystem import write_file
+    from backend.tools.builtin.filesystem import write_file
 
     indexer = Indexer(FakeEmbedder(), conn=db)
     await indexer.index_vault(vault)
@@ -201,7 +201,7 @@ async def test_edit_file_tool_invalidates_the_index(db, vault):
     """write_file and delete_file marked the document stale; edit_file did not,
     so the most common way the agent changes a file left the index claiming
     content that is no longer on disk -- until an unrelated full re-scan."""
-    from psok.tools.builtin.filesystem import edit_file
+    from backend.tools.builtin.filesystem import edit_file
 
     await Indexer(FakeEmbedder(), conn=db).index_vault(vault)
 
@@ -304,7 +304,7 @@ def test_fts_query_sanitization_survives_punctuation():
 
 
 async def test_search_tool_reports_an_empty_index_helpfully(db):
-    from psok.tools.builtin.documents import search_documents
+    from backend.tools.builtin.documents import search_documents
 
     result = await search_documents({"query": "anything"}, ToolContext())
     assert not result.is_error
@@ -312,14 +312,14 @@ async def test_search_tool_reports_an_empty_index_helpfully(db):
 
 
 async def test_search_tool_needs_a_query(db):
-    from psok.tools.builtin.documents import search_documents
+    from backend.tools.builtin.documents import search_documents
 
     assert (await search_documents({}, ToolContext())).is_error
 
 
 async def test_search_tool_is_registered_and_low_risk(db):
-    from psok.tools.base import RiskLevel
-    from psok.tools.registry import build_default_registry
+    from backend.tools.base import RiskLevel
+    from backend.tools.registry import build_default_registry
 
     tool = build_default_registry().get("search_documents")
     assert tool is not None
@@ -337,7 +337,7 @@ async def test_search_tool_is_registered_and_low_risk(db):
 def test_extension_state_is_not_cached_by_connection_id():
     import sqlite3
 
-    from psok.db.connection import connect, migrate
+    from backend.db.connection import connect, migrate
 
     ids = set()
     for _ in range(4):
@@ -358,7 +358,7 @@ def test_extension_state_is_not_cached_by_connection_id():
 
 async def test_indexing_survives_a_fresh_connection_after_others_closed(tmp_path, psok_home):
     """The exact shape of the id-reuse bug: index, drop the connection, index again."""
-    from psok.db import connection as connection_module
+    from backend.db import connection as connection_module
 
     root = tmp_path / "v"
     root.mkdir()
@@ -415,18 +415,18 @@ class _CapturingClient:
         self.system_prompts: list[str] = []
 
     async def complete(self, messages, tools=None, params=None):
-        from psok.runtime.types import ModelResponse
+        from backend.runtime.types import ModelResponse
 
         self.system_prompts.append(messages[0]["content"])
         return ModelResponse(text="answered")
 
 
 def _scripted_director(monkeypatch, client):
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.runtime.types import Capabilities, ResolvedModel
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.runtime.types import Capabilities, ResolvedModel
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.registry import ToolRegistry
 
     monkeypatch.setattr(
         director_module,
@@ -440,11 +440,11 @@ async def test_a_turn_injects_indexed_context_into_the_system_prompt(db, vault, 
     """context_for() existed, was tested, and was documented as pre-fetched into
     the prompt -- but the loop never called it, so the only way documents ever
     reached the model was the model deciding to search for them itself."""
-    from psok.db.repositories import ConversationRepository
+    from backend.db.repositories import ConversationRepository
 
     embedder = FakeEmbedder()
     await Indexer(embedder, conn=db).index_vault(vault)
-    monkeypatch.setattr("psok.retrieval.search.Embedder", lambda *a, **k: embedder)
+    monkeypatch.setattr("backend.retrieval.search.Embedder", lambda *a, **k: embedder)
 
     client = _CapturingClient()
     director = _scripted_director(monkeypatch, client)
@@ -461,12 +461,12 @@ async def test_a_turn_injects_indexed_context_into_the_system_prompt(db, vault, 
 async def test_an_empty_index_costs_the_turn_no_retrieval_work(db, monkeypatch):
     """Skipped before the embedder is ever constructed: a user who has never run
     `psok index` must not pay a round trip to an embedding server on every turn."""
-    from psok.db.repositories import ConversationRepository
+    from backend.db.repositories import ConversationRepository
 
     def explode(*a, **k):
         raise AssertionError("no embedder should be built for an empty index")
 
-    monkeypatch.setattr("psok.retrieval.search.Embedder", explode)
+    monkeypatch.setattr("backend.retrieval.search.Embedder", explode)
 
     client = _CapturingClient()
     director = _scripted_director(monkeypatch, client)

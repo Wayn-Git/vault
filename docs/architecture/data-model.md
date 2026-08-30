@@ -121,7 +121,7 @@ calendar_events
 
 `due_at` and `scheduled_at` being separate columns is the load-bearing detail for scheduling. "Due tomorrow" and "I will work on it at 2pm today" are different facts, and collapsing them makes conflict detection impossible. See [scheduling.md](scheduling.md).
 
-`reminder_at` is a third such fact — "tell me an hour before" — and `reminded_at` is the claim that stops one being delivered twice. The external columns mirror the pattern `calendar_events` already declares, and are written by the one-way Microsoft To Do pull in `psok/sync/`. The partial unique index is what makes that pull idempotent; without it a second pull duplicates every task.
+`reminder_at` is a third such fact — "tell me an hour before" — and `reminded_at` is the claim that stops one being delivered twice. The external columns mirror the pattern `calendar_events` already declares, and are written by the one-way Microsoft To Do pull in `backend/sync/`. The partial unique index is what makes that pull idempotent; without it a second pull duplicates every task.
 
 ### Audit log
 

@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from psok.mcp import guidance
-from psok.mcp.lifecycle import state_of
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
-from psok.tools.registry import ToolRegistry
+from backend.mcp import guidance
+from backend.mcp.lifecycle import state_of
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
+from backend.tools.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +47,7 @@ async def test_tools_of_an_unsigned_connector_are_not_offered(db, monkeypatch):
 
     Mutation check: drop the `unsigned` union from `_disabled_connectors`.
     """
-    from psok.agent.director import Director
+    from backend.agent.director import Director
 
     registry = ToolRegistry(ConfirmationService(auto_approve))
     registry.register(_server_tool("gmail_search", "google-gmail"))
@@ -71,13 +71,13 @@ async def test_a_connector_with_no_account_to_attach_is_not_hidden(db, monkeypat
 
     Mutation check: use `is not True` instead of `is False` in `unsigned_connectors`.
     """
-    from psok.mcp import commands as mcp
+    from backend.mcp import commands as mcp
 
     configs = {
         "fetch": type("C", (), {"name": "fetch", "enabled": True})(),
         "gmail": type("C", (), {"name": "gmail", "enabled": True})(),
     }
-    monkeypatch.setattr("psok.mcp.config.load_servers", lambda: configs)
+    monkeypatch.setattr("backend.mcp.config.load_servers", lambda: configs)
     monkeypatch.setattr(
         mcp, "is_signed_in", lambda c: None if c.name == "fetch" else False
     )
@@ -95,7 +95,7 @@ async def test_calling_a_withheld_tool_returns_an_instruction_not_an_error(db, m
     registry = ToolRegistry(ConfirmationService(auto_approve))
     registry.register(_server_tool("gmail_search", "google-gmail"))
     monkeypatch.setattr(
-        "psok.tools.registry._unsigned_connectors", lambda: frozenset({"google-gmail"})
+        "backend.tools.registry._unsigned_connectors", lambda: frozenset({"google-gmail"})
     )
 
     result = await registry.dispatch("gmail_search", {}, ToolContext(conversation_id="c"))
@@ -128,15 +128,15 @@ async def test_an_oauth_failure_does_not_send_a_browser_user_to_the_terminal(mon
 
     Mutation check: restore the `psok mcp login` string in `_make_handler`.
     """
-    from psok.mcp.client import OAuthRequired
-    from psok.mcp.manager import MCPManager
+    from backend.mcp.client import OAuthRequired
+    from backend.mcp.manager import MCPManager
 
     class _NeedsAuth:
         connected = True
         tools: list = []
 
         def __init__(self):
-            from psok.mcp.client import CircuitBreaker
+            from backend.mcp.client import CircuitBreaker
 
             self.breaker = CircuitBreaker()
 
@@ -228,7 +228,7 @@ def test_one_tool_is_not_one_tools():
 def client(psok_home):
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     with TestClient(app) as c:
         yield c
@@ -237,7 +237,7 @@ def client(psok_home):
 def test_every_connector_row_carries_its_state(client, psok_home):
     """Computed on the server so the screen, the CLI and the agent loop cannot
     reach different conclusions from the same five fields."""
-    from psok.mcp import commands as mcp
+    from backend.mcp import commands as mcp
 
     mcp.add_custom(name="probe", transport="stdio", command="true", args=[])
     rows = client.get("/api/mcp/servers").json()
@@ -251,7 +251,7 @@ def test_every_connector_row_carries_its_state(client, psok_home):
 
 
 def _google_servers(*services: str):
-    from psok.mcp import commands as mcp
+    from backend.mcp import commands as mcp
 
     for service in services:
         mcp.add_from_catalogue(f"google-{service}")
@@ -260,8 +260,8 @@ def _google_servers(*services: str):
 def test_the_merge_plans_before_it_touches_anything(psok_home):
     """Nothing here runs on startup or as a side effect. A migration that
     touches a working sign-in is a decision the account's owner takes."""
-    from psok.mcp.config import config_path
-    from psok.mcp.migrations import plan_google_merge
+    from backend.mcp.config import config_path
+    from backend.mcp.migrations import plan_google_merge
 
     _google_servers("gmail", "calendar", "drive")
     before = config_path().read_text()
@@ -279,8 +279,8 @@ def test_merging_grants_only_the_services_that_were_configured(psok_home):
     Mutation check: use `GOOGLE_MERGED_TOOLS` instead of `plan.tools` in
     `apply_google_merge`.
     """
-    from psok.mcp.config import load_servers
-    from psok.mcp.migrations import apply_google_merge
+    from backend.mcp.config import load_servers
+    from backend.mcp.migrations import apply_google_merge
 
     _google_servers("gmail", "calendar")
     apply_google_merge()
@@ -292,9 +292,9 @@ def test_merging_grants_only_the_services_that_were_configured(psok_home):
 def test_the_merge_keeps_the_credentials_directory_and_the_env(psok_home):
     """The whole reason this is safe: every entry points at the same
     `~/.google_workspace_mcp/credentials`, and so does the merged one."""
-    from psok.mcp import commands as mcp
-    from psok.mcp.config import load_servers
-    from psok.mcp.migrations import apply_google_merge
+    from backend.mcp import commands as mcp
+    from backend.mcp.config import load_servers
+    from backend.mcp.migrations import apply_google_merge
 
     _google_servers("gmail", "calendar", "drive", "docs", "sheets")
     before = load_servers()["google-gmail"]
@@ -312,7 +312,7 @@ def test_the_merge_keeps_the_credentials_directory_and_the_env(psok_home):
 
 def test_the_previous_config_is_kept(psok_home):
     """The way back. A migration with no backup is one nobody should run."""
-    from psok.mcp.migrations import apply_google_merge
+    from backend.mcp.migrations import apply_google_merge
 
     _google_servers("gmail", "calendar")
     _, backup = apply_google_merge()
@@ -322,7 +322,7 @@ def test_the_previous_config_is_kept(psok_home):
 
 
 def test_merging_twice_is_not_an_error(psok_home):
-    from psok.mcp.migrations import apply_google_merge, plan_google_merge
+    from backend.mcp.migrations import apply_google_merge, plan_google_merge
 
     _google_servers("gmail")
     apply_google_merge()
@@ -336,7 +336,7 @@ def test_merging_twice_is_not_an_error(psok_home):
 
 
 def test_nothing_to_merge_says_so(psok_home):
-    from psok.mcp.migrations import plan_google_merge
+    from backend.mcp.migrations import plan_google_merge
 
     plan = plan_google_merge()
     assert plan.is_noop
@@ -347,8 +347,8 @@ def test_the_merged_connector_is_switched_on_if_any_source_was(psok_home):
     """Leaving the old rows behind is not cosmetic: `reconcile` reads them, and
     a row for a connector no longer in mcp.yaml is what left `google-workspace`
     listed as enabled while not existing."""
-    from psok.capabilities import CapabilityService, Kind
-    from psok.mcp.migrations import apply_google_merge
+    from backend.capabilities import CapabilityService, Kind
+    from backend.mcp.migrations import apply_google_merge
 
     _google_servers("gmail", "calendar")
     service = CapabilityService()
@@ -372,7 +372,7 @@ async def test_adding_a_connector_runs_its_first_sync(psok_home, monkeypatch):
 
     Mutation check: delete the `_first_sync` call from `_start_after_add`.
     """
-    from psok.api import main as api
+    from backend.api import main as api
 
     ran: list[str] = []
 
@@ -385,7 +385,7 @@ async def test_adding_a_connector_runs_its_first_sync(psok_home, monkeypatch):
 
         return _Report()
 
-    monkeypatch.setattr("psok.sync.microsoft_todo.sync", fake_sync)
+    monkeypatch.setattr("backend.sync.microsoft_todo.sync", fake_sync)
     monkeypatch.setattr(api, "_manager_with", lambda name: _noop())
 
     await api._first_sync("microsoft-todo")
@@ -404,12 +404,12 @@ async def _noop():
 async def test_a_first_sync_that_cannot_run_yet_is_not_a_failure(psok_home, monkeypatch):
     """Right after adding it, "not signed in" is the expected state on the way
     through -- not a reason to fail the add."""
-    from psok.api import main as api
+    from backend.api import main as api
 
     async def refuse(_manager):
         raise RuntimeError("microsoft-todo is not signed in")
 
-    monkeypatch.setattr("psok.sync.microsoft_todo.sync", refuse)
+    monkeypatch.setattr("backend.sync.microsoft_todo.sync", refuse)
     monkeypatch.setattr(api, "_manager_with", lambda name: _noop())
 
     await api._first_sync("microsoft-todo")  # must not raise
@@ -429,7 +429,7 @@ def test_a_grant_about_to_lapse_is_announced_before_it_does():
 
     Mutation check: return None unconditionally from `_ageing_grant`.
     """
-    from psok.mcp.lifecycle import state_of
+    from backend.mcp.lifecycle import state_of
 
     def row(age):
         return {
@@ -469,7 +469,7 @@ def test_two_accounts_in_a_single_user_store_are_reported():
 
     Mutation check: drop the `accounts > 1` branch from `state_of`.
     """
-    from psok.mcp.lifecycle import state_of
+    from backend.mcp.lifecycle import state_of
 
     state = state_of(
         {"name": "google-gmail", "enabled": True, "signed_in": True, "accounts": 2},
@@ -491,9 +491,9 @@ def test_a_browser_profile_is_not_six_accounts(psok_home, tmp_path, monkeypatch)
 
     Mutation check: count `_accounts_of` unconditionally in `account_count`.
     """
-    from psok.mcp import catalogue as cat
-    from psok.mcp import commands
-    from psok.mcp.config import ServerConfig, Transport
+    from backend.mcp import catalogue as cat
+    from backend.mcp import commands
+    from backend.mcp.config import ServerConfig, Transport
 
     profile = tmp_path / "profile"
     profile.mkdir()

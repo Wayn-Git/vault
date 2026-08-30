@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import ToolContext, ToolResult
-from psok.tools.builtin import filesystem, shell
-from psok.tools.registry import ToolRegistry, mcp_tool_key, truncate
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import ToolContext, ToolResult
+from backend.tools.builtin import filesystem, shell
+from backend.tools.registry import ToolRegistry, mcp_tool_key, truncate
 
 
 def registry_for(workspace):
-    from psok.tools.registry import build_default_registry
+    from backend.tools.registry import build_default_registry
 
     return build_default_registry(ConfirmationService(auto_approve), workspace_root=str(workspace))
 
@@ -78,7 +78,7 @@ async def test_unknown_tool_lists_alternatives(db):
 
 
 async def test_handler_exception_becomes_an_error_result(db):
-    from psok.tools.base import RiskLevel, Tool
+    from backend.tools.base import RiskLevel, Tool
 
     async def explode(args, ctx):
         raise RuntimeError("boom")

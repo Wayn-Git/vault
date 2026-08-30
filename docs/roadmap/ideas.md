@@ -19,9 +19,9 @@ pile up, roll forward, or vanish? That decision is the actual work, and the
 answer differs for "water the plants" and "pay the rent".
 
 **Calendar is read-only here.** `list_calendar` and `find_free_slot` exist
-(`psok/tools/builtin/tasks.py`); nothing creates an event, so `find_free_slot`
+(`backend/tools/builtin/tasks.py`); nothing creates an event, so `find_free_slot`
 ends with the user booking it by hand. The first-party path is the one Mail now
-uses — `psok/mail/gmail.py` refreshes the token the connector stored and calls
+uses — `backend/mail/gmail.py` refreshes the token the connector stored and calls
 Google directly — and the same file would serve Calendar. Blocked only on the
 calendar scope being granted at the next Google sign-in.
 

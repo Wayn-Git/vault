@@ -176,9 +176,9 @@ backend's new event "does not arrive". It arrives. It is now logged.
 `reasoning` joined `chat` and `plan`. It is not plan mode with a bigger model:
 plan mode withholds mutating tools and hands back something to approve, and
 reasoning mode does neither — it runs the ordinary loop on the `heavy` tier
-(`psok/config.py`), which is the model the user chose to wait for.
+(`backend/config.py`), which is the model the user chose to wait for.
 
-**Tiers are not the fallback chain.** `psok/runtime/chain.py` answers "this
+**Tiers are not the fallback chain.** `backend/runtime/chain.py` answers "this
 provider is down, who else"; a tier answers "how hard is this work". Reading
 them as one thing would make a quota trip look like a decision the model made,
 and an escalation look like an outage.

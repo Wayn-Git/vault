@@ -6,7 +6,7 @@ decisions that are surprising, and the one line that caused most of the work.
 
 ## The line
 
-`psok/sync/microsoft_todo.py` used to declare
+`backend/sync/microsoft_todo.py` used to declare
 
 ```python
 def _apply(repository, report, task_list: dict, item: dict) -> None:
@@ -76,7 +76,7 @@ anything else.
 
 ### So My Day is one ordinary list, at both ends
 
-`MY_DAY_LIST_NAMES` in `psok/db/repositories.py` names it — "my day" or "today",
+`MY_DAY_LIST_NAMES` in `backend/db/repositories.py` names it — "my day" or "today",
 folded past a leading emoji like every other list name, so `🌞 My Day` counts.
 The bucket is one clause:
 
@@ -213,7 +213,7 @@ minutes.
 
 ## One service, three callers
 
-`psok/tasks/service.py` owns hint resolution, conflict checking, list
+`backend/tasks/service.py` owns hint resolution, conflict checking, list
 resolution, the local write and the upstream mirror. The agent's tools, the HTTP
 API and the sync are thin adapters over it.
 

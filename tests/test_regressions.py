@@ -13,17 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from psok.agent.prompt import budget_history
-from psok.db.repositories import (
+from backend.agent.prompt import budget_history
+from backend.db.repositories import (
     CalendarRepository,
     ConversationRepository,
     MessageRepository,
     TaskRepository,
 )
-from psok.retrieval.store import _sanitize_fts_query
-from psok.secrets import redact
-from psok.tools.base import ToolContext
-from psok.tools.registry import mcp_tool_key
+from backend.retrieval.store import _sanitize_fts_query
+from backend.secrets import redact
+from backend.tools.base import ToolContext
+from backend.tools.registry import mcp_tool_key
 
 # --- 1: the API never exposed MCP tools to the agent ------------------------
 
@@ -33,7 +33,7 @@ def test_api_builds_its_registry_through_the_mcp_manager():
     reach a connected server's tools."""
     import inspect
 
-    from psok.api import main
+    from backend.api import main
 
     source = inspect.getsource(main)
     assert "MCPManager" in source
@@ -44,7 +44,7 @@ def test_api_builds_its_registry_through_the_mcp_manager():
 def test_api_reuses_one_manager_rather_than_spawning_per_request():
     import inspect
 
-    from psok.api import main
+    from backend.api import main
 
     assert "_mcp" in inspect.getsource(main._registry_for)
     assert main._mcp["manager"] is None  # nothing connected until first use
@@ -56,7 +56,7 @@ def test_api_reuses_one_manager_rather_than_spawning_per_request():
 async def test_task_without_a_duration_still_checks_for_conflicts(db):
     """The conflict check was gated on a duration estimate, so a task with a
     work time but no estimate was silently booked over an existing event."""
-    from psok.tools.builtin.tasks import create_task
+    from backend.tools.builtin.tasks import create_task
 
     start = (datetime.now() + timedelta(days=1)).replace(hour=14, minute=0, second=0, microsecond=0)
     CalendarRepository().create(
@@ -100,12 +100,12 @@ def test_single_character_terms_are_searchable():
 
 
 async def test_truncated_stream_keeps_the_partial_answer(db, monkeypatch):
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository, MessageRepository
-    from psok.runtime.types import Capabilities, ResolvedModel, StreamEvent
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository, MessageRepository
+    from backend.runtime.types import Capabilities, ResolvedModel, StreamEvent
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     class DropsMidStream:
         async def complete(self, *a, **k):
@@ -138,7 +138,7 @@ async def test_truncated_stream_keeps_the_partial_answer(db, monkeypatch):
 async def test_grep_works_when_the_workspace_is_under_a_hidden_directory(tmp_path):
     """Hidden-component checking used the absolute path, so a workspace under
     e.g. ~/.config silently matched nothing."""
-    from psok.tools.builtin.filesystem import grep_files
+    from backend.tools.builtin.filesystem import grep_files
 
     root = tmp_path / ".hidden-parent" / "workspace"
     root.mkdir(parents=True)
@@ -149,7 +149,7 @@ async def test_grep_works_when_the_workspace_is_under_a_hidden_directory(tmp_pat
 
 
 async def test_grep_still_skips_hidden_files_inside_the_workspace(tmp_path):
-    from psok.tools.builtin.filesystem import grep_files
+    from backend.tools.builtin.filesystem import grep_files
 
     root = tmp_path / "ws"
     (root / ".git").mkdir(parents=True)
@@ -181,8 +181,8 @@ def test_orphan_tool_result_never_leads_the_history_even_at_a_tiny_budget():
 async def test_short_embedding_response_is_rejected_not_misaligned(db, tmp_path):
     """Zipping with strict=False paired each vector with the wrong chunk when an
     embedder returned fewer vectors than it was given."""
-    from psok.retrieval.embeddings import EmbeddingError
-    from psok.retrieval.indexer import Indexer
+    from backend.retrieval.embeddings import EmbeddingError
+    from backend.retrieval.indexer import Indexer
 
     root = tmp_path / "v"
     root.mkdir()
@@ -207,7 +207,7 @@ async def test_short_embedding_response_is_rejected_not_misaligned(db, tmp_path)
 async def test_busy_callback_port_reports_what_is_wrong():
     """Login died with a bare OSError; the port is fixed by the registered
     redirect URI, so the fix is a clear message, not a different port."""
-    from psok.mcp.oauth import (
+    from backend.mcp.oauth import (
         CALLBACK_HOST,
         CALLBACK_PORT,
         CallbackPortUnavailable,
@@ -248,11 +248,11 @@ def test_redaction_blanks_secrets_without_discarding_surrounding_structure():
 
 
 def test_every_source_package_is_importable():
-    """psok.mcp had no __init__.py and worked only as an implicit namespace
+    """backend.mcp had no __init__.py and worked only as an implicit namespace
     package, which does not survive a wheel build."""
-    import psok
+    import backend
 
-    root = Path(psok.__file__).parent
+    root = Path(backend.__file__).parent
     for directory in root.rglob("*"):
         if not directory.is_dir() or "__pycache__" in directory.parts:
             continue
@@ -271,7 +271,7 @@ async def test_confirmation_decision_resolves_a_future_from_another_thread():
     import asyncio
     import inspect
 
-    from psok.api import main
+    from backend.api import main
 
     assert inspect.iscoroutinefunction(main.decide_confirmation), (
         "must be async so it runs on the event loop that owns the future"
@@ -292,7 +292,7 @@ async def test_confirmation_decision_resolves_a_future_from_another_thread():
 def test_pending_confirmations_record_the_owning_loop():
     import inspect
 
-    from psok.api import main
+    from backend.api import main
 
     assert '"loop": loop' in inspect.getsource(main._await_confirmation)
 
@@ -304,7 +304,7 @@ def test_pending_confirmations_record_the_owning_loop():
 def api():
     """The API keeps process-global MCP and confirmation state; restore it so
     these tests cannot leak into each other or into the tests above."""
-    from psok.api import main
+    from backend.api import main
 
     saved_mcp = dict(main._mcp)
     saved_pending = dict(main._pending)
@@ -346,8 +346,8 @@ async def test_remember_is_stored_under_the_key_the_gate_reads_back(api, db):
     name while the gate looks it up under operation[:subtype]. The two never
     matched, so the checkbox silently did nothing -- and had they matched,
     approving a read-only shell command would have approved destructive ones."""
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool
 
     async def never_runs(args, ctx):  # pragma: no cover - the gate denies first
         raise AssertionError("handler must not run in this test")
@@ -398,10 +398,10 @@ async def test_an_unconfigured_provider_becomes_an_error_event(db):
     """resolve() raised straight out of the loop's async generator. Over SSE the
     headers are already sent, so the client saw a 200 whose body simply stopped
     -- indistinguishable from a dropped connection, with no error to show."""
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     cid = ConversationRepository().create("not-a-real-provider", "m")
     registry = ToolRegistry(ConfirmationService(auto_approve))
@@ -419,7 +419,7 @@ def test_the_turn_stream_never_dies_without_saying_why(api, db):
 
     from fastapi.testclient import TestClient
 
-    from psok.db.repositories import ConversationRepository
+    from backend.db.repositories import ConversationRepository
 
     with TestClient(api.app) as client:
         cid = ConversationRepository().create("not-a-real-provider", "m")
@@ -438,11 +438,11 @@ async def test_a_streamed_answer_is_emitted_once(db):
     """Streaming sent the answer as deltas and then again whole as
     assistant_text, with done carrying it a third time. An interface rendering
     the documented events showed the reply twice."""
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     class StreamingClient:
         async def stream(self, messages, tools=None, params=None):
@@ -451,7 +451,7 @@ async def test_a_streamed_answer_is_emitted_once(db):
             yield StreamEvent(type="done", response=ModelResponse(text="hello"))
 
     model = ResolvedModel("fake", "fake-1", StreamingClient(), Capabilities(streaming=True))
-    import psok.agent.director as director_module
+    import backend.agent.director as director_module
 
     original = director_module.resolve
     director_module.resolve = lambda *a, **k: model
@@ -472,18 +472,18 @@ async def test_a_streamed_answer_is_emitted_once(db):
 async def test_a_non_streamed_answer_still_arrives_whole(db):
     """The other side of the fix: a provider that cannot stream must still
     produce exactly one assistant_text."""
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     class PlainClient:
         async def complete(self, messages, tools=None, params=None):
             return ModelResponse(text="whole answer")
 
     model = ResolvedModel("fake", "fake-1", PlainClient(), Capabilities(streaming=False))
-    import psok.agent.director as director_module
+    import backend.agent.director as director_module
 
     original = director_module.resolve
     director_module.resolve = lambda *a, **k: model
@@ -502,8 +502,8 @@ def test_health_counts_the_live_registry_including_mcp_tools(api, db):
     included connected MCP tools and never moved when a connector failed."""
     from fastapi.testclient import TestClient
 
-    from psok.tools.base import RiskLevel, Tool, ToolSource
-    from psok.tools.registry import build_default_registry
+    from backend.tools.base import RiskLevel, Tool, ToolSource
+    from backend.tools.registry import build_default_registry
 
     async def noop(args, ctx):  # pragma: no cover - never dispatched here
         raise AssertionError
@@ -608,8 +608,8 @@ def test_a_conversation_can_be_deleted_and_takes_its_scoped_rows_with_it(api, db
     deliberately kept."""
     from fastapi.testclient import TestClient
 
-    from psok.capabilities import CapabilityService, Kind
-    from psok.db.repositories import MessageRepository
+    from backend.capabilities import CapabilityService, Kind
+    from backend.db.repositories import MessageRepository
 
     with TestClient(api.app) as client:
         cid = client.post(
@@ -665,7 +665,7 @@ def test_a_message_can_be_pinned_and_the_pin_is_scoped_to_its_conversation(api, 
     success on another transcript."""
     from fastapi.testclient import TestClient
 
-    from psok.db.repositories import MessageRepository
+    from backend.db.repositories import MessageRepository
 
     with TestClient(api.app) as client:
         def make() -> str:
@@ -701,7 +701,7 @@ def test_a_pinned_message_does_not_change_what_the_model_is_sent(db):
     """A pin is a bookmark in a scrolling transcript and nothing more. If it
     ever started reordering or re-weighting history, "pin this" would quietly
     mean "change the conversation"."""
-    from psok.db.repositories import ConversationRepository, MessageRepository
+    from backend.db.repositories import ConversationRepository, MessageRepository
 
     cid = ConversationRepository(db).create("ollama", "qwen2.5:7b")
     messages = MessageRepository(db)
@@ -725,7 +725,7 @@ def test_a_skill_can_be_written_from_a_name_description_and_instruction(api, pso
     the loader will only ever report as broken."""
     from fastapi.testclient import TestClient
 
-    from psok.skills.loader import scan
+    from backend.skills.loader import scan
 
     with TestClient(api.app) as client:
         made = client.post(
@@ -770,7 +770,7 @@ def test_a_turn_stops_counting_as_running_at_its_terminal_frame(api, db, monkeyp
 
     from fastapi.testclient import TestClient
 
-    from psok.agent.director import Event
+    from backend.agent.director import Event
 
     seen: list[dict[str, bool]] = []
 
@@ -818,9 +818,9 @@ def test_an_unattended_automation_is_refused_rather_than_left_hanging(db):
     its other work. A denial is something the loop already handles."""
     import asyncio
 
-    from psok.automation import AutomationRepository, UnattendedGate, run_once
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool, ToolSource
+    from backend.automation import AutomationRepository, UnattendedGate, run_once
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool, ToolSource
 
     gate = UnattendedGate()
     service = ConfirmationService(callback=gate)
@@ -862,7 +862,7 @@ def test_an_unattended_automation_is_refused_rather_than_left_hanging(db):
             self.service = ConfirmationService(callback=callback)
 
         async def run(self, conversation_id, message):
-            from psok.agent.director import Event
+            from backend.agent.director import Event
 
             await self.service.check(tool, {"path": "/tmp/x"})
             yield Event("done", {"text": "I could not write the file."})
@@ -880,9 +880,9 @@ def test_an_automations_gate_is_its_own_and_not_the_shared_one(db):
     the rules for every interactive turn running at that moment. The unattended
     view shares the tools -- by reference, so a reconnecting connector stays
     visible -- and nothing else."""
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import Tool
-    from psok.tools.registry import ToolRegistry
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import Tool
+    from backend.tools.registry import ToolRegistry
 
     async def never(_request):
         return False
@@ -914,7 +914,7 @@ def test_an_automation_will_not_run_faster_than_the_floor(db):
     """"Every minute" is not an automation, it is a busy loop wearing a
     schedule, and it would have this machine talking to a model 1440 times a
     day by accident."""
-    from psok.automation import AutomationError, AutomationRepository
+    from backend.automation import AutomationError, AutomationRepository
 
     repo = AutomationRepository(db)
     with pytest.raises(AutomationError):
@@ -941,9 +941,9 @@ def test_a_non_streaming_provider_prints_its_answer_in_the_cli(db, capsys, monke
     the loop used to cause. With a provider that cannot stream -- Google
     declares streaming=False -- that was the only carrier of the answer, so the
     turn finished having printed nothing at all."""
-    import psok.agent.director as director_module
-    from psok.cli import cmd_chat
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
+    import backend.agent.director as director_module
+    from backend.cli import cmd_chat
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
 
     class PlainClient:
         async def complete(self, messages, tools=None, params=None):
@@ -979,13 +979,13 @@ async def test_the_interface_learns_a_confirmation_is_pending_before_it_answers(
     call that produces no confirmation at all."""
     import asyncio
 
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool, ToolResult
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool, ToolResult
+    from backend.tools.registry import ToolRegistry
 
     async def write(args, ctx):
         return ToolResult.ok("written")
@@ -1053,13 +1053,13 @@ async def test_a_low_risk_call_never_announces_a_confirmation(api, db, monkeypat
     confirmation_required is emitted for them."""
     import asyncio
 
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool, ToolResult
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool, ToolResult
+    from backend.tools.registry import ToolRegistry
 
     async def peek(args, ctx):
         return ToolResult.ok("read")
@@ -1113,7 +1113,7 @@ def test_replayed_tool_calls_use_the_chat_completions_wire_shape():
     `tool_name` and `is_error` columns on the tool row. Lenient servers ignore
     all of that; OpenAI and schema-validating servers answer 400, which breaks
     every multi-step turn on the adapter that covers most providers."""
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="m")
     history = [
@@ -1153,7 +1153,7 @@ def test_replayed_tool_calls_use_the_chat_completions_wire_shape():
 def test_arguments_already_serialized_are_not_double_encoded():
     """Tool calls that never round-tripped through storage arrive with the
     provider's own JSON string. Re-encoding it would send a quoted string."""
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="m")
     payload = client._build_payload(
@@ -1183,7 +1183,7 @@ async def test_an_endpoint_that_does_not_stream_still_produces_an_answer(monkeyp
     reply, tool call included, silently discarded."""
     import httpx
 
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     completion = {
         "choices": [
@@ -1214,12 +1214,12 @@ async def test_an_answer_that_never_streamed_is_still_emitted_once(db, monkeypat
     answer". An adapter falling back to a plain call inside stream() then
     delivered nothing the interface may render -- docs are explicit that
     done.text must not be rendered, so the reply vanished."""
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.registry import ToolRegistry
 
     class FallingBackClient:
         async def complete(self, messages, tools=None, params=None):
@@ -1255,10 +1255,10 @@ async def test_a_connector_switched_on_mid_session_becomes_usable(api, db, tmp_p
     the moment it was built, so a connector the user switched on in the
     interface stayed dark until PSOK was restarted. The toggle wrote a row
     nothing ever acted on."""
-    from psok.capabilities import CapabilityService, Kind
-    from psok.mcp.config import ServerConfig, Transport, add_server
-    from psok.mcp.manager import MCPManager
-    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from backend.capabilities import CapabilityService, Kind
+    from backend.mcp.config import ServerConfig, Transport, add_server
+    from backend.mcp.manager import MCPManager
+    from backend.tools.base import RiskLevel, Tool, ToolResult, ToolSource
 
     add_server(ServerConfig(name="notes", transport=Transport.STDIO, command="true"))
 
@@ -1329,13 +1329,13 @@ async def test_stopping_a_turn_ends_the_loop_and_the_tool_call(db, monkeypatch):
     held the gate open for its full timeout with nobody left to answer it."""
     import asyncio
 
-    import psok.agent.director as director_module
-    from psok.agent.director import Director
-    from psok.db.repositories import ConversationRepository, MessageRepository
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
-    from psok.security.confirmation import ConfirmationService
-    from psok.tools.base import RiskLevel, Tool, ToolResult
-    from psok.tools.registry import ToolRegistry
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository, MessageRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+    from backend.security.confirmation import ConfirmationService
+    from backend.tools.base import RiskLevel, Tool, ToolResult
+    from backend.tools.registry import ToolRegistry
 
     never_answered = asyncio.Event()
 
@@ -1403,7 +1403,7 @@ def test_the_api_can_stop_a_turn_it_is_streaming(api, db):
     """Nothing can interrupt a turn without a route to ask through."""
     import asyncio
 
-    from psok.db.repositories import ConversationRepository
+    from backend.db.repositories import ConversationRepository
 
     cid = ConversationRepository().create("f", "f")
     with pytest.raises(Exception) as unknown:
@@ -1457,7 +1457,7 @@ def test_a_database_from_an_older_version_still_opens(tmp_path):
     user, so a stale database has to be brought forward, not deleted."""
     import sqlite3
 
-    from psok.db import connection
+    from backend.db import connection
 
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)
@@ -1480,7 +1480,7 @@ def test_a_database_from_an_older_version_still_opens(tmp_path):
     assert [r[0] for r in kept] == ["an old fact"], "existing rows survive the upgrade"
 
     # And the current code paths work against the upgraded table.
-    from psok.memory import MemoryStore
+    from backend.memory import MemoryStore
 
     store = MemoryStore(conn)
     new_id = store.add("a new fact", "c1")
@@ -1501,7 +1501,7 @@ def test_a_column_this_version_stopped_writing_is_dropped(tmp_path):
     Mutation check: empty `RETIRED_COLUMNS`, or drop the column without the
     index.
     """
-    from psok.db import connection
+    from backend.db import connection
 
     conn = connection.connect(tmp_path / "old.db")
     connection.migrate(conn)
@@ -1524,7 +1524,7 @@ def test_a_column_this_version_stopped_writing_is_dropped(tmp_path):
 def test_migrating_twice_changes_nothing(tmp_path):
     import sqlite3
 
-    from psok.db import connection
+    from backend.db import connection
 
     path = tmp_path / "twice.db"
     conn = connection.connect(path)
@@ -1544,9 +1544,9 @@ async def test_switching_a_connector_on_starts_it_and_says_what_happened(api, db
     so it read "on" whether the process had started, had died, or had never
     been asked to start. Nothing in the interface could tell the difference --
     the user saw connectors enabled and an agent with none of their tools."""
-    from psok.mcp.config import ServerConfig, Transport, add_server
-    from psok.mcp.manager import MCPManager
-    from psok.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from backend.mcp.config import ServerConfig, Transport, add_server
+    from backend.mcp.manager import MCPManager
+    from backend.tools.base import RiskLevel, Tool, ToolResult, ToolSource
 
     add_server(ServerConfig(name="browser", transport=Transport.STDIO, command="true"))
 
@@ -1624,10 +1624,10 @@ async def test_switching_a_connector_on_starts_it_and_says_what_happened(api, db
 async def test_removing_a_connector_takes_its_failure_with_it(db, psok_home):
     """A server removed from mcp.yaml left its error behind, so /api/health
     reported degraded forever over a connector that no longer existed."""
-    from psok.mcp.config import ServerConfig, Transport, add_server, remove_server
-    from psok.mcp.manager import MCPManager
-    from psok.security.confirmation import ConfirmationService, auto_approve
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.config import ServerConfig, Transport, add_server, remove_server
+    from backend.mcp.manager import MCPManager
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.registry import ToolRegistry
 
     add_server(ServerConfig(name="gone", transport=Transport.STDIO, command="true"))
     manager = MCPManager(ToolRegistry(ConfirmationService(auto_approve)), open_browser=False)
@@ -1652,13 +1652,13 @@ async def test_a_refused_embedding_endpoint_is_not_retried(monkeypatch):
     was retried with backoff -- 6.09s measured, twice a turn, on a machine that
     had never had Ollama installed. Nothing is listening; backoff cannot help.
     """
-    from psok.retrieval import embeddings
+    from backend.retrieval import embeddings
 
     embeddings.forget_unreachable()
     attempts = 0
 
-    from psok.runtime.failures import FailureKind
-    from psok.runtime.http import ProviderHTTPError
+    from backend.runtime.failures import FailureKind
+    from backend.runtime.http import ProviderHTTPError
 
     seen_retries = []
 
@@ -1697,7 +1697,7 @@ async def test_a_refused_embedding_endpoint_is_not_retried(monkeypatch):
 async def test_http_connections_are_reused_across_calls():
     """A client was built and closed per request, so every model call paid a
     fresh TCP and TLS handshake -- 26 of them in one measured browser task."""
-    from psok.runtime import http
+    from backend.runtime import http
 
     await http.close_clients()
     first = http._client(30.0)
@@ -1755,7 +1755,7 @@ def test_only_the_newest_runs_are_kept(db):
 def test_a_run_records_which_automation_wrote_it(db, monkeypatch):
     """Without this the runs are indistinguishable from conversations someone
     started, which is what let them crowd the rail."""
-    from psok.automation import AutomationRepository
+    from backend.automation import AutomationRepository
 
     repo = AutomationRepository(db)
     automation = repo.create(name="RickROll", prompt="go", every_minutes=15)
@@ -1776,13 +1776,13 @@ def test_runs_written_before_the_column_existed_are_adopted(tmp_path, monkeypatc
     machine this was written for that was 31 of 111 conversations."""
     import sqlite3
 
-    from psok.db import connection
+    from backend.db import connection
 
     monkeypatch.setenv("PSOK_HOME", str(tmp_path))
     connection.reset_connection()
     conn = connection.get_connection()
 
-    from psok.automation import AutomationRepository
+    from backend.automation import AutomationRepository
 
     automation = AutomationRepository(conn).create(name="RickROll", prompt="go", every_minutes=15)
     # A run as the pre-column code wrote it: correct title, no automation_id.

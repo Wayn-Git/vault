@@ -28,7 +28,7 @@ create/pause/delete, audit trail, conversation delete.
   would close it.
 - `sqlite-vec` + FTS5 work. Bubblewrap available (shell sandbox real, differentially tested).
 - **GitHub connector:** OAuth client registered, real sign-in done (44 tools). Needed
-  `Accept: application/json` fix in `psok/mcp/oauth.py` (GitHub returns form-encoded w/o it)
+  `Accept: application/json` fix in `backend/mcp/oauth.py` (GitHub returns form-encoded w/o it)
   and `auth_timeout_seconds` (sign-in was given the server's 60s deadline; `ServerConfig` now
   separates server-answer time from human-sign-in time).
 - **Google** client secret stored + accepted. Rotate **the secret from the transcript** (plain
@@ -93,7 +93,7 @@ create/pause/delete, audit trail, conversation delete.
 - **Refused:** WhatsApp servers all need `better-sqlite3` (Node 20–25; this box runs **Node 26**
   → exit 1) — recheck when it ships 26 support. `jordanburke/microsoft-todo-mcp-server` broken in
   all 5 versions; `fabienbutz/microsoft-todo-mcp` shipped instead (uses Microsoft's public client).
-- **Tests:** `pytest` (507 unit, 1 skipped), `pytest -m live` (5), `ruff check psok tests`.
+- **Tests:** `pytest` (507 unit, 1 skipped), `pytest -m live` (5), `ruff check backend tests`.
   Frontend: `npm run lint` / `build` / `smoke` (needs running `psok serve` + provider).
 
 ## Traps (reproduced live; plausible errors pointed away from cause)
@@ -165,7 +165,7 @@ Built and live-verified. Full write-up: [architecture/providers.md](architecture
 The abstraction was not rewritten — `ChatClient`, `ResolvedModel`, the registry
 and the OpenAI-compatible fall-through are unchanged.
 
-- **3.1 Catalogue.** `psok/provider_catalogue.py`, 13 presets (Ollama, Groq,
+- **3.1 Catalogue.** `backend/provider_catalogue.py`, 13 presets (Ollama, Groq,
   Cerebras, OpenAI, Anthropic, Google, OpenRouter, xAI, DeepSeek, Mistral,
   Together, Fireworks, NVIDIA). The starter `providers.yaml` is now **generated
   from it**, so the drift `psok doctor` reported cannot recur. No `auth_style`
@@ -179,7 +179,7 @@ and the OpenAI-compatible fall-through are unchanged.
   by the docs and the starter file since before it existed — is now real, and
   prompts rather than taking the key as an argument (an argument lands in shell
   history, which is how two keys ended up needing rotation).
-- **3.3 Availability.** `psok/runtime/availability.py`. Keyless endpoints are
+- **3.3 Availability.** `backend/runtime/availability.py`. Keyless endpoints are
   probed once and cached (60s); everything else is presumed available until a
   turn proves otherwise (300s). `/api/health` gained `providers_unavailable`.
   Unavailable providers stay listed with a reason rather than vanishing.
@@ -187,13 +187,13 @@ and the OpenAI-compatible fall-through are unchanged.
   by all four adapters, guess kept as fallback. **`budget_history` now counts
   tool schemas** — the 29,620 tokens it never saw — and the director builds the
   schemas before budgeting rather than after.
-- **3.5 Taxonomy.** `psok/runtime/failures.py`: `FailureKind` with retry and
+- **3.5 Taxonomy.** `backend/runtime/failures.py`: `FailureKind` with retry and
   fallback as *separate* decisions. Quota-exhausted 429 is non-retryable but
   fallback-worthy; a 404 is neither. `ProviderStreamError` moved to
   `runtime/http.py` beside `ProviderHTTPError`, both now `ProviderError`
   subclasses carrying `kind`/`status`/`body`. The one string-matching consumer
   (`embeddings.py`'s `if "unreachable" in str(exc)`) reads the field now.
-- **3.6 The chain.** `psok/runtime/chain.py`. Order from `providers.yaml`, or a
+- **3.6 The chain.** `backend/runtime/chain.py`. Order from `providers.yaml`, or a
   top-level `fallback:` list. Capped at two fallbacks. **One shared
   `AttemptBudget`**, not `MAX_RETRIES` per link. History **re-budgeted for the
   fallback model's own window**. One `warning` frame: *"nvidia was unreachable —
@@ -220,7 +220,7 @@ Full write-up: [architecture/connectors.md](architecture/connectors.md). The
 latency half was already done (2026-08-27, >115s → 3.9s); this is the experience.
 
 - **4.1 Tools of a connector nobody signed in to are withheld.**
-  `psok/mcp/guidance.py` asks `is_signed_in` — the server's *own* store, not the
+  `backend/mcp/guidance.py` asks `is_signed_in` — the server's *own* store, not the
   keychain — and unions the result into the `hidden_servers` the director already
   passed to `registry.schemas()`. `None` (nothing to sign in to) is not `False`,
   so the fetch connector is untouched. `dispatch` refuses too, because a model
@@ -232,7 +232,7 @@ latency half was already done (2026-08-27, >115s → 3.9s); this is the experien
   iteration budget. One module holds the wording so three call sites cannot
   describe three interfaces. An `OAuthRequired` no longer answers `psok mcp
   login` at someone sitting in a browser.
-- **4.3 One state per connector.** `psok/mcp/lifecycle.py`:
+- **4.3 One state per connector.** `backend/mcp/lifecycle.py`:
   `off / starting / setup / authenticating / sign_in / syncing / failed / ready`,
   each with the single `action` that moves it on. Computed on the server and
   shipped on every `GET /api/mcp/servers` row as `lifecycle`, so the screen, the
@@ -567,7 +567,7 @@ First use of any MCP server needs a one-time trust confirmation — expect two p
 PSOK cannot inspect somebody else's server — and with 156 of 178 tools coming from connectors,
 every search and every list raised a prompt, which is how a gate stops being read. It can inspect
 them: MCP carries `readOnlyHint` and `destructiveHint` on every tool and discovery was discarding
-the field. `psok/mcp/risk.py` reads it, falls back to the verb the name starts with for servers
+the field. `backend/mcp/risk.py` reads it, falls back to the verb the name starts with for servers
 that annotate nothing, and never *lowers* a declaration — a server calling `delete_everything`
 read-only is wrong or lying. Live result on this machine: **85 low, 59 medium, 34 high** where it
 had been 156 medium.
@@ -627,7 +627,7 @@ had been 156 medium.
     a thread reader, star, mark read, archive and a plain-text reply. Read **straight from Gmail**,
     not through the connector: `search_gmail_messages` answers in prose written for a model
     (`📧 MESSAGES:`, `Message ID:`), and a screen built on that is a regular expression over
-    somebody else's help text. `psok/mail/gmail.py` uses the refresh token the connector already
+    somebody else's help text. `backend/mail/gmail.py` uses the refresh token the connector already
     stored, reads that file and never writes it. HTML mail is reduced to text **on the server** —
     an inbox is the most hostile input this system has, and a view that renders what arrives in it
     is a different feature with a different threat model. The page says when a message was reduced.

@@ -36,7 +36,7 @@ The directory name is the skill's identity. `version` is for the user's own trac
 
 **No remote skill registry or marketplace in v1.** A solo project does not need a distribution system for something that is a markdown file; sharing a skill is sharing a directory. This may be revisited if PSOK ever wants a community skill-sharing surface, but it is not infrastructure v1 needs.
 
-Builtin skills ship inside the PSOK repository under `skills/builtin/` and are copied into `~/.psok/skills/` on first run, **without overwriting any skill the user has already edited** — the same seeding behaviour Pipali uses, checked by comparing against a stored hash of what was last seeded rather than by unconditional overwrite.
+Builtin skills ship inside the PSOK repository under `backend/skills/builtin/` and are copied into `~/.psok/skills/` on first run, **without overwriting any skill the user has already edited** — the same seeding behaviour Pipali uses, checked by comparing against a stored hash of what was last seeded rather than by unconditional overwrite.
 
 ## Discovery
 

@@ -29,7 +29,7 @@ abstraction. Three separate things were wrong around it:
 
 ## The catalogue
 
-`psok/provider_catalogue.py` holds thirteen presets — slug, label, base URL,
+`backend/provider_catalogue.py` holds thirteen presets — slug, label, base URL,
 default model, context window where it is known, key page, docs page. Each is
 the set of facts needed to write one `providers.yaml` entry.
 
@@ -61,7 +61,7 @@ exist:
   model (OpenRouter, Together, Fireworks, NVIDIA) leave it unset.
 
 Writing is `config.save_providers` / `add_provider` / `remove_provider`,
-modelled on `psok/mcp/config.py`, which has done the same for `mcp.yaml` since
+modelled on `backend/mcp/config.py`, which has done the same for `mcp.yaml` since
 connectors shipped. `yaml.safe_dump` cannot preserve comments, so the header is
 re-emitted on every write and hand-written per-entry comments are lost on the
 first programmatic edit — the honest trade for being able to edit the file at
@@ -90,7 +90,7 @@ schemas *before* budgeting rather than after.
 
 ## The failure taxonomy
 
-`psok/runtime/failures.py`. `ProviderError` (and its subclasses
+`backend/runtime/failures.py`. `ProviderError` (and its subclasses
 `ProviderHTTPError` and `ProviderStreamError`, now both defined in
 `runtime/http.py`) carries `kind`, `status` and `body` alongside the message.
 
@@ -123,7 +123,7 @@ request, which is the conservative reading: it stops rather than retries.
 
 ## Availability
 
-`psok/runtime/availability.py`, fed from two sources kept deliberately apart:
+`backend/runtime/availability.py`, fed from two sources kept deliberately apart:
 
 - **A probe**, for endpoints whose credential tells us nothing — one `GET
   {base}/models` with a 3-second timeout. *Any* HTTP answer counts as reachable:
@@ -150,7 +150,7 @@ Settings shows the reason in full.
 
 ## The chain
 
-`psok/runtime/chain.py`. The chosen provider first, then up to two others.
+`backend/runtime/chain.py`. The chosen provider first, then up to two others.
 
 - **Order** is `providers.yaml`'s own order — the closest thing to a stated
   preference that exists without inventing a setting. A top-level `fallback:`

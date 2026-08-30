@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from psok.security.sandbox import SandboxPolicy, platform_backend, unavailable_reason, wrap_command
-from psok.tools.base import ToolContext
-from psok.tools.builtin import shell
+from backend.security.sandbox import (
+    SandboxPolicy,
+    platform_backend,
+    unavailable_reason,
+    wrap_command,
+)
+from backend.tools.base import ToolContext
+from backend.tools.builtin import shell
 
 requires_sandbox = pytest.mark.skipif(
     platform_backend() is None, reason=f"no OS sandbox here: {unavailable_reason()}"

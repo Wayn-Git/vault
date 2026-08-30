@@ -256,7 +256,7 @@ export const api = {
   syncTasks: () => j('/tasks/sync', json('POST')),
 
   // Mail. Straight from Gmail rather than through the connector -- the
-  // connector answers in prose written for a model, see psok/mail/gmail.py.
+  // connector answers in prose written for a model, see backend/mail/gmail.py.
   mailAccount: () => j('/mail/account'),
   mailThreads: ({ q = 'in:inbox', limit = 25 } = {}) =>
     j(`/mail/threads?q=${encodeURIComponent(q)}&limit=${limit}`),

@@ -8,25 +8,25 @@ from __future__ import annotations
 
 import pytest
 
-from psok import config
-from psok.agent.director import Director
-from psok.agent.prompt import budget_history, tool_schema_tokens
-from psok.config import ProviderConfig
-from psok.db.repositories import ConversationRepository
-from psok.provider_catalogue import PRESETS_BY_SLUG, PROVIDER_PRESETS, render_default_providers
-from psok.runtime import availability
-from psok.runtime.chain import AttemptBudget, build_chain
-from psok.runtime.failures import (
+from backend import config
+from backend.agent.director import Director
+from backend.agent.prompt import budget_history, tool_schema_tokens
+from backend.config import ProviderConfig
+from backend.db.repositories import ConversationRepository
+from backend.provider_catalogue import PRESETS_BY_SLUG, PROVIDER_PRESETS, render_default_providers
+from backend.runtime import availability
+from backend.runtime.chain import AttemptBudget, build_chain
+from backend.runtime.failures import (
     FailureKind,
     classify_status,
     classify_stream_error,
     should_fall_back,
     should_retry,
 )
-from psok.runtime.http import ProviderHTTPError
-from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolSchema
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.registry import ToolRegistry
+from backend.runtime.http import ProviderHTTPError
+from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolSchema
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +101,7 @@ async def test_a_quota_429_is_not_retried_over_http(monkeypatch):
     """
     import httpx
 
-    from psok.runtime import http as runtime_http
+    from backend.runtime import http as runtime_http
 
     attempts = 0
 
@@ -138,7 +138,7 @@ def test_every_preset_can_be_written_and_read_back(tmp_path):
     path = tmp_path / "providers.yaml"
     path.write_text("providers: []\n")
 
-    from psok.provider_catalogue import entry_for
+    from backend.provider_catalogue import entry_for
 
     for preset in PROVIDER_PRESETS:
         config.add_provider(entry_for(preset), path)
@@ -160,7 +160,7 @@ def test_the_seeded_file_matches_the_catalogue(tmp_path):
     path.write_text(render_default_providers())
     loaded = config.load_providers(path)
 
-    from psok.provider_catalogue import SEEDED
+    from backend.provider_catalogue import SEEDED
 
     assert set(loaded) == set(SEEDED)
     assert loaded["groq"].api_key_ref == "psok/groq", "listed, awaiting only a key"
@@ -206,7 +206,7 @@ def test_a_declared_context_window_beats_the_substring_guess(tmp_path, psok_home
         "    default_model: nemotron-3-ultra-550b-a55b\n"
         "    context_window: 256000\n"
     )
-    from psok.runtime.registry import resolve
+    from backend.runtime.registry import resolve
 
     assert resolve("nvidia").capabilities.context_window == 256_000
 
@@ -313,7 +313,7 @@ def test_the_chain_is_capped(psok_home):
 
 
 def test_a_declared_fallback_order_is_honoured(tmp_path):
-    from psok.runtime.chain import declared_order
+    from backend.runtime.chain import declared_order
 
     path = tmp_path / "providers.yaml"
     path.write_text("providers: []\nfallback:\n  - cerebras\n  - groq\n")
@@ -385,14 +385,14 @@ def _registry() -> ToolRegistry:
 
 def _patch_chain(monkeypatch, links, models):
     """Pin the chain and hand out a resolved model per provider name."""
-    from psok.runtime.chain import Link
+    from backend.runtime.chain import Link
 
     monkeypatch.setattr(
-        "psok.agent.director.build_chain",
+        "backend.agent.director.build_chain",
         lambda provider, model, **kw: [Link(provider=p, model=f"{p}-1") for p in links],
     )
     monkeypatch.setattr(
-        "psok.agent.director.resolve",
+        "backend.agent.director.resolve",
         lambda provider, model=None, **kw: models[provider],
     )
 
@@ -450,8 +450,8 @@ async def test_a_failed_provider_is_not_retried_on_every_later_iteration(db, mon
 
     Mutation check: reset `active = 0` at the top of the iteration loop.
     """
-    from psok.runtime.types import ToolCall
-    from psok.tools.base import RiskLevel, Tool, ToolResult
+    from backend.runtime.types import ToolCall
+    from backend.tools.base import RiskLevel, Tool, ToolResult
 
     async def echo(args, ctx):
         return ToolResult.ok("ok")
@@ -499,7 +499,7 @@ async def test_a_failure_after_the_first_token_is_not_handed_over(db, monkeypatc
 
     Mutation check: drop `not streamed_text` from `can_hand_over`.
     """
-    from psok.runtime.types import StreamEvent
+    from backend.runtime.types import StreamEvent
 
     class _DiesMidStream:
         capabilities = None
@@ -567,7 +567,7 @@ async def test_extraction_uses_the_model_that_answered_not_the_one_that_failed(d
 def client(psok_home):
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     with TestClient(app) as c:
         yield c
@@ -582,7 +582,7 @@ def test_a_provider_can_be_added_from_the_catalogue_with_its_key(client, psok_ho
     assert added["ready"] is True, "a preset supplies the base URL and the model"
     assert added["needs_key"] is False
 
-    from psok.secrets import get_secret
+    from backend.secrets import get_secret
 
     assert get_secret("psok/groq") == "gsk-not-a-real-key"
 
@@ -635,7 +635,7 @@ def test_removing_a_provider_keeps_its_key(client, psok_home):
     assert client.delete("/api/providers/groq").status_code == 200
     assert client.delete("/api/providers/groq").status_code == 404
 
-    from psok.secrets import get_secret
+    from backend.secrets import get_secret
 
     assert get_secret("psok/groq") == "gsk-keep-me"
 
@@ -699,7 +699,7 @@ def test_a_conversation_can_name_its_own_fallback_order(db):
 
     Mutation check: ignore the `fallback` column in `_conversation_fallback`.
     """
-    from psok.agent.director import _conversation_fallback
+    from backend.agent.director import _conversation_fallback
 
     repo = ConversationRepository()
     cid = repo.create("nvidia", "nemotron")
@@ -714,7 +714,7 @@ def test_an_empty_fallback_list_means_do_not_fall_back(db):
 
     Mutation check: treat `[]` as None in `build_chain`.
     """
-    from psok.agent.director import _conversation_fallback
+    from backend.agent.director import _conversation_fallback
 
     repo = ConversationRepository()
     cid = repo.create("nvidia", "nemotron")
@@ -729,7 +729,7 @@ def test_an_unreadable_fallback_order_defers_rather_than_forbidding(db):
     """A parse failure must not silently pick the stricter answer: "no opinion"
     and "never fall back" are different, and only one of them is safe to guess.
     """
-    from psok.agent.director import _conversation_fallback
+    from backend.agent.director import _conversation_fallback
 
     repo = ConversationRepository()
     cid = repo.create("nvidia", "nemotron")
@@ -742,7 +742,7 @@ def test_an_unreadable_fallback_order_defers_rather_than_forbidding(db):
 def test_a_fallback_naming_an_unconfigured_provider_is_refused(client, psok_home):
     """Skipped silently at turn time, the user would never learn the name was
     wrong."""
-    from psok.config import configured_providers
+    from backend.config import configured_providers
 
     provider = next(iter(configured_providers()), None)
     if provider is None:
@@ -768,7 +768,7 @@ def test_thinking_is_read_whatever_the_provider_calls_it():
 
     Mutation check: read `payload.get("reasoning_content")` directly again.
     """
-    from psok.runtime.providers.openai_compat import _reasoning_of
+    from backend.runtime.providers.openai_compat import _reasoning_of
 
     assert _reasoning_of({"reasoning_content": "nvidia's spelling"}) == "nvidia's spelling"
     assert _reasoning_of({"reasoning": "groq's spelling"}) == "groq's spelling"
@@ -788,7 +788,7 @@ def test_a_providers_tool_cap_trims_rather_than_failing_the_turn():
     Mutation check: return `tools` unchanged from `cap_tools`, or sort the
     builtins after the connector tools.
     """
-    from psok.agent.prompt import cap_tools, dropped_summary
+    from backend.agent.prompt import cap_tools, dropped_summary
 
     class Schema:
         def __init__(self, name):
@@ -821,8 +821,8 @@ def test_a_declared_tool_cap_reaches_the_model_that_has_one():
 
     Mutation check: drop `max_tools=config.max_tools` from the adapter.
     """
-    from psok.config import ProviderConfig
-    from psok.runtime.providers import openai_compat
+    from backend.config import ProviderConfig
+    from backend.runtime.providers import openai_compat
 
     capped = openai_compat.initialize(
         ProviderConfig(name="groq", base_url="https://x/v1", max_tools=128), model="m"
@@ -846,7 +846,7 @@ def test_tiers_name_a_model_per_job_and_ignore_the_ones_that_cannot_work(tmp_pat
 
     Mutation check: drop the `provider not in known` guard from `load_tiers`.
     """
-    from psok.config import Tier, load_tiers
+    from backend.config import Tier, load_tiers
 
     path = tmp_path / "providers.yaml"
     path.write_text(
@@ -882,7 +882,7 @@ def test_no_tiers_is_the_ordinary_case_not_a_failure(tmp_path):
 
     Mutation check: raise from `load_tiers` when the block is missing.
     """
-    from psok.config import load_tiers
+    from backend.config import load_tiers
 
     path = tmp_path / "providers.yaml"
     path.write_text("providers:\n  - name: groq\n    base_url: https://x/v1\n")
@@ -899,7 +899,7 @@ def test_every_preset_can_be_written_into_a_providers_file():
     Mutation check: add "cloudflare" to `SEEDED`, or drop the placeholder from
     its base URL so the defect stops being visible.
     """
-    from psok.provider_catalogue import PRESETS_BY_SLUG, SEEDED, render_default_providers
+    from backend.provider_catalogue import PRESETS_BY_SLUG, SEEDED, render_default_providers
 
     for slug in SEEDED:
         preset = PRESETS_BY_SLUG[slug]
@@ -918,7 +918,7 @@ def test_an_environment_variable_name_survives_a_hyphenated_slug():
 
     Mutation check: drop the `replace('-', '_')` from `api_key_env`.
     """
-    from psok.provider_catalogue import PRESETS_BY_SLUG
+    from backend.provider_catalogue import PRESETS_BY_SLUG
 
     assert PRESETS_BY_SLUG["ollama-cloud"].api_key_env == "PSOK_OLLAMA_CLOUD_API_KEY"
     assert "-" not in PRESETS_BY_SLUG["ollama-cloud"].api_key_env
