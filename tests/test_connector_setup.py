@@ -516,3 +516,168 @@ def test_a_browser_profile_is_not_six_accounts(psok_home, tmp_path, monkeypatch)
     )
     monkeypatch.setattr(commands, "_accounts_of", lambda config: [profile, profile])
     assert commands.account_count(google) == 2
+
+
+# --------------------------------------------------- ready is read off the registry
+#
+# A connector reported "failed to start" while the agent was calling its tools.
+# `state_of` checked the error string before it checked anything else, and the
+# manager reported an error string that nothing ever cleared, so one transient
+# spawn, discovery or OAuth failure was permanent as far as every screen was
+# concerned. The fix is that tools in the `ToolRegistry` are the ground truth.
+
+
+def _manager_with(tool_count: int, *, connected: bool = True):
+    """A manager holding `tool_count` registered tools for one server."""
+    from backend.mcp.manager import MCPManager
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from backend.tools.registry import ToolRegistry, mcp_tool_key
+
+    async def handler(args, ctx):
+        return ToolResult.ok("ok")
+
+    registry = ToolRegistry(ConfirmationService(auto_approve))
+    manager = MCPManager(registry, open_browser=False)
+    for n in range(tool_count):
+        registry.register(
+            Tool(
+                name=mcp_tool_key(f"t{n}", "browser"),
+                description="d",
+                parameters={},
+                handler=handler,
+                risk=RiskLevel.LOW,
+                source=ToolSource.MCP,
+                server_name="browser",
+            )
+        )
+
+    class _Session:
+        def __init__(self) -> None:
+            self.connected = connected
+            self.tools = list(range(tool_count))
+
+    if tool_count:
+        import time as _time
+
+        manager.ready_since["browser"] = _time.monotonic()
+    if connected:
+        manager.connections["browser"] = _Session()
+    return manager
+
+
+def test_a_registered_tool_outranks_a_recorded_error():
+    """The ordering is the whole fix. A connector serving 122 tools must never
+    describe itself as failed while it serves them.
+
+    Mutation check: move the `live.get("ready")` branch in `state_of` back
+    below the `error` check.
+    """
+    from backend.mcp.lifecycle import state_of
+
+    manager = _manager_with(3)
+    manager.errors["browser"] = "npx: spawn failed"
+
+    reported = manager.state()["browser"]
+    assert reported["ready"] is True
+    assert reported["tools"] == 3, "counted from the registry, not from the connection"
+    assert reported["error"] is None, "withheld while ready -- kept in `errors` for the log"
+    assert manager.errors["browser"], "the string itself is not forgotten"
+
+    state = state_of(_row("browser"), live=reported)
+    assert state.state == "ready" and state.ready is True
+    assert state.detail == "Ready, 3 tools."
+
+    # And directly, with an error the caller did not suppress. `state_of` is
+    # read by the CLI and by anything holding an older `live` dict, so the
+    # ordering has to hold in the derivation and not only in the manager.
+    both = state_of(
+        _row("browser"), live={"connected": True, "tools": 3, "error": "npx: spawn failed"}
+    )
+    assert both.state == "ready", "tools present outrank an error string here too"
+    assert both.detail == "Ready, 3 tools."
+
+
+def test_one_transient_failure_does_not_demote_a_working_connector():
+    """Two failures are a bad minute; three is a connector that is gone.
+
+    Mutation check: set `DEMOTE_AFTER_FAILURES` to 1.
+    """
+    from backend.mcp.manager import DEMOTE_AFTER_FAILURES
+
+    assert DEMOTE_AFTER_FAILURES == 3, "the threshold this test pins"
+
+    manager = _manager_with(3)
+    manager._hold_off("browser")
+    assert manager.is_ready("browser") is True, "one refused DNS lookup is a bad minute"
+    manager._hold_off("browser")
+    assert manager.is_ready("browser") is True, "so is a second"
+
+    manager._hold_off("browser")
+    assert manager.is_ready("browser") is False, "the third consecutive failure demotes it"
+    assert manager.state()["browser"]["error"] is None, "no error was recorded, only failures"
+
+
+def test_tools_leaving_the_registry_demotes_it_at_once():
+    """The cool-down forgives an error, not an empty registry: a connector with
+    no tools cannot be used no matter how recently it could.
+
+    Mutation check: drop the `registered_tool_count(name) <= 0` guard.
+    """
+    from backend.mcp.lifecycle import state_of
+
+    manager = _manager_with(3)
+    manager.registry.unregister_server("browser")
+
+    assert manager.is_ready("browser") is False
+    manager.errors["browser"] = "[Errno 111] Connection refused"
+    assert state_of(_row("browser"), live=manager.state()["browser"]).state == "failed"
+
+
+def test_a_dead_session_stays_ready_only_for_the_cool_down(monkeypatch):
+    """A registration vouches for a connector for a while after its session
+    goes, so a reconnect in flight does not flicker the row through "failed".
+
+    Mutation check: return True unconditionally once tools are registered.
+    """
+    import backend.mcp.manager as manager_module
+
+    manager = _manager_with(2, connected=False)
+    assert manager.is_ready("browser") is True, "just registered"
+
+    monkeypatch.setattr(
+        manager_module.time,
+        "monotonic",
+        lambda: manager.ready_since["browser"] + manager_module.READY_COOLDOWN_SECONDS + 1,
+    )
+    assert manager.is_ready("browser") is False, "and no longer vouches for it after that"
+
+
+async def test_connecting_an_already_connected_server_does_not_rebuild_it():
+    """Reconcile runs at the head of every turn. Reconnecting unconditionally
+    gave a working connector a fresh chance to fail transiently, every turn.
+
+    Mutation check: remove the early return from `connect_server`.
+    """
+    from backend.mcp.config import ServerConfig, Transport
+
+    manager = _manager_with(4)
+    torn_down: list[str] = []
+
+    async def record(name):
+        torn_down.append(name)
+
+    manager.disconnect_server = record
+    config = ServerConfig(name="browser", transport=Transport.STDIO, command="x")
+
+    assert await manager.connect_server(config, interactive=False) == 4
+    assert torn_down == [], "an idempotent connect leaves the live session alone"
+
+    from backend.mcp.client import MCPConnectionError
+
+    with pytest.raises(MCPConnectionError):
+        # `force` is what a person pressing Connect passes, and it must still
+        # rebuild -- proven here by it getting far enough to tear the old one
+        # down and then fail on a command that does not exist.
+        await manager.connect_server(config, interactive=False, force=True)
+    assert torn_down == ["browser"], "and force still means force"

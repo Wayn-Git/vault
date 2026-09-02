@@ -49,15 +49,30 @@ export default function Capabilities() {
         </header>
 
         <div className="cap-bar" data-enter>
-          <div className="cap-tabs" role="tablist">
-            {TABS.map((t) => (
+          {/* `role="tablist"` is a promise about the keyboard as much as about
+              the labels: arrows move between tabs, only the selected one is in
+              the tab order, and each names the panel it controls. Claiming the
+              role without those is worse than using plain buttons. */}
+          <div className="cap-tabs" role="tablist" aria-label="Skills or connectors">
+            {TABS.map((t, i) => (
               <button
                 key={t.id}
                 type="button"
                 role="tab"
+                id={`cap-tab-${t.id}`}
                 aria-selected={capabilitiesTab === t.id}
+                aria-controls={`cap-panel-${t.id}`}
+                tabIndex={capabilitiesTab === t.id ? 0 : -1}
                 className={`cap-tab${capabilitiesTab === t.id ? ' active' : ''}`}
                 onClick={() => setCapabilitiesTab(t.id)}
+                onKeyDown={(e) => {
+                  const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+                  if (!step) return
+                  e.preventDefault()
+                  const next = TABS[(i + step + TABS.length) % TABS.length]
+                  setCapabilitiesTab(next.id)
+                  document.getElementById(`cap-tab-${next.id}`)?.focus()
+                }}
               >
                 {t.label}
               </button>
@@ -80,9 +95,15 @@ export default function Capabilities() {
           </div>
         </div>
 
-        {skills
-          ? <SkillsTab query={query} newOpen={newOpen} setNewOpen={setNewOpen} />
-          : <ConnectorsTab query={query} newOpen={newOpen} setNewOpen={setNewOpen} />}
+        <div
+          role="tabpanel"
+          id={`cap-panel-${capabilitiesTab}`}
+          aria-labelledby={`cap-tab-${capabilitiesTab}`}
+        >
+          {skills
+            ? <SkillsTab query={query} newOpen={newOpen} setNewOpen={setNewOpen} />
+            : <ConnectorsTab query={query} newOpen={newOpen} setNewOpen={setNewOpen} />}
+        </div>
       </div>
     </div>
   )

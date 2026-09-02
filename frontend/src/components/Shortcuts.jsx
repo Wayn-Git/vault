@@ -1,18 +1,17 @@
-import { useEffect } from 'react'
+import { useRef } from 'react'
 import Icon from './Icon.jsx'
 import { useApp } from '../store.jsx'
 import { SHORTCUTS, pretty } from '../keys.js'
+import { useModalDismiss, onOverlayMouseDown } from '../hooks/useModalDismiss.js'
+import { useFocusTrap } from '../hooks/useFocusTrap.js'
 
 export default function Shortcuts() {
   const { overlay, setOverlay } = useApp()
   const open = overlay === 'shortcuts'
+  const panelRef = useRef(null)
 
-  useEffect(() => {
-    if (!open) return
-    const key = (e) => { if (e.key === 'Escape') setOverlay(null) }
-    document.addEventListener('keydown', key)
-    return () => document.removeEventListener('keydown', key)
-  }, [open, setOverlay])
+  useModalDismiss(open, () => setOverlay(null))
+  useFocusTrap(panelRef, open)
 
   if (!open) return null
 
@@ -24,9 +23,9 @@ export default function Shortcuts() {
   return (
     <div
       className="modal-overlay"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) setOverlay(null) }}
+      onMouseDown={onOverlayMouseDown(() => setOverlay(null))}
     >
-      <div className="modal shortcuts-modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+      <div className="modal shortcuts-modal" ref={panelRef} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
         <div className="modal-head">
           <div>
             <div className="vheader-eyebrow"><Icon name="keyboard" size={14} /> keyboard</div>

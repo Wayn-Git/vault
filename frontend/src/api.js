@@ -158,6 +158,23 @@ export const api = {
   providers: () => j('/providers'),
   addProvider: (body) => j('/providers', json('POST', body)),
   removeProvider: (name) => j(`/providers/${encodeURIComponent(name)}`, json('DELETE')),
+  // A fresh liveness check the user asked for, cache ignored. `pingAll` is the
+  // one-button version; both update the picker's badge from what came back.
+  pingProvider: (name) => j(`/providers/${encodeURIComponent(name)}/ping`, json('POST')),
+  pingAll: () => j('/providers/ping-all', json('POST')),
+  // The models this provider's own API lists right now, so the menu offers what
+  // the endpoint serves instead of asking the user to retype an id from docs.
+  providerModels: (name) => j(`/providers/${encodeURIComponent(name)}/models`),
+
+  // Tiers: which model does which job. `default` is the go-to model; `fast` is
+  // the quick cheap one; `heavy` is what the fast model escalates to.
+  settings: () => j('/settings'),
+  updateSettings: (patch) => j('/settings', json('PATCH', patch)),
+
+  tiers: () => j('/tiers'),
+  setTier: (tier, provider, model) =>
+    j(`/tiers/${encodeURIComponent(tier)}`, json('PUT', { provider, model })),
+  clearTier: (tier) => j(`/tiers/${encodeURIComponent(tier)}`, json('DELETE')),
 
   conversations: () => j('/conversations'),
   createConversation: (provider, model, title) =>
@@ -291,6 +308,14 @@ export const api = {
     j(`/capabilities/${kind}/${encodeURIComponent(name)}`, json('POST', { enabled, conversation_id: conversationId || null })),
   resetCapability: (kind, name, conversationId) =>
     j(`/capabilities/${kind}/${encodeURIComponent(name)}?${conversationId ? `conversation_id=${encodeURIComponent(conversationId)}` : ''}`, json('DELETE')),
+
+  capabilityProfiles: () => j('/capabilities/profiles'),
+  saveCapabilityProfile: (name, conversationId) =>
+    j('/capabilities/profiles', json('POST', { name, conversation_id: conversationId || null })),
+  applyCapabilityProfile: (name, conversationId) =>
+    j(`/capabilities/profiles/${encodeURIComponent(name)}/apply`, json('POST', { conversation_id: conversationId })),
+  deleteCapabilityProfile: (name) =>
+    j(`/capabilities/profiles/${encodeURIComponent(name)}`, json('DELETE')),
 
   mcpCatalogue: () => j('/mcp/catalogue'),
   // `accounts` asks each connector who it is signed in as, which can cost a

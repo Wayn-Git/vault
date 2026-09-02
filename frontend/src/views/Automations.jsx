@@ -4,6 +4,11 @@ import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api, serverTime } from '../api.js'
 import { SkeletonCard } from '../components/Skeleton.jsx'
+import { useConfirm } from '../components/ui/ConfirmDialog.jsx'
+import EmptyState from '../components/ui/EmptyState.jsx'
+import ErrorState from '../components/ui/ErrorState.jsx'
+import Field from '../components/ui/Field.jsx'
+import Button from '../components/ui/Button.jsx'
 
 /* Automations — beta. A turn that runs without anyone typing.
 
@@ -20,6 +25,8 @@ import { SkeletonCard } from '../components/Skeleton.jsx'
    scheduled work a blanket exemption. */
 
 const EVERY = [
+  { minutes: 1, label: 'every minute' },
+  { minutes: 5, label: 'every 5 minutes' },
   { minutes: 15, label: 'every 15 minutes' },
   { minutes: 30, label: 'every 30 minutes' },
   { minutes: 60, label: 'hourly' },
@@ -123,6 +130,16 @@ function Composer({ onDone, onCancel }) {
   const [model, setModel] = useState('')
   const defaultModel = health?.provider_defaults?.[provider] || ''
 
+  // Which saved connector profile (Settings → Capabilities) this run is
+  // scoped to. Every enabled connector by default, same as before this
+  // existed — narrowing it is what keeps a run that only ever needs Gmail
+  // from also being handed GitHub, Spotify, LinkedIn, a browser, and every
+  // other connector at once, which is what made the model second-guess the
+  // right tool as the catalogue grew.
+  const [profiles, setProfiles] = useState([])
+  const [capabilityProfile, setCapabilityProfile] = useState('')
+  useEffect(() => { api.capabilityProfiles().then(setProfiles).catch(() => setProfiles([])) }, [])
+
   const ready = name.trim() && prompt.trim()
 
   const create = async () => {
@@ -136,6 +153,7 @@ function Composer({ onDone, onCancel }) {
         // Omitted, not blanked: the runner then picks the machine default at
         // run time rather than freezing today's default into the row.
         ...(provider ? { provider, model: model.trim() || defaultModel || null } : {}),
+        ...(capabilityProfile ? { capability_profile: capabilityProfile } : {}),
       })
       toast(`“${name.trim()}” will run ${describe(minutes)}`, 'ok')
       onDone()
@@ -154,8 +172,7 @@ function Composer({ onDone, onCancel }) {
           <Icon name="x" size={15} />
         </button>
       </div>
-      <div className="field">
-        <label htmlFor="auto-name">Name</label>
+      <Field label="Name" id="auto-name">
         <input
           id="auto-name"
           autoFocus
@@ -163,9 +180,8 @@ function Composer({ onDone, onCancel }) {
           placeholder="Morning briefing"
           onChange={(e) => setName(e.target.value)}
         />
-      </div>
-      <div className="field">
-        <label htmlFor="auto-prompt">What it should do</label>
+      </Field>
+      <Field label="What it should do" id="auto-prompt">
         <textarea
           id="auto-prompt"
           rows={5}
@@ -173,16 +189,18 @@ function Composer({ onDone, onCancel }) {
           placeholder={'Exactly what you would type into the composer.\n\nIt runs as an ordinary turn, in a conversation of its own.'}
           onChange={(e) => setPrompt(e.target.value)}
         />
-      </div>
-      <div className="field">
-        <label htmlFor="auto-every">How often</label>
+      </Field>
+      <Field label="How often" id="auto-every" hint="First run is one interval from now, not immediately.">
         <select id="auto-every" value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
           {EVERY.map((e) => <option key={e.minutes} value={e.minutes}>{e.label}</option>)}
         </select>
-        <span className="field-note">First run is one interval from now, not immediately.</span>
-      </div>
-      <div className="field">
-        <label htmlFor="auto-provider">Model</label>
+      </Field>
+      <Field
+        label="Model"
+        id="auto-provider"
+        hint="Most of a run is spent waiting on the model, not on tools — a run is one round trip
+          per tool call. A faster provider is the shortest way to make this quicker."
+      >
         <select
           id="auto-provider"
           value={provider}
@@ -201,15 +219,29 @@ function Composer({ onDone, onCancel }) {
             style={{ marginTop: 8 }}
           />
         )}
-        <span className="field-note">
-          Most of a run is spent waiting on the model, not on tools — a run is one round trip
-          per tool call. A faster provider is the shortest way to make this quicker.
-        </span>
-      </div>
+      </Field>
+      <Field
+        label="Tools"
+        id="auto-tools"
+        hint={profiles.length
+          ? 'Scoping this run to a saved profile is what keeps it from confusing tools it never needed — save one from Skills & connectors.'
+          : 'No saved profiles yet — save one from Skills & connectors to scope this run to just the tools it needs.'}
+      >
+        <select
+          id="auto-tools"
+          value={capabilityProfile}
+          onChange={(e) => setCapabilityProfile(e.target.value)}
+        >
+          <option value="">Every enabled connector</option>
+          {profiles.map((p) => (
+            <option key={p.name} value={p.name}>{p.name} ({p.on_count})</option>
+          ))}
+        </select>
+      </Field>
       <div className="cap-composer-foot">
-        <button type="button" className="btn btn--primary btn--small" disabled={!ready || busy} onClick={create}>
+        <Button variant="primary" size="small" disabled={!ready} busy={busy} onClick={create}>
           {busy ? 'Saving…' : 'Create'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -217,17 +249,24 @@ function Composer({ onDone, onCancel }) {
 
 export default function Automations() {
   const rootRef = useRef(null)
-  const { toast, setView, setActiveId } = useApp()
+  const { toast } = useApp()
+  const confirm = useConfirm()
   const [rows, setRows] = useState([])
   const [composing, setComposing] = useState(false)
   const [busy, setBusy] = useState('')
   const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState(null)
   useViewEntrance(rootRef)
 
   const load = useCallback(async () => {
     try {
       setRows((await api.automations()).automations || [])
+      setError(null)
     } catch (err) {
+      // `loaded` still flips true below, so without this a failed fetch
+      // rendered the identical "nothing runs on its own yet" copy a
+      // genuinely empty list shows -- there was no way to tell them apart.
+      setError(err.message)
       toast(err.message, 'bad')
     } finally {
       setLoaded(true)
@@ -255,7 +294,13 @@ export default function Automations() {
       } else if (action === 'toggle') {
         await api.updateAutomation(row.id, { enabled: !row.enabled })
       } else if (action === 'delete') {
-        if (!window.confirm(`Delete “${row.name}”? The conversations it wrote are kept.`)) return
+        const ok = await confirm({
+          title: `Delete "${row.name}"?`,
+          description: 'The conversations it wrote are kept.',
+          confirmLabel: 'Delete',
+          tone: 'danger',
+        })
+        if (!ok) return
         await api.deleteAutomation(row.id)
         toast('Automation deleted', 'info')
       }
@@ -265,21 +310,22 @@ export default function Automations() {
     } finally {
       setBusy('')
     }
-  }, [load, toast])
+  }, [load, toast, confirm])
 
   return (
     <div className="view" ref={rootRef}>
       <div className="view-inner view-inner--wide">
         <header className="cap-head" data-enter>
           <h1>Automations <span className="beta">beta</span></h1>
-          <button
-            type="button"
-            className={`btn btn--pill${composing ? ' btn--ghost' : ' btn--primary'}`}
+          <Button
+            variant={composing ? 'ghost' : 'primary'}
+            pill
+            icon={<Icon name={composing ? 'x' : 'plus'} size={14} />}
             onClick={() => setComposing((c) => !c)}
             aria-expanded={composing}
           >
-            <Icon name={composing ? 'x' : 'plus'} size={14} /> New automation
-          </button>
+            New automation
+          </Button>
         </header>
 
         <div className="msg-note msg-note--warning" style={{ marginBottom: 20 }} data-enter>
@@ -299,12 +345,13 @@ export default function Automations() {
 
         {!loaded && <SkeletonCard rows={3} controls={2} />}
 
-        {loaded && rows.length === 0 && !composing && (
-          <div className="card empty-state" data-enter>
-            <Icon name="clock" size={22} />
+        {loaded && error && <ErrorState message={error} onRetry={load} />}
+
+        {loaded && !error && rows.length === 0 && !composing && (
+          <EmptyState icon="clock">
             Nothing runs on its own yet. A good first one is something you already ask for by
             hand every day — a summary of what changed, or what is due.
-          </div>
+          </EmptyState>
         )}
 
         <div className="auto-list">
@@ -328,22 +375,21 @@ export default function Automations() {
                 <RunHistory automation={row} />
               </div>
               <div className="auto-actions">
-                <button
-                  type="button"
-                  className="btn btn--small"
+                <Button
+                  size="small"
                   disabled={busy === `${row.id}:run` || row.last_status === 'running'}
                   onClick={() => act(row, 'run')}
                 >
                   {busy === `${row.id}:run` || row.last_status === 'running' ? 'Running…' : 'Run now'}
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--small${row.enabled ? ' btn--ghost' : ' btn--primary'}`}
+                </Button>
+                <Button
+                  variant={row.enabled ? 'ghost' : 'primary'}
+                  size="small"
                   disabled={busy === `${row.id}:toggle`}
                   onClick={() => act(row, 'toggle')}
                 >
                   {row.enabled ? 'Pause' : 'Resume'}
-                </button>
+                </Button>
                 <button
                   type="button"
                   className="icon-btn"

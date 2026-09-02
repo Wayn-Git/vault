@@ -86,6 +86,11 @@ class ProviderConfig:
     #: property of the endpoint, not of the model, and unknown for most of them:
     #: `None` means "no cap has been observed", not "unlimited".
     max_tools: int | None = None
+    #: The account-level tokens-per-minute ceiling, where the provider has one
+    #: smaller than its context window -- Groq's free tier is 8,000, which the
+    #: system prompt plus tool schemas alone already exceed on a machine with
+    #: more than a couple of connectors. `None` means unknown, not unlimited.
+    tokens_per_minute: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -228,6 +233,7 @@ def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
             "default_model",
             "context_window",
             "max_tools",
+            "tokens_per_minute",
         }
         cfg = ProviderConfig(
             name=entry["name"],
@@ -238,6 +244,7 @@ def load_providers(path: Path | None = None) -> dict[str, ProviderConfig]:
             default_model=entry.get("default_model"),
             context_window=_positive_int(entry.get("context_window")),
             max_tools=_positive_int(entry.get("max_tools")),
+            tokens_per_minute=_positive_int(entry.get("tokens_per_minute")),
             extra={k: v for k, v in entry.items() if k not in known},
         )
         out[cfg.name] = cfg
@@ -311,6 +318,118 @@ def provider_entries(path: Path | None = None) -> list[dict[str, Any]]:
         return []
     raw = yaml.safe_load(p.read_text()) or {}
     return list(raw.get("providers") or [])
+
+
+def set_tier(
+    tier: str, provider: str, model: str, path: Path | None = None
+) -> None:
+    """Assign one tier a provider and model, leaving the rest of the file alone.
+
+    The write half of `load_tiers`. Mutates the document the way `save_providers`
+    does -- `providers:`, `memory:` and the other two tiers are nobody's
+    business here -- so the model picker's own edits and a role assignment never
+    overwrite each other.
+
+    The provider must be configured: a tier naming an absent provider is dropped
+    by `load_tiers` with a log line, so writing one would look like it took and
+    then silently do nothing on the next read.
+    """
+    if tier not in TIERS:
+        raise ValueError(f"unknown tier '{tier}'; expected one of {', '.join(TIERS)}")
+    provider = (provider or "").strip()
+    model = (model or "").strip()
+    if not provider or not model:
+        raise ValueError("a tier needs both a provider and a model")
+    if provider not in load_providers(path):
+        raise ValueError(f"'{provider}' is not a configured provider")
+
+    p = path or paths().providers_yaml
+    p.parent.mkdir(parents=True, exist_ok=True)
+    document = (yaml.safe_load(p.read_text()) if p.exists() else None) or {}
+    tiers = document.get("tiers")
+    if not isinstance(tiers, dict):
+        tiers = {}
+    tiers[tier] = {"provider": provider, "model": model}
+    document["tiers"] = tiers
+    p.write_text(
+        _PROVIDERS_HEADER + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    )
+
+
+#: The agent loop's iteration ceiling, and the range the setting is clamped to.
+#: A turn spends one iteration per model round trip (each tool call is one), so
+#: too low cuts multi-step work short and too high lets a stuck loop burn a long
+#: time before the wall-clock guard stops it. The default matches
+#: `Guards.max_iterations`.
+DEFAULT_MAX_ITERATIONS = 16
+MIN_MAX_ITERATIONS = 4
+MAX_MAX_ITERATIONS = 40
+_MAX_ITERATIONS_SETTING = "max_iterations"
+
+
+def load_max_iterations() -> int:
+    """The user's chosen loop ceiling, or the default. Never raises.
+
+    Read per turn (it is cheap -- one indexed row) so a change takes effect on
+    the next message rather than at the next restart, the same way a provider
+    or tier change does.
+    """
+    try:
+        from backend.db.connection import get_connection
+
+        row = get_connection().execute(
+            "SELECT value FROM app_settings WHERE key = ?", (_MAX_ITERATIONS_SETTING,)
+        ).fetchone()
+        if row is None:
+            return DEFAULT_MAX_ITERATIONS
+        return _clamp_iterations(int(row[0]))
+    except Exception:
+        return DEFAULT_MAX_ITERATIONS
+
+
+def save_max_iterations(value: int) -> int:
+    """Persist the loop ceiling, clamped to a usable range. Returns what was stored."""
+    clamped = _clamp_iterations(int(value))
+    from backend.db.connection import get_connection
+
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+        (_MAX_ITERATIONS_SETTING, str(clamped)),
+    )
+    conn.commit()
+    return clamped
+
+
+def _clamp_iterations(value: int) -> int:
+    return max(MIN_MAX_ITERATIONS, min(MAX_MAX_ITERATIONS, value))
+
+
+def clear_tier(tier: str, path: Path | None = None) -> bool:
+    """Unassign a tier, so its callers fall back to the conversation's own model.
+
+    Returns whether anything was removed -- clearing a tier that was never set
+    is not an error, it is the state the caller wanted.
+    """
+    if tier not in TIERS:
+        raise ValueError(f"unknown tier '{tier}'; expected one of {', '.join(TIERS)}")
+    p = path or paths().providers_yaml
+    if not p.exists():
+        return False
+    document = yaml.safe_load(p.read_text()) or {}
+    tiers = document.get("tiers")
+    if not isinstance(tiers, dict) or tier not in tiers:
+        return False
+    del tiers[tier]
+    if tiers:
+        document["tiers"] = tiers
+    else:
+        document.pop("tiers", None)
+    p.write_text(
+        _PROVIDERS_HEADER + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    )
+    return True
 
 
 def add_provider(entry: dict[str, Any], path: Path | None = None) -> None:

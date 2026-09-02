@@ -27,27 +27,60 @@
   --surface: #1b1b1e;
   --surface-2: #232327;
 
-  --hairline: rgba(255, 255, 255, 0.075);
-  --hairline-strong: rgba(255, 255, 255, 0.15);
+  /* ---- the two channels every surface tint is mixed from -----------------
+
+     Sixty-odd `rgba(255, 255, 255, 0.0n)` values used to be written out by
+     hand across this file: a hover, a card ground, a pressed row, a divider.
+     Every one of them assumed the page underneath was dark, which is exactly
+     the assumption a light theme has to unpick — and unpicking it selector by
+     selector is how a second theme ends up half-done and shipped anyway.
+
+     So they are all `rgb(var(--tint) / a)` now, and a theme redefines two
+     numbers. `--tint` is what a highlight is made of (lighter than the ground
+     in the dark, darker than it in the light); `--shade` is what a shadow is.
+     There is no third rule to remember. */
+  --tint: 255 255 255;
+  --shade: 0 0 0;
+
+  --hairline: rgb(var(--tint) / 0.075);
+  --hairline-strong: rgb(var(--tint) / 0.15);
 
   --text: #f2f0ec;
   --text-dim: #9c9892;
-  --text-faint: #67645f;
+  /* 4.6:1 on the canvas. It was #67645f, which is 3.4:1 — under AA for the
+     metadata, timestamps and field labels this token sets, all of which are
+     real text at 10–12px rather than decoration. */
+  --text-faint: #7d7a75;
 
   /* Semantic only. Never used to decorate. */
   --live: #63c68a;
   --confirm: #e9b04d;
   --stop: #e5675c;
 
-  --live-soft: rgba(99, 198, 138, 0.1);
-  --confirm-soft: rgba(233, 176, 77, 0.1);
-  --stop-soft: rgba(229, 103, 92, 0.1);
+  /* The fill and the hairline each state carries. Derived from the colour
+     above with `color-mix` rather than restated as another hand-mixed rgba,
+     which is how the greens in this file had drifted into three of them. */
+  --live-soft: color-mix(in srgb, var(--live) 12%, transparent);
+  --confirm-soft: color-mix(in srgb, var(--confirm) 12%, transparent);
+  --stop-soft: color-mix(in srgb, var(--stop) 12%, transparent);
+  --live-line: color-mix(in srgb, var(--live) 34%, transparent);
+  --confirm-line: color-mix(in srgb, var(--confirm) 34%, transparent);
+  --stop-line: color-mix(in srgb, var(--stop) 34%, transparent);
+  --focus-ring: color-mix(in srgb, var(--confirm) 62%, transparent);
 
-  /* Legacy aliases: a handful of inline styles still name these. */
-  --clay: var(--confirm);
-  --sage: var(--live);
-  --rust: var(--stop);
-  --steel: var(--text-dim);
+  /* What sits on top of a filled control, and the frosted ground a menu or a
+     toast floats on. */
+  --accent: var(--text);
+  --accent-hover: #ffffff;
+  --on-accent: #10131a;
+  --on-stop: #1b0c0a;
+  --glass: rgb(21 25 32 / 0.97);
+  --scrim: rgb(8 10 13 / 0.7);
+
+  /* The single hue the syntax theme uses — see the theme block further
+     down. Sage rather than the `--live` green, so that a string in a code
+     block is never mistaken for the colour that means a connector is up. */
+  --code-literal: #9fc39a;
 
   /* Space Grotesk for anything that names something, Archivo for prose because
      it holds up at 12px, IBM Plex Mono for machine facts. None of them is the
@@ -62,6 +95,44 @@
   --r-md: 9px;
   --r-sm: 6px;
 
+  /* Spacing scale. New and touched CSS should reach for these instead of
+     inventing another one-off pixel value. */
+  --space-3xs: 2px;
+  --space-2xs: 4px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 20px;
+  --space-2xl: 24px;
+  --space-3xl: 32px;
+  --space-4xl: 40px;
+  --space-5xl: 56px;
+
+  /* Type scale. The sizes already in this file cluster in near-duplicate
+     magic numbers (13px/13.5px/14px/14.5px) that read as drift rather than
+     intent -- this gives new and touched selectors a fixed set to pick from. */
+  --text-3xs: 10px;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 20px;
+  --text-3xl: 24px;
+  --text-4xl: 28px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.6;
+
+  /* Breakpoint contract for new/touched CSS: pick the nearest of these before
+     inventing a new max-width. The existing ad hoc breakpoints scattered
+     through this file (768/860/820/720/640/620/560/980px) are not being
+     retrofitted onto this set in this pass. */
+  /* 480 / 640 / 768 / 860 / 1024 */
+
   /* The built-in easings are too weak to read as intentional. */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
@@ -74,9 +145,110 @@
 
   /* Two layers: a tight contact shadow so an edge exists, and a wide soft one
      so the panel sits above the page rather than floating in it. */
-  --lift: 0 1px 1px rgba(0, 0, 0, 0.5), 0 18px 40px -24px rgba(0, 0, 0, 0.85);
-  --focus: 0 0 0 2px var(--canvas), 0 0 0 4px rgba(233, 176, 77, 0.6);
+  --lift: 0 1px 1px rgb(var(--shade) / 0.5), 0 18px 40px -24px rgb(var(--shade) / 0.85);
+  --focus: 0 0 0 2px var(--canvas), 0 0 0 4px var(--focus-ring);
   --bar-h: 52px;
+}
+
+/* ---------------------------------------------------------------- daylight
+
+   The same instrument panel with the light on. Not an inversion: a dark theme
+   inverted gives you grey-on-grey and a page that glares, so the neutrals are
+   re-chosen with the same warmth the graphite has — paper rather than white,
+   ink rather than black — and the three semantic colours are darkened until
+   they carry their meaning against it. Amber at #e9b04d is legible on
+   graphite and invisible on paper; that is the whole reason this block has
+   more in it than two lines.
+
+   `--tint` flips from white to near-black, and with it every hover, every card
+   ground and every divider in the file, because they are all mixed from it.
+
+   Written as one custom-property block referenced twice — once for the
+   explicit choice, once for a machine that is set to light and has not been
+   asked — so the two can never disagree about what light means. */
+
+:root[data-theme='light'] {
+  --canvas: #f7f5f1;
+  --canvas-deep: #efece6;
+  --raised: #fffefb;
+  --surface: #f2efe9;
+  --surface-2: #e8e4dc;
+
+  --tint: 24 21 17;
+  --shade: 40 34 26;
+
+  --hairline: rgb(var(--tint) / 0.11);
+  --hairline-strong: rgb(var(--tint) / 0.22);
+
+  --text: #16150f;
+  --text-dim: #5c584f;
+  /* 4.6:1 on `--canvas-deep`, which is the surface a code block, a text
+     field and the inline search all sit on — the page canvas is lighter, so
+     a value tuned to that alone came out under AA inside every input. */
+  --text-faint: #6f6a5f;
+
+  --live: #1c7a45;
+  --confirm: #9a6706;
+  --stop: #b4372c;
+
+  --accent: #1a1813;
+  --accent-hover: #000000;
+  --on-accent: #faf8f4;
+  --on-stop: #fff3f1;
+  --glass: rgb(255 254 251 / 0.97);
+  --scrim: rgb(58 52 44 / 0.34);
+  --code-literal: #3d6b3a;
+
+  /* Softer on paper: 12% of a dark ink is a smear, where 12% of a pastel on
+     graphite was a tint. */
+  --live-soft: color-mix(in srgb, var(--live) 9%, transparent);
+  --confirm-soft: color-mix(in srgb, var(--confirm) 9%, transparent);
+  --stop-soft: color-mix(in srgb, var(--stop) 9%, transparent);
+
+  --lift: 0 1px 2px rgb(var(--shade) / 0.09), 0 16px 34px -22px rgb(var(--shade) / 0.35);
+}
+
+/* A machine set to light, and nobody has said otherwise. Guarded on
+   `data-theme` so an explicit choice of dark still wins here. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --canvas: #f7f5f1;
+    --canvas-deep: #efece6;
+    --raised: #fffefb;
+    --surface: #f2efe9;
+    --surface-2: #e8e4dc;
+
+    --tint: 24 21 17;
+    --shade: 40 34 26;
+
+    --hairline: rgb(var(--tint) / 0.11);
+    --hairline-strong: rgb(var(--tint) / 0.22);
+
+    --text: #16150f;
+    --text-dim: #5c584f;
+    /* 4.6:1 on `--canvas-deep`, which is the surface a code block, a text
+     field and the inline search all sit on — the page canvas is lighter, so
+     a value tuned to that alone came out under AA inside every input. */
+  --text-faint: #6f6a5f;
+
+    --live: #1c7a45;
+    --confirm: #9a6706;
+    --stop: #b4372c;
+
+    --accent: #1a1813;
+    --accent-hover: #000000;
+    --on-accent: #faf8f4;
+    --on-stop: #fff3f1;
+    --glass: rgb(255 254 251 / 0.97);
+    --scrim: rgb(58 52 44 / 0.34);
+    --code-literal: #3d6b3a;
+
+    --live-soft: color-mix(in srgb, var(--live) 9%, transparent);
+    --confirm-soft: color-mix(in srgb, var(--confirm) 9%, transparent);
+    --stop-soft: color-mix(in srgb, var(--stop) 9%, transparent);
+
+    --lift: 0 1px 2px rgb(var(--shade) / 0.09), 0 16px 34px -22px rgb(var(--shade) / 0.35);
+  }
 }
 
 *,
@@ -138,17 +310,17 @@ a { color: inherit; }
   border-radius: 4px;
 }
 
-::selection { background: rgba(95, 211, 166, 0.22); }
+::selection { background: var(--live-soft); }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgb(var(--tint) / 0.07);
   border-radius: 99px;
   border: 3px solid transparent;
   background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.14); background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--tint) / 0.14); background-clip: content-box; }
 
 .mono { font-family: var(--font-mono); }
 
@@ -285,7 +457,7 @@ a { color: inherit; }
   padding: 7px 13px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.025);
+  background: rgb(var(--tint) / 0.025);
   color: var(--text-dim);
   font-size: 13px;
   white-space: nowrap;
@@ -294,22 +466,22 @@ a { color: inherit; }
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); border-color: var(--hairline-strong); }
+  .btn:hover { color: var(--text); background: rgb(var(--tint) / 0.06); border-color: var(--hairline-strong); }
 }
 
 .btn:active { transform: scale(0.97); }
 
-.btn--primary { background: var(--text); border-color: transparent; color: #10131a; font-weight: 500; }
+.btn--primary { background: var(--accent); border-color: transparent; color: var(--on-accent); font-weight: 500; }
 /* The one action a page is about sits in its title row, and reads as one. */
 .btn--pill { padding: 9px 18px; border-radius: 99px; font-size: 13.5px; }
 @media (hover: hover) and (pointer: fine) {
-  .btn--primary:hover { background: #fff; color: #10131a; }
+  .btn--primary:hover { background: var(--accent-hover); color: var(--on-accent); }
 }
 
 .btn--ghost { background: transparent; }
 .btn--danger { color: var(--text-dim); }
 @media (hover: hover) and (pointer: fine) {
-  .btn--danger:hover { color: var(--stop); border-color: rgba(240, 121, 107, 0.36); background: var(--stop-soft); }
+  .btn--danger:hover { color: var(--stop); border-color: var(--stop-line); background: var(--stop-soft); }
 }
 
 .btn--small { padding: 4px 10px; font-size: 12px; }
@@ -330,9 +502,9 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
-.badge--ok { color: var(--live); border-color: rgba(95, 211, 166, 0.3); background: var(--live-soft); }
-.badge--amber { color: var(--confirm); border-color: rgba(240, 183, 100, 0.3); background: var(--confirm-soft); }
-.badge--bad { color: var(--stop); border-color: rgba(240, 121, 107, 0.3); background: var(--stop-soft); }
+.badge--ok { color: var(--live); border-color: var(--live-line); background: var(--live-soft); }
+.badge--amber { color: var(--confirm); border-color: var(--confirm-line); background: var(--confirm-soft); }
+.badge--bad { color: var(--stop); border-color: var(--stop-line); background: var(--stop-soft); }
 .badge--info { color: var(--text-dim); }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
@@ -365,7 +537,7 @@ a { color: inherit; }
 .card {
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.012);
+  background: rgb(var(--tint) / 0.012);
   /* A table inside a card must be clipped by it, or its last column draws past
      the border it is supposed to live in. */
   overflow: hidden;
@@ -404,7 +576,7 @@ a { color: inherit; }
   display: grid;
   place-items: center;
   padding: 22px;
-  background: rgba(8, 10, 13, 0.7);
+  background: var(--scrim);
   backdrop-filter: blur(10px);
   animation: fade-in var(--modal) var(--ease-out);
 }
@@ -464,7 +636,7 @@ a { color: inherit; }
   padding: 10px 14px;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-md);
-  background: rgba(21, 25, 32, 0.96);
+  background: var(--glass);
   backdrop-filter: blur(12px);
   box-shadow: var(--lift);
   font-size: 12.5px;
@@ -558,13 +730,13 @@ a { color: inherit; }
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--raised);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px -24px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 1px 0 rgb(var(--tint) / 0.03) inset, 0 10px 30px -24px rgb(var(--shade) / 0.9);
   transition: border-color var(--pop) var(--ease-out), box-shadow var(--pop) var(--ease-out);
 }
 
 .composer:focus-within {
   border-color: var(--hairline-strong);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 14px 34px -24px rgba(0, 0, 0, 0.95);
+  box-shadow: 0 1px 0 rgb(var(--tint) / 0.05) inset, 0 14px 34px -24px rgb(var(--shade) / 0.95);
 }
 
 .composer-bar { display: flex; align-items: center; gap: 6px; }
@@ -585,10 +757,10 @@ a { color: inherit; }
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .composer-chip:hover { color: var(--text-dim); background: rgba(255, 255, 255, 0.05); }
+  .composer-chip:hover { color: var(--text-dim); background: rgb(var(--tint) / 0.05); }
 }
 .composer-chip:active { transform: scale(0.96); }
-.composer-chip.active { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+.composer-chip.active { color: var(--text); background: rgb(var(--tint) / 0.08); }
 
 .composer-send {
   width: 30px;
@@ -596,8 +768,8 @@ a { color: inherit; }
   display: grid;
   place-items: center;
   border-radius: var(--r-sm);
-  background: var(--text);
-  color: #10131a;
+  background: var(--accent);
+  color: var(--on-accent);
   flex: none;
   transition: opacity var(--press) var(--ease-out), transform var(--press) var(--ease-out),
               background var(--press) var(--ease-out);
@@ -605,9 +777,9 @@ a { color: inherit; }
 
 .composer-send:active { transform: scale(0.94); }
 .composer-send:disabled { opacity: 0.25; cursor: not-allowed; transform: none; }
-.composer-send--stop { background: var(--stop); color: #1b0c0a; }
+.composer-send--stop { background: var(--stop); color: var(--on-stop); }
 .composer-send { width: 32px; height: 32px; border-radius: 8px; }
-.composer-send:not(:disabled) { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.25) inset; }
+.composer-send:not(:disabled) { box-shadow: 0 1px 0 rgb(var(--tint) / 0.25) inset; }
 
 .composer-hint {
   display: flex;
@@ -618,6 +790,12 @@ a { color: inherit; }
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-faint);
+}
+
+/* Two keyboard chords advertised to a device with no keyboard. The openers
+   below the composer do the same job by being tappable. */
+@media (pointer: coarse) {
+  .composer-hint { display: none; }
 }
 
 @media (max-width: 768px) {
@@ -637,7 +815,7 @@ a { color: inherit; }
   padding: 5px;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-lg);
-  background: rgba(21, 25, 32, 0.97);
+  background: var(--glass);
   backdrop-filter: blur(16px);
   box-shadow: var(--lift);
   transform-origin: bottom left;
@@ -666,7 +844,7 @@ a { color: inherit; }
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .plus-item:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+  .plus-item:hover { background: rgb(var(--tint) / 0.06); color: var(--text); }
 }
 .plus-item:active { transform: scale(0.985); }
 .plus-item svg { flex: none; opacity: 0.65; }
@@ -696,7 +874,7 @@ a { color: inherit; }
   width: 24px;
   height: 14px;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgb(var(--tint) / 0.1);
   position: relative;
   flex: none;
   transition: background var(--pop) var(--ease-out);
@@ -726,7 +904,7 @@ a { color: inherit; }
   padding: 5px;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-lg);
-  background: rgba(21, 25, 32, 0.97);
+  background: var(--glass);
   backdrop-filter: blur(16px);
   box-shadow: var(--lift);
   transform-origin: bottom left;
@@ -744,7 +922,7 @@ a { color: inherit; }
   transition: background var(--press) var(--ease-out);
 }
 
-.ac-item.active, .ac-item:hover { background: rgba(255, 255, 255, 0.06); }
+.ac-item.active, .ac-item:hover { background: rgb(var(--tint) / 0.06); }
 .ac-name { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
 .ac-desc { font-size: 12.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -770,7 +948,7 @@ a { color: inherit; }
   padding: 11px 15px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgb(var(--tint) / 0.03);
   color: var(--text-dim);
 }
 
@@ -800,9 +978,9 @@ a { color: inherit; }
 }
 
 .msg-note svg { flex: none; margin-top: 2px; opacity: 0.8; }
-.msg-note--guard { border-color: rgba(240, 183, 100, 0.3); background: var(--confirm-soft); color: var(--confirm); }
-.msg-note--error { border-color: rgba(240, 121, 107, 0.32); background: var(--stop-soft); color: var(--stop); }
-.msg-note--warning { border-color: var(--hairline-strong); background: rgba(255, 255, 255, 0.025); }
+.msg-note--guard { border-color: var(--confirm-line); background: var(--confirm-soft); color: var(--confirm); }
+.msg-note--error { border-color: var(--stop-line); background: var(--stop-soft); color: var(--stop); }
+.msg-note--warning { border-color: var(--hairline-strong); background: rgb(var(--tint) / 0.025); }
 
 .tele-cursor::after {
   content: '';
@@ -819,7 +997,7 @@ a { color: inherit; }
 
 /* ------------------------------------------------------------ tool card */
 
-.tool-card { border: 1px solid var(--hairline); border-radius: var(--r-md); background: rgba(255, 255, 255, 0.014); }
+.tool-card { border: 1px solid var(--hairline); border-radius: var(--r-md); background: rgb(var(--tint) / 0.014); }
 
 .tool-card-head {
   display: flex;
@@ -833,7 +1011,7 @@ a { color: inherit; }
   transition: background var(--press) var(--ease-out);
 }
 
-.tool-card-head:hover { background: rgba(255, 255, 255, 0.03); }
+.tool-card-head:hover { background: rgb(var(--tint) / 0.03); }
 .tool-card-head svg { opacity: 0.55; transition: transform var(--pop) var(--ease-out); }
 .tool-name { color: var(--text); }
 .tool-card-head .badge { margin-left: auto; }
@@ -898,7 +1076,7 @@ a { color: inherit; }
   transition: background var(--press) var(--ease-out);
 }
 
-.server-row:hover { background: rgba(255, 255, 255, 0.02); }
+.server-row:hover { background: rgb(var(--tint) / 0.02); }
 .server-row > .led { margin-top: 7px; }
 .server-row > div:nth-child(2) { flex: 1; min-width: 0; }
 .server-name { font-size: 14px; color: var(--text); }
@@ -950,7 +1128,7 @@ a { color: inherit; }
 .auth-banner--done      { --accent: var(--live);    --tint: var(--live-soft); }
 .auth-banner--failed,
 .auth-banner--expired   { --accent: var(--stop);    --tint: var(--stop-soft); }
-.auth-banner--cancelled { --accent: var(--text-faint); --tint: rgba(255, 255, 255, 0.03); }
+.auth-banner--cancelled { --accent: var(--text-faint); --tint: rgb(var(--tint) / 0.03); }
 
 /* Fixed box so a spinner swapping for a tick cannot shift the text beside it. */
 .auth-banner-icon {
@@ -1060,7 +1238,7 @@ a { color: inherit; }
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: 0 14px 30px -20px rgba(0, 0, 0, 0.9);
+  box-shadow: 0 14px 30px -20px rgb(var(--shade) / 0.9);
   opacity: 0;
   transition: opacity var(--menu) var(--ease-out);
   pointer-events: none;
@@ -1078,7 +1256,7 @@ a { color: inherit; }
   padding: 20px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.012);
+  background: rgb(var(--tint) / 0.012);
   transition: border-color var(--menu) var(--ease-out), transform var(--menu) var(--ease-out);
 }
 
@@ -1111,7 +1289,7 @@ a { color: inherit; }
   padding: 20px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.012);
+  background: rgb(var(--tint) / 0.012);
   transition: border-color var(--menu) var(--ease-out), transform var(--menu) var(--ease-out);
 }
 
@@ -1131,7 +1309,7 @@ a { color: inherit; }
 
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
-.stat { padding: 20px; border: 1px solid var(--hairline); border-radius: var(--r-lg); background: rgba(255, 255, 255, 0.012); }
+.stat { padding: 20px; border: 1px solid var(--hairline); border-radius: var(--r-lg); background: rgb(var(--tint) / 0.012); }
 
 .stat-num {
   font-family: var(--font-display);
@@ -1153,7 +1331,7 @@ a { color: inherit; }
 
 .stat-sub { display: flex; align-items: center; gap: 6px; margin-top: 7px; font-size: 12px; color: var(--text-faint); }
 
-.tele { border: 1px solid var(--hairline); border-radius: var(--r-lg); background: rgba(255, 255, 255, 0.012); overflow: hidden; }
+.tele { border: 1px solid var(--hairline); border-radius: var(--r-lg); background: rgb(var(--tint) / 0.012); overflow: hidden; }
 
 .tele-bar {
   display: flex;
@@ -1176,6 +1354,8 @@ a { color: inherit; }
 .tele-line .t-tag-bad { color: var(--stop); }
 .tele-line .t-tag-info { color: var(--text-dim); }
 
+.dash-tiers { margin-top: 18px; }
+
 .dash-modules { display: grid; gap: 6px; margin-top: 22px; }
 
 .module-row {
@@ -1186,7 +1366,7 @@ a { color: inherit; }
   padding: 16px 18px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.01);
+  background: rgb(var(--tint) / 0.01);
   text-align: left;
   transition: border-color var(--menu) var(--ease-out), transform var(--menu) var(--ease-out);
 }
@@ -1230,7 +1410,7 @@ a { color: inherit; }
 }
 
 .log-table td { padding: 10px 11px; border-bottom: 1px solid var(--hairline); color: var(--text-dim); vertical-align: top; }
-.log-table tr:hover td { background: rgba(255, 255, 255, 0.018); }
+.log-table tr:hover td { background: rgb(var(--tint) / 0.018); }
 
 /* Two lines, then ellipsis. A single long argument used to stretch its row to
    several hundred pixels, which made the table unscannable — the one thing an
@@ -1269,6 +1449,196 @@ a { color: inherit; }
   text-overflow: ellipsis;
 }
 .log-result--error { color: var(--stop); }
+.log-when { white-space: nowrap; color: var(--text-faint); }
+.log-dim { color: var(--text-faint); }
+.log-decision { color: var(--text-dim); }
+.log-denied { color: var(--stop); }
+
+/* The table scrolls inside its own card. `max-height` rather than letting the
+   page grow: the header and the lenses have to stay reachable while reading
+   five hundred rows. */
+.log-table-wrap { overflow: auto; max-height: calc(100vh - 300px); }
+
+/* ---- the log, below the breakpoint ---------------------------------------
+
+   Eight columns do not survive a phone, and a table that scrolls sideways is a
+   table nobody reads the right-hand half of. Same fields, stacked, with the
+   two that carry the judgement — risk and decision — on the lines the eye
+   reaches first. */
+
+.log-cards { display: grid; gap: var(--space-sm); }
+
+.log-card {
+  padding: var(--space-md) var(--space-md) var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--hairline-strong);
+  border-radius: var(--r-md);
+  background: var(--raised);
+}
+
+.log-card--failed { border-left-color: var(--stop); }
+
+.log-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  text-align: left;
+}
+
+.log-card-tool {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.log-card-caret { flex: none; color: var(--text-faint); transition: transform var(--pop) var(--ease-out); }
+.log-card-head[aria-expanded='true'] .log-card-caret { transform: rotate(90deg); }
+
+.log-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-sm);
+  margin-top: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.log-card-meta > span + span::before { content: '·'; margin-right: var(--space-sm); }
+
+/* Three lines, then ellipsis — the same rule the table's cells follow, for the
+   same reason: one tool that returned six hundred words of page text must not
+   be the only row on the screen. Expanding the card shows the arguments; the
+   result in full is a desk-sized question. */
+.log-card-result {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: var(--space-xs);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.log-card[data-open='true'] .log-card-result {
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.log-card-args { margin-top: var(--space-sm); display: grid; gap: var(--space-xs); justify-items: start; }
+.log-card-args .tool-json { max-height: 220px; overflow: auto; }
+
+.log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-lg);
+}
+.log-count { font-size: var(--text-2xs); color: var(--text-faint); margin-left: auto; }
+
+.log-lenses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+/* ---- two controls the whole application can reuse ----------------------- */
+
+/* A filter that says what it filters, instead of a bare box with placeholder
+   text. Used by the log; the other views' hand-styled inputs should move to
+   it rather than each inventing its own padding again. */
+.inline-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 340px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text-faint);
+  transition: border-color var(--pop) var(--ease-out);
+}
+.inline-search:focus-within { border-color: var(--hairline-strong); }
+.inline-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 0;
+  border: none;
+  background: none;
+  outline: none;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.inline-search input::placeholder { color: var(--text-faint); }
+.inline-search .icon-btn { width: 20px; height: 20px; min-width: 20px; min-height: 20px; }
+
+.inline-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.inline-select select {
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* A toggle that reads as a filter rather than as a button: pressed is a state
+   you are in, not an action you took. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 5px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  transition: color var(--press) var(--ease-out), border-color var(--press) var(--ease-out),
+              background var(--press) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chip:hover { color: var(--text-dim); border-color: var(--hairline-strong); }
+}
+
+.chip.is-on {
+  color: var(--text);
+  border-color: var(--hairline-strong);
+  background: rgb(var(--tint) / 0.07);
+}
+
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  color: var(--text-faint);
+}
+.chip.is-on .chip-count { color: var(--text-dim); }
 
 /* --------------------------------------------------------- entrances
    Set by motion.js on mount; the animation itself never touches JS. */
@@ -1307,7 +1677,7 @@ a { color: inherit; }
   border: 1px solid var(--hairline);
   border-bottom: 2px solid var(--hairline-strong);
   border-radius: 5px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+  background: linear-gradient(180deg, rgb(var(--tint) / 0.05), rgb(var(--tint) / 0.02));
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 500;
@@ -1326,7 +1696,7 @@ a { color: inherit; }
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .icon-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+  .icon-btn:hover { color: var(--text); background: rgb(var(--tint) / 0.05); }
 }
 .icon-btn:active { transform: scale(0.94); }
 
@@ -1396,7 +1766,7 @@ a { color: inherit; }
   color: var(--text-dim);
 }
 
-.palette-item.active { background: rgba(255, 255, 255, 0.07); color: var(--text); }
+.palette-item.active { background: rgb(var(--tint) / 0.07); color: var(--text); }
 
 .palette-label { flex: 1; min-width: 0; font-size: 13.5px; }
 
@@ -1569,14 +1939,114 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .md-hr { border: none; border-top: 1px solid var(--hairline); margin: 4px 0; }
 
-.md-link { color: var(--live); text-decoration: none; border-bottom: 1px solid rgba(95, 211, 166, 0.35); }
+/* ---- callouts -----------------------------------------------------------
+
+   GitHub's admonitions, which every model has been trained to write and which
+   this renderer used to show as the literal characters `[!WARNING]` sitting
+   above a plain quote.
+
+   They take the application's own three semantic colours, which is what those
+   colours already mean: a note is neutral, a tip is something working in your
+   favour, a warning is something waiting to go wrong. The mark is a real icon
+   from the same family as the rest of the interface — not an emoji, which is
+   what a model would have put there itself. */
+
+.md-callout {
+  padding: 11px 14px 12px;
+  border: 1px solid var(--hairline);
+  border-left: 2px solid var(--hairline-strong);
+  border-radius: var(--r-md);
+  background: rgb(var(--tint) / 0.022);
+}
+
+.md-callout-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.md-callout-head svg { flex: none; }
+
+.md-callout-body { color: var(--text-dim); }
+.md-callout-body .md-code { background: rgb(var(--tint) / 0.06); }
+
+.md-callout--tip {
+  border-left-color: var(--live);
+  background: var(--live-soft);
+}
+.md-callout--tip .md-callout-head { color: var(--live); }
+
+.md-callout--warning,
+.md-callout--caution {
+  border-left-color: var(--confirm);
+  background: var(--confirm-soft);
+}
+.md-callout--warning .md-callout-head,
+.md-callout--caution .md-callout-head { color: var(--confirm); }
+
+.md-callout--caution { border-left-color: var(--stop); background: var(--stop-soft); }
+.md-callout--caution .md-callout-head { color: var(--stop); }
+
+/* ---- task lists ---------------------------------------------------------
+
+   A model asked to track its own work writes `- [x]` every time, and it used
+   to render as those three characters. The box is drawn, not an `<input>`:
+   nothing in a transcript is settable, and a checkbox that cannot be ticked
+   is worse than a picture of one. */
+
+.md-list--tasks { padding-left: 0; list-style: none; gap: 6px; }
+
+.md-task { display: flex; align-items: flex-start; gap: 9px; }
+
+.md-task-box {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  /* Aligned to the cap height of the line beside it, not to its line box. */
+  margin-top: 3px;
+  border: 1.5px solid var(--hairline-strong);
+  border-radius: 4px;
+  color: var(--canvas);
+}
+
+.md-task.is-done .md-task-box { border-color: var(--live); background: var(--live); }
+.md-task.is-done .md-task-text { color: var(--text-dim); }
+
+.md-task-text { min-width: 0; }
+
+.md-link { color: var(--live); text-decoration: none; border-bottom: 1px solid var(--live-line); }
 .md-link:hover { border-bottom-color: var(--live); }
+
+/* An image the page deliberately does not load — see Markdown.jsx. It reads
+   as an attachment rather than as a broken picture, because that is what it
+   is: a destination the reader can choose to open. */
+.md-image {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px 1px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  font-size: 0.9em;
+  color: var(--text-dim);
+  text-decoration: none;
+  vertical-align: baseline;
+}
+a.md-image:hover { color: var(--text); border-color: var(--hairline-strong); }
+.md-image svg { flex: none; opacity: 0.7; }
 
 .md-code {
   padding: 1px 5px;
   border: 1px solid var(--hairline);
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgb(var(--tint) / 0.04);
   font-family: var(--font-mono);
   font-size: 0.86em;
   word-break: break-word;
@@ -1592,29 +2062,53 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 .md-pre-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
+  gap: var(--space-sm);
+  padding: 6px 6px 6px 11px;
   border-bottom: 1px solid var(--hairline);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-3xs);
   letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--text-faint);
 }
 
-.md-pre-lang { flex: 1; min-width: 0; }
-
-.md-copy {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+/* The filename leads and the language follows it as a tag, because when a
+   model names a file the file is the thing you are looking for. */
+.md-pre-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
 }
-.md-copy:hover { color: var(--text); }
+
+.md-pre-lang {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.md-pre-live { flex: none; color: var(--confirm); text-transform: uppercase; }
+
+.md-pre-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; flex: none; }
+
+.md-pre-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+  transition: color var(--press) var(--ease-out), background var(--press) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .md-pre-btn:hover { color: var(--text); background: rgb(var(--tint) / 0.06); }
+}
+.md-pre-btn.is-on { color: var(--text); background: rgb(var(--tint) / 0.08); }
 
 .md-pre {
   margin: 0;
@@ -1623,15 +2117,125 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   font-family: var(--font-mono);
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--text);
+  color: var(--text-dim);
   white-space: pre;
+  tab-size: 2;
 }
 
+/* Off by default: a shell command broken across three lines is no longer the
+   command, and a diff that reflows is no longer a diff. */
+.md-pre--wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- the syntax theme ---------------------------------------------------
+
+   Written rather than downloaded. The rule at the top of this file is that
+   colour means liveness or risk and nothing else, and a nine-colour theme
+   from a package would put a rainbow inside the one surface a reader spends
+   the longest looking at — and would look like every other chat client.
+
+   So the structure of the code is carried by *weight and luminance*, which is
+   what the rest of this interface already does, and exactly one hue is
+   introduced: literals. The question a reader asks of a strange block is
+   "where is the data in this", and that is the thing worth colouring.
+
+     brightest, 500   what declares — keywords, functions, classes, tags
+     literal hue      what is data — strings, numbers, booleans, regexes
+     dim              everything else
+     faint, italic    comments
+     faint            punctuation and operators
+
+   Diffs are the exception, and are not really an exception: an added line is
+   `--live` and a removed line is `--stop`, which is the same meaning those
+   two colours carry everywhere else in the application. */
+
+.md-pre .token.comment,
+.md-pre .token.prolog,
+.md-pre .token.cdata,
+.md-pre .token.doctype {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.md-pre .token.punctuation,
+.md-pre .token.operator,
+.md-pre .token.entity {
+  color: var(--text-faint);
+}
+
+.md-pre .token.keyword,
+.md-pre .token.atrule,
+.md-pre .token.rule,
+.md-pre .token.important,
+.md-pre .token.selector,
+.md-pre .token.function,
+.md-pre .token.function-name,
+.md-pre .token.class-name,
+.md-pre .token.tag,
+.md-pre .token.builtin,
+.md-pre .token.namespace {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.md-pre .token.string,
+.md-pre .token.char,
+.md-pre .token.regex,
+.md-pre .token.number,
+.md-pre .token.boolean,
+.md-pre .token.constant,
+.md-pre .token.symbol,
+.md-pre .token.attr-value,
+.md-pre .token.url {
+  color: var(--code-literal);
+}
+
+/* A property name and its value are the whole point of JSON and YAML, and
+   telling them apart is most of reading one. */
+.md-pre .token.property,
+.md-pre .token.attr-name,
+.md-pre .token.variable,
+.md-pre .token.parameter {
+  color: var(--text-dim);
+}
+
+.md-pre .token.inserted { color: var(--live); }
+.md-pre .token.deleted { color: var(--stop); }
+.md-pre .token.italic { font-style: italic; }
+.md-pre .token.bold { font-weight: 600; }
+
 .md-table-wrap { overflow-x: auto; border: 1px solid var(--hairline); border-radius: var(--r-md); }
+.md-table-wrap:focus-visible { outline: none; box-shadow: var(--focus); }
 .md-table { border-collapse: collapse; width: 100%; font-size: 13px; }
-.md-table th, .md-table td { padding: 7px 11px; text-align: left; border-bottom: 1px solid var(--hairline); }
-.md-table th { font-weight: 500; color: var(--text-dim); background: rgba(255, 255, 255, 0.02); }
-.md-table tr:last-child td { border-bottom: none; }
+
+.md-table th, .md-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  /* `.msg-body` sets `word-break: break-word` so a long URL in prose cannot
+     push the column open, and it was inherited in here — where it broke `10`
+     across two lines in a narrow index column. Inside a table a word breaks
+     only when the word itself is wider than its column. */
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.md-table th {
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: rgb(var(--tint) / 0.025);
+  white-space: nowrap;
+}
+
+.md-table td { color: var(--text-dim); vertical-align: top; }
+.md-table tbody tr:last-child td { border-bottom: none; }
+
+@media (hover: hover) and (pointer: fine) {
+  .md-table tbody tr:hover td { background: rgb(var(--tint) / 0.018); }
+}
 
 /* -------------------------------------------------------------- crash */
 
@@ -1681,12 +2285,12 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   gap: 9px;
   padding: 9px 12px;
   border-radius: var(--r-md);
-  background: rgba(255, 255, 255, 0.06);
+  background: rgb(var(--tint) / 0.06);
   color: var(--text);
   font-size: 13.5px;
   transition: background var(--press) var(--ease-out), transform var(--press) var(--ease-out);
 }
-.rail-new:hover { background: rgba(255, 255, 255, 0.1); }
+.rail-new:hover { background: rgb(var(--tint) / 0.1); }
 .rail-new:active { transform: scale(0.985); }
 
 .rail-places { display: grid; gap: 1px; margin-top: 6px; }
@@ -1703,9 +2307,9 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
 .rail-place svg { color: var(--text-faint); transition: color var(--press) var(--ease-out); }
-.rail-place:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.rail-place:hover { background: rgb(var(--tint) / 0.05); color: var(--text); }
 .rail-place:hover svg, .rail-place.active svg { color: var(--text-dim); }
-.rail-place.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.rail-place.active { background: rgb(var(--tint) / 0.08); color: var(--text); }
 
 .rail-section {
   display: flex;
@@ -1760,8 +2364,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
-.rail-conv:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
-.rail-conv.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.rail-conv:hover { background: rgb(var(--tint) / 0.045); color: var(--text); }
+.rail-conv.active { background: rgb(var(--tint) / 0.08); color: var(--text); }
 
 .rail-conv-open {
   flex: 1;
@@ -1799,7 +2403,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 .rail-conv.menu-open .rail-conv-more,
 .rail-conv-more:focus-visible { opacity: 1; }
 .rail-conv-more:hover { color: var(--text); }
-.rail-conv.menu-open { background: rgba(255, 255, 255, 0.08); }
+.rail-conv.menu-open { background: rgb(var(--tint) / 0.08); }
 .rail-conv { position: relative; }
 
 .rail-conv-menu {
@@ -1830,7 +2434,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   text-align: left;
 }
-.rail-conv-menu button:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+.rail-conv-menu button:hover { background: rgb(var(--tint) / 0.06); color: var(--text); }
 .rail-conv-menu button .kbd { margin-left: auto; }
 .rail-conv-menu button.danger { color: var(--stop); }
 .rail-conv-menu button.danger:hover { background: var(--stop-soft); color: var(--stop); }
@@ -1867,7 +2471,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   width: 26px;
   height: 26px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgb(var(--tint) / 0.06);
   flex: none;
 }
 
@@ -1922,7 +2526,31 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   transition: color var(--press) var(--ease-out), border-color var(--press) var(--ease-out);
 }
 .stage-back:hover, .stage-cmd:hover, .stage-warn:hover { color: var(--text); border-color: var(--hairline-strong); }
-.stage-warn { border-color: rgba(240, 183, 100, 0.35); color: var(--confirm); }
+.stage-warn { border-color: var(--confirm-line); color: var(--confirm); }
+
+/* On a phone the header is the only chrome, so it carries the name of the
+   page and the way into the rail — and it earns a real bar's worth of height
+   and a hairline under it, which the desktop version does not need. */
+.stage-where {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app--compact .stage-top {
+  gap: var(--space-sm);
+  padding: max(6px, env(safe-area-inset-top)) 10px 8px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--canvas);
+}
+
+.app--compact .stage-menu { margin-left: -4px; }
+
 
 /* ------------------------------------------------------------ the menus */
 
@@ -1978,8 +2606,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
-.menu-row:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); color: var(--text); }
-.menu-row.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.menu-row:hover:not(:disabled) { background: rgb(var(--tint) / 0.06); color: var(--text); }
+.menu-row.active { background: rgb(var(--tint) / 0.08); color: var(--text); }
 .menu-row:disabled { opacity: 0.5; cursor: default; }
 .menu-row.danger:hover { color: var(--stop); }
 
@@ -2077,7 +2705,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   width: 30px;
   height: 17px;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgb(var(--tint) / 0.12);
   flex: none;
   transition: background var(--press) var(--ease-out);
 }
@@ -2091,7 +2719,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   background: var(--text-faint);
   transition: transform var(--press) var(--ease-out), background var(--press) var(--ease-out);
 }
-.switch.on { background: rgba(95, 211, 166, 0.35); }
+.switch.on { background: var(--live-line); }
 .switch.on span { transform: translateX(13px); background: var(--live); }
 
 /* ------------------------------------------- skills and connectors, one page
@@ -2114,6 +2742,20 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   letter-spacing: -0.03em;
 }
 .cap-head .btn { margin-left: auto; flex: none; }
+
+/* Below this the title wraps to two lines and the pill sits in the notch it
+   leaves, which reads as a collision rather than as a layout. Stacked, the
+   title is a title and the action is an action. */
+@media (max-width: 620px) {
+  .cap-head { flex-direction: column; align-items: stretch; gap: var(--space-md); }
+  .cap-head h1 { font-size: var(--text-3xl); }
+  .cap-head .btn { margin-left: 0; align-self: flex-start; }
+}
+
+/* The same wrap, for every other page title row. */
+@media (max-width: 620px) {
+  .vheader-actions { flex-wrap: wrap; }
+}
 
 /* Two columns of one thing each: an icon and a name. */
 .cat-grid {
@@ -2236,6 +2878,45 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 }
 .cap-section-head span:last-child { margin-left: auto; }
 
+/* The same section head, when the section folds. Full-width so the whole line
+   is the hit target, not just the word. */
+.cap-section-head--toggle {
+  width: 100%;
+  padding: 6px 0;
+  text-align: left;
+  transition: color var(--press) var(--ease-out);
+}
+.cap-section-head--toggle:hover { color: var(--text-dim); }
+.cap-section-tail { margin-left: auto; }
+
+.disclosure {
+  flex: none;
+  color: var(--text-faint);
+  transition: transform var(--pop) var(--ease-out);
+}
+.disclosure.is-open { transform: rotate(90deg); }
+
+/* A field plus the buttons that act on it. `.field-row` is a two-column grid,
+   which stretched Apply across half the page and pushed the delete button onto
+   a line of its own. */
+.conn-profile-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+.conn-profile-row .field { flex: 1 1 auto; min-width: 0; max-width: 420px; }
+.conn-profile-row .btn { flex: none; }
+
+/* Collapsed, this is one line; it still has to read as its own band rather
+   than as a caption on the section below it. */
+.conn-profiles { margin-top: 0; margin-bottom: var(--space-2xl); }
+
+@media (max-width: 560px) {
+  .conn-profile-row { flex-wrap: wrap; }
+  .conn-profile-row .field { flex-basis: 100%; max-width: none; }
+}
+
 .cap-cat { margin-top: 26px; }
 
 /* The three fields a skill actually is. */
@@ -2273,7 +2954,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   display: inline-block;
   margin-left: 8px;
   padding: 2px 6px;
-  border: 1px solid rgba(233, 176, 77, 0.4);
+  border: 1px solid var(--confirm-line);
   border-radius: 4px;
   background: var(--confirm-soft);
   font-family: var(--font-mono);
@@ -2315,6 +2996,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -2428,12 +3110,12 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 /* A pinned message says so without a badge: the mark is already in its header,
    and the rule down the margin is what you look for when scrolling back. */
-.msg.is-pinned { border-left: 2px solid rgba(233, 176, 77, 0.45); padding-left: 12px; }
+.msg.is-pinned { border-left: 2px solid var(--confirm-line); padding-left: 12px; }
 
 /* Where a jump from the strip lands. Background only, so nothing moves. */
 .stream-item.is-flash { animation: pin-flash 1.2s var(--ease-out); border-radius: var(--r-md); }
 @keyframes pin-flash {
-  from { background: rgba(233, 176, 77, 0.14); }
+  from { background: var(--confirm-soft); }
   to { background: transparent; }
 }
 
@@ -2483,10 +3165,10 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding: 14px;
   border: 1px solid var(--hairline);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.018);
+  background: rgb(var(--tint) / 0.018);
   transition: border-color var(--press) var(--ease-out), background var(--press) var(--ease-out);
 }
-.dcard:hover { border-color: var(--hairline-strong); background: rgba(255, 255, 255, 0.035); }
+.dcard:hover { border-color: var(--hairline-strong); background: rgb(var(--tint) / 0.035); }
 
 .dcard-top { display: flex; align-items: flex-start; gap: 11px; }
 .dcard-heading { flex: 1; min-width: 0; display: grid; gap: 2px; }
@@ -2500,6 +3182,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   display: -webkit-box;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -2518,9 +3201,9 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out),
               border-color var(--press) var(--ease-out);
 }
-.dcard-act:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text); border-color: var(--hairline-strong); }
+.dcard-act:hover:not(:disabled) { background: rgb(var(--tint) / 0.08); color: var(--text); border-color: var(--hairline-strong); }
 .dcard-act:disabled { opacity: 0.5; cursor: default; }
-.dcard-act--done { color: var(--live); border-color: rgba(95, 211, 166, 0.35); }
+.dcard-act--done { color: var(--live); border-color: var(--live-line); }
 
 .dcard-gear-wrap { position: relative; flex: none; }
 
@@ -2546,10 +3229,29 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   overflow: hidden;
 }
 .svc--generic {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgb(var(--tint) / 0.07);
   color: var(--text-dim);
   font-family: var(--font-display);
   font-weight: 600;
+}
+
+/* Every tile is the same neutral surface now, so a row of them reads as one
+   family rather than as fifteen brand colours competing for the same list.
+   The mark inside carries the brand; the tile carries the layout. */
+.svc--brand, .svc--primitive {
+  background: rgb(var(--tint) / 0.055);
+  border: 1px solid var(--hairline);
+}
+.svc--primitive { color: var(--text-dim); }
+
+/* The published path data, painted in `color` through a mask. An `<img>` would
+   be the brand's own black on a black console; a mask keeps the geometry and
+   hands the colour back. */
+.svc-mark {
+  display: block;
+  background: currentColor;
+  -webkit-mask: var(--svc-mask) center / contain no-repeat;
+  mask: var(--svc-mask) center / contain no-repeat;
 }
 
 .dir-empty { grid-column: 1 / -1; padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
@@ -2596,8 +3298,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-dim);
   text-align: left;
 }
-.set-nav-item:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
-.set-nav-item.active { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.set-nav-item:hover { background: rgb(var(--tint) / 0.05); color: var(--text); }
+.set-nav-item.active { background: rgb(var(--tint) / 0.08); color: var(--text); }
 
 /* These leave the dialog for a full view rather than selecting a panel inside
    it, and the caret is the only thing that says so before it happens. */
@@ -2639,7 +3341,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding: 9px 12px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.015);
+  background: rgb(var(--tint) / 0.015);
   font-size: 13px;
   color: var(--text);
 }
@@ -2658,7 +3360,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   margin-bottom: 14px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.015);
+  background: rgb(var(--tint) / 0.015);
   overflow: visible;
 }
 .set-subpanel h3:first-child { margin-top: 0; }
@@ -2724,7 +3426,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   gap: 2px;
   padding: 2px;
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgb(var(--tint) / 0.04);
 }
 
 .mode {
@@ -2734,7 +3436,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-faint);
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
-.mode.active { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.mode.active { background: rgb(var(--tint) / 0.1); color: var(--text); }
 
 .composer-model {
   display: flex;
@@ -2747,7 +3449,35 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   color: var(--text-faint);
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
-.composer-model:hover, .composer-model.active { background: rgba(255, 255, 255, 0.06); color: var(--text-dim); }
+.composer-model:hover, .composer-model.active { background: rgb(var(--tint) / 0.06); color: var(--text-dim); }
+
+/* A model id is arbitrary-length text next to a fixed-width send button, so it
+   is the thing that gives. Without this the name wrapped to three lines and
+   pushed Send off the edge of the composer on a phone. */
+.composer-model {
+  min-width: 0;
+  max-width: 22ch;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.composer-model > svg { flex: none; }
+
+/* Below this the four controls stop fitting on one line together. The modes
+   take their own row rather than being scrolled or truncated: which mode the
+   next message runs in is not something to make someone hunt for. */
+@media (max-width: 520px) {
+  .composer-bar {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'modes modes modes' 'plus . right';
+    gap: var(--space-xs) var(--space-sm);
+  }
+  .composer-modes { grid-area: modes; justify-content: stretch; }
+  .composer-modes .mode { flex: 1; text-align: center; padding: 6px 4px; }
+  .composer-chip { grid-area: plus; justify-self: start; }
+  .composer-bar-right { grid-area: right; margin-left: 0; }
+  .composer-model { max-width: min(38vw, 18ch); }
+}
 
 .composer-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px 2px; }
 
@@ -2758,7 +3488,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding: 4px 9px;
   border: 1px solid var(--hairline);
   border-radius: 99px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgb(var(--tint) / 0.03);
   font-size: 12px;
   color: var(--text-dim);
 }
@@ -2771,10 +3501,95 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .chat-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; position: relative; }
 .chat-banner { margin: 8px 26px 0; }
+/* The dismiss affordance on a health banner. Ghost until hovered so it never
+   competes with the banner's primary action, but always reachable. */
+.chat-banner-dismiss {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin-left: 4px; padding: 0;
+  border: none; border-radius: var(--r-sm);
+  background: transparent; color: var(--text-faint);
+  cursor: pointer; flex: none;
+}
+.chat-banner-dismiss:hover { background: rgb(var(--tint) / 0.08); color: var(--text); }
+.chat-banner-dismiss:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-@media (max-width: 860px) {
-  .rail { position: fixed; inset: 0 auto 0 0; z-index: 30; }
+/* A heading with an action to its right (Providers · Ping all). */
+.set-head-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.set-head-row h3 { margin-bottom: 6px; }
+
+/* One role assignment: label + hint above, provider/model controls below. */
+.set-role-row {
+  display: grid; gap: 6px;
+  padding: 12px 0; border-bottom: 1px solid var(--hairline);
+}
+.set-role-row:last-child { border-bottom: none; }
+.set-role-head { display: flex; flex-direction: column; gap: 2px; }
+.set-role-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.set-role-controls select, .set-role-controls input {
+  flex: 1; min-width: 150px;
+  padding: 7px 11px;
+  border: 1px solid var(--hairline); border-radius: var(--r-sm);
+  background: var(--canvas-deep); color: var(--text);
+  font-family: var(--font-body); font-size: 13px; outline: none;
+}
+.set-role-controls select:focus, .set-role-controls input:focus { border-color: var(--accent); }
+
+
+/* ------------------------------------------------ the rail, below 860px
+
+   Above this width the rail is a column beside the page. Below it there is no
+   room for both, so it becomes a drawer *over* the page — off-canvas until
+   asked for, with a backdrop, and closing itself the moment you pick a place.
+
+   It used to be `position: fixed` and nothing else, which is the same drawer
+   with none of the parts that make one work: it covered two thirds of a phone
+   on load, had no way out that a thumb could find, and left the page behind it
+   fully tabbable. `App.jsx` puts `inert` on the stage; this draws the rest. */
+
+@media (max-width: 859.98px) {
+  .rail--drawer {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 45;
+    width: min(310px, 86vw);
+    /* The safe area matters here specifically: this is the one panel that runs
+       the full height of a phone with a home indicator across its bottom. */
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    border-right: 1px solid var(--hairline-strong);
+    box-shadow: 0 0 60px -12px rgb(var(--shade) / 0.8);
+    transform: translate3d(-102%, 0, 0);
+    visibility: hidden;
+    transition: transform var(--menu) var(--ease-drawer), visibility 0s linear var(--menu);
+  }
+
+  .rail--drawer.is-open {
+    transform: translate3d(0, 0, 0);
+    visibility: visible;
+    transition: transform var(--menu) var(--ease-drawer), visibility 0s;
+  }
+
+  .rail-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    width: 100%;
+    border: none;
+    background: var(--scrim);
+    backdrop-filter: blur(2px);
+    animation: fade-in var(--menu) var(--ease-out);
+    cursor: default;
+  }
+  .rail-scrim:active { transform: none; }
+
   .set-nav { width: 150px; }
+}
+
+/* A drawer that slides is a drawer that moves; anyone who asked for stillness
+   gets it appearing and disappearing instead, which is still legible. */
+@media (max-width: 859.98px) and (prefers-reduced-motion: reduce) {
+  .rail--drawer { transition: none; }
 }
 
 /* A submenu of a submenu opens beside its parent, not on top of it. */
@@ -2807,7 +3622,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding: 11px 13px;
   border: 1px solid var(--hairline);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.018);
+  background: rgb(var(--tint) / 0.018);
 }
 .conn-pop:hover { border-color: var(--hairline-strong); }
 .conn-pop-name { flex: 1; min-width: 0; font-size: 13.5px; }
@@ -2822,7 +3637,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   transition: background var(--press) var(--ease-out), color var(--press) var(--ease-out);
 }
 .conn-tab:hover { color: var(--text-dim); }
-.conn-tab.active { background: rgba(255, 255, 255, 0.09); color: var(--text); }
+.conn-tab.active { background: rgb(var(--tint) / 0.09); color: var(--text); }
 .conn-count { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint); }
 
 .conn-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
@@ -2844,7 +3659,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 
 .conn-table td { padding: 11px 14px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
 .conn-table tr:last-child td { border-bottom: none; }
-.conn-table tr.is-open td { background: rgba(255, 255, 255, 0.02); }
+.conn-table tr.is-open td { background: rgb(var(--tint) / 0.02); }
 
 .conn-name { display: flex; align-items: center; gap: 11px; color: var(--text); min-width: 0; }
 .conn-name > span { min-width: 0; }
@@ -2866,6 +3681,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
 .conn-error {
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin-top: 3px;
@@ -2881,7 +3697,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   flex-wrap: wrap;
 }
 .conn-actions .btn { white-space: nowrap; }
-.conn-table tbody tr:hover td { background: rgba(255, 255, 255, 0.022); }
+.conn-table tbody tr:hover td { background: rgb(var(--tint) / 0.022); }
 .conn-empty { padding: 26px 14px; text-align: center; color: var(--text-faint); }
 
 .conn-setup-row td { padding: 0 14px 16px; }
@@ -2906,7 +3722,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   margin: 10px 14px 0;
   padding: 10px 12px;
   border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgb(var(--tint) / 0.03);
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.7;
@@ -2925,7 +3741,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   font-size: 11.5px;
   color: var(--text-dim);
 }
-.conn-check input { accent-color: var(--clay); }
+.conn-check input { accent-color: var(--confirm); }
 
 /* A connector as a row you open, rather than a row of four controls.
    The list answers "is it running"; opening it answers everything else. */
@@ -2945,7 +3761,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   transition: background var(--press) var(--ease-out);
 }
 .conn-list .conn-row:last-child { border-bottom: none; }
-.conn-row:hover { background: rgba(255, 255, 255, 0.022); }
+.conn-row:hover { background: rgb(var(--tint) / 0.022); }
 .conn-row-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .conn-row-name { font-size: 14px; }
 .conn-row-sub {
@@ -3084,7 +3900,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   cursor: pointer;
   text-align: left;
 }
-.auto-run-list li button:hover { background: rgba(255, 255, 255, 0.03); color: var(--text); }
+.auto-run-list li button:hover { background: rgb(var(--tint) / 0.03); color: var(--text); }
 .auto-run-empty { padding: 6px 10px; font-size: 12px; color: var(--text-faint); }
 
 
@@ -3253,15 +4069,19 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding-right: 96px;
 }
 
+/* `.inline-search`, at the width this list wants. */
 .mail-search {
-  width: 100%;
-  margin-bottom: 10px;
+  max-width: none;
+  margin-bottom: var(--space-md);
 }
 
+/* `--line` was never defined anywhere in this file, so this border drew in
+   `currentColor` — the text colour of whatever it inherited from — instead of
+   a hairline. It is the only such reference left. */
 .mail-thread {
   margin-top: 12px;
   padding-left: 12px;
-  border-left: 2px solid var(--line);
+  border-left: 2px solid var(--hairline-strong);
 }
 
 .mail-message + .mail-message { margin-top: 16px; }
@@ -3514,7 +4334,7 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   padding: 14px 16px 12px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-md, 10px);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgb(var(--tint) / 0.02);
 }
 /* The escalation card borrows the plan card's shell -- same moment, same
    shape: the turn ended, nothing ran, the user decides. The left edge is the
@@ -3632,8 +4452,8 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.055) 42%,
-    rgba(255, 255, 255, 0.055) 58%,
+    rgb(var(--tint) / 0.055) 42%,
+    rgb(var(--tint) / 0.055) 58%,
     transparent
   );
   animation: skel-sweep 1.6s var(--ease-in-out) infinite;
@@ -3795,4 +4615,142 @@ h5.md-h, h6.md-h { font-size: 14px; color: var(--text-dim); }
   .skel::after { animation: none; }
   .skel { background: var(--surface-2); }
   .boot-bar > span { animation: none; width: 100%; opacity: 0.5; }
+}
+
+/* ------------------------------------------------------------- appearance
+
+   The theme picker shows the palette rather than naming it: three chips, each
+   painted in the colours it would give you, so choosing is a comparison and
+   not a guess about what "Graphite" means. The chips are hardcoded on purpose
+   — they have to stay showing their own theme while the page is in another. */
+
+.theme-picker { display: grid; gap: var(--space-xs); margin-bottom: var(--space-2xl); }
+
+.theme-swatch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  text-align: left;
+  color: var(--text-dim);
+  transition: border-color var(--press) var(--ease-out), background var(--press) var(--ease-out),
+              color var(--press) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .theme-swatch:hover { border-color: var(--hairline-strong); color: var(--text); }
+}
+
+.theme-swatch.is-on {
+  border-color: var(--hairline-strong);
+  background: rgb(var(--tint) / 0.05);
+  color: var(--text);
+}
+
+.theme-chip {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 28px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.theme-chip i { position: absolute; display: block; border-radius: 2px; }
+.theme-chip-bg { inset: 0; border-radius: 0; }
+.theme-chip-fg { left: 6px; top: 8px; width: 17px; height: 3px; }
+.theme-chip-live { left: 6px; top: 15px; width: 10px; height: 3px; }
+
+.theme-swatch--dark .theme-chip-bg { background: #0a0a0b; }
+.theme-swatch--dark .theme-chip-fg { background: #f2f0ec; }
+.theme-swatch--dark .theme-chip-live { background: #63c68a; }
+
+.theme-swatch--light .theme-chip-bg { background: #f7f5f1; }
+.theme-swatch--light .theme-chip-fg { background: #16150f; }
+.theme-swatch--light .theme-chip-live { background: #1c7a45; }
+
+/* Split down the middle: the setting that is both. */
+.theme-swatch--system .theme-chip-bg {
+  background: linear-gradient(105deg, #0a0a0b 0 50%, #f7f5f1 50% 100%);
+}
+.theme-swatch--system .theme-chip-fg {
+  background: linear-gradient(105deg, #f2f0ec 0 58%, #16150f 58% 100%);
+}
+.theme-swatch--system .theme-chip-live {
+  background: #63c68a;
+}
+
+.theme-swatch-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.theme-swatch-label { font-size: var(--text-sm); }
+.theme-swatch-hint { font-size: var(--text-2xs); color: var(--text-faint); }
+
+/* Naming a new list, in the rail it will appear in — rather than in a
+   `window.prompt`, which is the one dialog in this application nobody chose. */
+.task-rail-new {
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-xs) 0 var(--space-sm);
+}
+.task-rail-new input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text);
+  font-size: var(--text-xs);
+  outline: none;
+}
+.task-rail-new input:focus { border-color: var(--hairline-strong); }
+.task-rail-new .btn { flex: none; }
+
+/* ------------------------------------------------------- touch targets
+
+   Last in the file on purpose. These override sizes chosen for a cursor, and
+   several of those (`.task-check`, `.btn--small`) are declared hundreds of
+   lines below where this block first sat — so it lost on source order and the
+   17px tick box stayed 17px on a phone. Nothing is allowed to come after. */
+
+@media (pointer: coarse) {
+  .icon-btn { min-width: 40px; min-height: 40px; }
+  .app--compact .stage-top-actions { gap: 2px; }
+
+  /* Three controls that had a size chosen for a cursor. The box grows; the
+     mark inside does not, so the row still looks the way it was drawn. */
+  .rail-conv-more { min-width: 38px; min-height: 38px; }
+  .btn--small { min-height: 38px; padding-block: 8px; }
+
+  /* A 17px tick box is a miss on a phone. 30px is the size a list checkbox is
+     on both mobile platforms, and the extended hit area below takes it past 44
+     without making the mark itself look heavy. */
+  .task-check {
+    position: relative;
+    width: 30px;
+    height: 30px;
+    margin-top: 0;
+    border-radius: var(--r-md);
+  }
+  .task-check::after {
+    content: '';
+    position: absolute;
+    inset: -7px;
+  }
+}
+
+
+/* On a phone the toast stack sat on top of the composer's send button, which
+   is the control most likely to be pressed the moment after one appears. Full
+   width above it, and clear of the home indicator. */
+@media (max-width: 559.98px) {
+  .toast-wrap {
+    left: 10px;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    max-width: none;
+  }
 }

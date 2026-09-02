@@ -96,8 +96,30 @@ connected and also has no account; reporting either at that moment tells someone
 looking at a consent page that the thing they are doing is not happening. So the
 deepest unmet requirement wins, not the first one found.
 
-Three details worth keeping:
+Four details worth keeping:
 
+- **Tools in the registry outrank a recorded error.** This check runs *before*
+  the error check, and the ordering is the whole of the fix for connectors that
+  reported "failed to start" while the agent was calling their tools. One
+  transient spawn, discovery or OAuth failure wrote a string that nothing
+  cleared, and the row believed it forever. A registered tool is a fact about
+  now; an error is a memory of a moment.
+
+  `MCPManager.is_ready` is what decides, and it reads the `ToolRegistry` rather
+  than the connection object, because the registry is what dispatch reads.
+  Readiness needs tools registered, fewer than `DEMOTE_AFTER_FAILURES` (3)
+  consecutive hard failures since they were, and either a live session or a
+  registration newer than `READY_COOLDOWN_SECONDS` (300). So a working connector
+  shrugs off one bad reconcile, and one that is genuinely gone demotes on the
+  third pass. `state()` and `status()` withhold the error string while ready --
+  it stays in `self.errors` for the log and for the demotion count.
+
+  `connect_server` is idempotent for the same reason: a server already connected
+  with its tools registered is returned as-is rather than torn down and rebuilt,
+  so a reconcile at the head of every turn stops handing a working connector a
+  fresh window in which to fail. A person pressing Connect, Reconnect or the
+  on/off switch passes `force=True`, which is the one context where rebuilding
+  the session is what was asked for.
 - **`starting` is not `failed`.** They rendered identically, so on a freshly
   booted server every connector looked broken.
 - **Missing credentials are named, not counted.** "Needs 2 credentials" cannot
@@ -196,7 +218,7 @@ Safety properties, in the order they matter:
 - **The stated verify criterion, run as a real automation**: `run_once` against
   a real HTTP model with `github` *and* `vercel` unauthorised reached the model
   in **0.1s**, both connectors refused by name with the screen and the button,
-  `status=ok`. `RUN_TIMEOUT_SECONDS` is 300 and two unauthorised connectors used
+  `status=ok`. `RUN_TIMEOUT_SECONDS` is 180 and two unauthorised connectors used
   to be able to eat it.
 - `psok mcp merge-google` dry-run against the real config: 5 sources, correct
   tool list, `signed in: yes`. **Not applied** — that is the account owner's

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { useApp } from '../store.jsx'
+import { api } from '../api.js'
+import { useDismiss } from '../hooks/useDismiss.js'
 
 /* Which model answers the next message.
 
@@ -13,6 +15,10 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
   const { health } = useApp()
   const ref = useRef(null)
   const [custom, setCustom] = useState(model || '')
+  // The selected provider's live model list, so the field is a menu and not
+  // just a text box. Best-effort: an endpoint that will not answer leaves the
+  // datalist empty and the free-text field working exactly as before.
+  const [models, setModels] = useState([])
 
   const providers = health?.providers ?? []
   const defaults = health?.provider_defaults ?? {}
@@ -24,16 +30,16 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
      it on purpose; picking one is what says why it will not work. */
   const unavailable = health?.providers_unavailable ?? {}
 
+  useDismiss(ref, true, { onAway: onClose })
+
   useEffect(() => {
-    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
-    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
-    document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', key, true)
-    return () => {
-      document.removeEventListener('mousedown', away)
-      document.removeEventListener('keydown', key, true)
-    }
-  }, [onClose])
+    let live = true
+    if (!provider) { setModels([]); return }
+    api.providerModels(provider)
+      .then((r) => { if (live) setModels(r.models || []) })
+      .catch(() => { if (live) setModels([]) })
+    return () => { live = false }
+  }, [provider])
 
   return (
     <div className={`menu menu--right${placement === "down" ? " menu--down" : ""}`} ref={ref} role="menu">
@@ -73,17 +79,25 @@ export default function ModelMenu({ provider, model, onChange, onClose, scoped, 
       })}
       <div className="menu-sep" />
       <div className="menu-pad">
-        <label className="menu-field-label" htmlFor="model-name">model name</label>
+        <label className="menu-field-label" htmlFor="model-name">
+          model name{models.length > 0 ? ` · ${models.length} from ${provider}${models.some((m) => m.free) ? `, ${models.filter((m) => m.free).length} free` : ''}` : ''}
+        </label>
         <input
           id="model-name"
           className="menu-input"
+          list="model-menu-models"
           value={custom}
-          placeholder="any name the endpoint accepts"
+          placeholder={models.length ? 'pick one, or type any name' : 'any name the endpoint accepts'}
           onChange={(e) => setCustom(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && custom.trim()) { onChange({ model: custom.trim() }); onClose() }
           }}
         />
+        <datalist id="model-menu-models">
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.free ? 'free — ' : ''}{m.id}</option>
+          ))}
+        </datalist>
         <button
           type="button"
           className="btn btn--primary btn--small"

@@ -79,13 +79,22 @@ def record_failure(name: str, kind: FailureKind, message: str = "") -> None:
     Only the kinds that mean "this provider, right now" are recorded. A 404 for
     a model name says nothing about the provider's health and must not take it
     out of the picker -- the fix for that is a different model, not a different
-    provider.
+    provider. `NON_RETRYABLE_RATE_LIMIT` belongs here too: an account whose
+    tokens-per-minute ceiling is smaller than what this request needed will
+    fail the same way on the next turn, and a picker that keeps offering it
+    anyway is what turned three near-identical 413s into three separate
+    real conversations.
     """
-    if kind not in (FailureKind.UNREACHABLE, FailureKind.UPSTREAM_UNHEALTHY):
+    if kind not in (
+        FailureKind.UNREACHABLE,
+        FailureKind.UPSTREAM_UNHEALTHY,
+        FailureKind.NON_RETRYABLE_RATE_LIMIT,
+    ):
         return
     reason = {
         FailureKind.UNREACHABLE: "nothing answered at its endpoint",
         FailureKind.UPSTREAM_UNHEALTHY: "the provider is returning server errors",
+        FailureKind.NON_RETRYABLE_RATE_LIMIT: "the account's rate limit or quota was exceeded",
     }[kind]
     _cache[name] = (
         time.monotonic() + FAILURE_TTL_SECONDS,
@@ -162,6 +171,23 @@ async def _probe_now(config: ProviderConfig) -> Availability:
     # endpoint disagreeing with the request, which is not the same failure as
     # the endpoint not being there, and is not this function's question.
     return Availability(name=config.name, available=True)
+
+
+async def ping(config: ProviderConfig) -> Availability:
+    """A fresh liveness check the user asked for, cache and key-gate ignored.
+
+    `probe` answers the picker's passive question and only runs for providers
+    whose credential says nothing (`needs_probe`); a Ping button is the opposite
+    -- a person pressing it means "check this one now, whatever you remember and
+    whatever kind of provider it is". So the cache is dropped first and the
+    endpoint is hit directly. Any status answering counts as reachable; a
+    key-bearing provider's 401 still proves something is there. The fresh result
+    is remembered like any other probe, so the picker's badge updates with it.
+    """
+    forget(config.name)
+    result = await _probe_now(config)
+    _cache[config.name] = (time.monotonic() + PROBE_TTL_SECONDS, result)
+    return result
 
 
 async def survey(configs: dict[str, ProviderConfig]) -> dict[str, Availability]:

@@ -7,11 +7,13 @@ a streaming turn endpoint, pending confirmations, and the audit log.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import shutil
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -85,8 +87,10 @@ MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
 # Iterations an unattended run may take. Higher than the interactive default
 # because a multi-step browser task spends one per tool call and nobody is
 # there to tell it to continue; still bounded, and `RUN_TIMEOUT_SECONDS` and
-# `Guards.max_seconds` remain the real stops.
-AUTOMATION_MAX_ITERATIONS = 30
+# `Guards.max_seconds` remain the real stops. Twenty rather than thirty, to sit
+# under the tightened 180s run timeout: thirty iterations that cannot finish
+# inside the timeout is a budget that only ever ends in a cancellation.
+AUTOMATION_MAX_ITERATIONS = 20
 
 
 async def _unattended_director(callback):
@@ -151,7 +155,9 @@ async def _connect_into_live_registry(name: str) -> None:
     async with _registry_lock:
         manager.forget_error(name)
         try:
-            await manager.connect_server(config)
+            # A sign-in that just landed means "rebuild it with this account",
+            # which is exactly what the idempotent path must not do by itself.
+            await manager.connect_server(config, force=True)
             _mcp["errors"].pop(name, None)
         except Exception as exc:
             # The account is good even if the connection is not; say so rather
@@ -270,6 +276,46 @@ _pending: dict[str, dict[str, Any]] = {}
 TERMINAL_EVENTS = frozenset({"done", "error", "guard"})
 
 
+# How often the stream emits a keepalive while the turn is producing nothing.
+# A long tool call -- a bash command, a slow model -- puts no bytes on the SSE
+# stream between its `tool_call` and `tool_result` frames, and a silent stream
+# is one a proxy drops and the interface's watchdog gives up on. A frame every
+# few seconds keeps the socket demonstrably alive without inventing progress.
+HEARTBEAT_SECONDS = 10.0
+
+_HEARTBEAT = object()
+
+
+async def _with_heartbeats(events, interval: float = HEARTBEAT_SECONDS):
+    """Yield the turn's events, plus a `_HEARTBEAT` sentinel through any gap.
+
+    The turn's own generator can legitimately go quiet for a minute or two
+    while a tool runs; this races each `__anext__` against a timer and emits a
+    keepalive when the wait wins, so the stream never actually falls silent.
+    """
+    iterator = events.__aiter__()
+    pending = asyncio.ensure_future(iterator.__anext__())
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield _HEARTBEAT
+                continue
+            try:
+                item = pending.result()
+            except StopAsyncIteration:
+                return
+            yield item
+            pending = asyncio.ensure_future(iterator.__anext__())
+    finally:
+        # A client that hung up, or a turn that ended: stop the in-flight pull
+        # rather than leaving it to a garbage collector. The director handles
+        # the cancellation as its own stop.
+        pending.cancel()
+        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
+            await pending
+
+
 def _frame(event_type: str, **data: Any) -> str:
     """One SSE frame. `default=str` so an odd value degrades rather than
     killing the response mid-stream."""
@@ -386,7 +432,11 @@ async def _registry_for(
             # built. Without this the toggle only took effect on restart, so a
             # connector the user turned on in the interface stayed unusable.
             for name, outcome in (await _mcp["manager"].reconcile()).items():
-                if isinstance(outcome, int):
+                # A connector whose tools are in the registry is working, whatever
+                # this pass reported. Recording the failure anyway is what put a
+                # permanently degraded banner over connectors the agent was
+                # calling successfully -- see `MCPManager.is_ready`.
+                if isinstance(outcome, int) or _mcp["manager"].is_ready(name):
                     _mcp["errors"].pop(name, None)
                 else:
                     _mcp["errors"][name] = str(outcome)
@@ -409,7 +459,7 @@ async def _registry_for(
             # /api/health can say which connector is down instead of the
             # interface seeing a shorter tool list for no stated reason.
             for name, outcome in (await manager.connect_all()).items():
-                if not isinstance(outcome, int):
+                if not isinstance(outcome, int) and not manager.is_ready(name):
                     errors[name] = str(outcome)
         except Exception as exc:  # a broken server must not take the API down
             errors["*"] = f"{type(exc).__name__}: {exc}"
@@ -442,8 +492,16 @@ class _LazyDirector:
 
 
 async def _director(workspace: str | None = None, mode: str = "chat") -> Director:
+    from backend.agent.director import Guards
+    from backend.config import load_max_iterations
+
     registry, root = await _registry_for(workspace)
-    return Director(registry, workspace_root=root, stream=True, mode=mode)
+    # The loop ceiling is a user setting now (Settings -> General), read per
+    # turn so a change lands on the next message. Everything else in Guards
+    # keeps its default -- the wall-clock and tool-call stops are not the ones
+    # people hit, the iteration count is.
+    guards = Guards(max_iterations=load_max_iterations())
+    return Director(registry, workspace_root=root, stream=True, mode=mode, guards=guards)
 
 
 @app.get("/api/ping")
@@ -677,6 +735,194 @@ def add_provider_route(body: AddProvider) -> dict[str, Any]:
     }
 
 
+class TierAssignment(BaseModel):
+    provider: str
+    model: str
+
+
+@app.get("/api/tiers")
+def list_tiers() -> dict[str, Any]:
+    """Which model does which job, plus what a picker needs to reassign one.
+
+    A tier answers "how hard is this work": `fast` for a quick cheap turn,
+    `default` for the everyday go-to model, `heavy` for the model the fast one
+    can escalate to. Empty tiers are the ordinary case, not a fault -- a caller
+    with no assignment falls back to the conversation's own model.
+    """
+    from backend.config import TIERS, configured_providers, load_tiers
+
+    providers = configured_providers()
+    return {
+        "roles": list(TIERS),
+        "tiers": {
+            name: {"provider": tier.provider, "model": tier.model}
+            for name, tier in load_tiers().items()
+        },
+        "providers": list(providers),
+        "provider_defaults": {
+            name: cfg.default_model for name, cfg in providers.items() if cfg.default_model
+        },
+    }
+
+
+@app.put("/api/tiers/{tier}")
+def set_tier_route(tier: str, body: TierAssignment) -> dict[str, Any]:
+    """Assign a tier a provider and model. The go-to model is the `default` tier."""
+    from backend.config import set_tier
+
+    try:
+        set_tier(tier, body.provider, body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "set", "tier": tier, "provider": body.provider, "model": body.model}
+
+
+@app.delete("/api/tiers/{tier}")
+def clear_tier_route(tier: str) -> dict[str, str]:
+    """Unassign a tier, so its callers fall back to the conversation's own model."""
+    from backend.config import clear_tier
+
+    try:
+        clear_tier(tier)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "cleared", "tier": tier}
+
+
+@app.post("/api/providers/ping-all")
+async def ping_all_providers() -> dict[str, Any]:
+    """Re-check every configured provider now, and report each.
+
+    Registered above the `{name}` routes: Starlette matches in registration
+    order, so this literal path has to win over `/providers/{name}` before a
+    provider named "ping-all" could ever shadow it.
+    """
+    from backend.config import configured_providers
+
+    providers = configured_providers()
+
+    async def one(name: str, cfg) -> tuple[str, dict[str, Any]]:
+        started = time.monotonic()
+        try:
+            result = await availability.ping(cfg)
+            return name, {
+                "available": result.available,
+                "reason": result.reason,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+        except Exception as exc:
+            return name, {"available": False, "reason": str(exc), "latency_ms": None}
+
+    settled = await asyncio.gather(*(one(name, cfg) for name, cfg in providers.items()))
+    return {"results": dict(settled)}
+
+
+@app.post("/api/providers/{name}/ping")
+async def ping_provider(name: str) -> dict[str, Any]:
+    """A fresh liveness check for one provider, on demand.
+
+    Distinct from the passive survey behind the picker's badge: a person
+    pressing Ping means "check this one now", so the cache is dropped and the
+    endpoint hit whatever its credential. Any status answering is reachable.
+    """
+    from backend.config import load_providers
+
+    config = load_providers().get(name)
+    if config is None:
+        raise HTTPException(404, f"no provider named '{name}' in providers.yaml")
+    started = time.monotonic()
+    result = await availability.ping(config)
+    return {
+        "name": name,
+        "available": result.available,
+        "reason": result.reason,
+        "source": result.source,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+    }
+
+
+@app.get("/api/providers/{name}/models")
+async def provider_models(name: str) -> dict[str, Any]:
+    """The models this provider's own API lists right now, for the picker.
+
+    So the user chooses from what the endpoint actually serves rather than
+    retyping an id from its docs. Read live from the OpenAI-compatible
+    `GET /models` with the provider's key -- the same list the provider's own
+    dashboard shows, and always current, where hand-kept lists go stale the week
+    a provider retires a model.
+
+    `free` is best-effort: OpenRouter's `/models` carries pricing, so a
+    zero-cost model can be flagged; most endpoints say nothing about price, and
+    a free-tier provider (Groq, Cerebras) serves its whole list on the free
+    tier anyway. Never raises -- an endpoint that will not answer returns an
+    empty list with a reason, and the picker keeps its free-text field.
+    """
+    from backend.config import load_providers
+    from backend.secrets import resolve_api_key
+
+    config = load_providers().get(name)
+    if config is None:
+        raise HTTPException(404, f"no provider named '{name}' in providers.yaml")
+
+    base = (config.base_url or "").rstrip("/")
+    if not base:
+        return {"name": name, "models": [], "reason": "this provider declares no base URL"}
+
+    key = resolve_api_key(ref=config.api_key_ref, env=config.api_key_env)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(f"{base}/models", headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        return {"name": name, "models": [], "reason": f"{type(exc).__name__}: {exc}"}
+
+    return {"name": name, "models": _model_list(payload), "reason": ""}
+
+
+def _model_list(payload: Any) -> list[dict[str, Any]]:
+    """The model ids out of an OpenAI-style `/models` body, free flagged where known.
+
+    Shapes vary: OpenAI/Groq/Cerebras return `{"data": [{"id": ...}]}`,
+    OpenRouter adds a `pricing` object per entry, and a few return a bare list.
+    Unknown shapes yield nothing rather than a guess -- the picker's free-text
+    field is the fallback, not an invented id.
+    """
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_id = row.get("id") or row.get("name")
+        if not model_id:
+            continue
+        pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+        # Zero prompt-and-completion price, or the `:free` suffix OpenRouter uses.
+        priced_free = pricing and all(
+            _is_zero(pricing.get(k)) for k in ("prompt", "completion") if k in pricing
+        )
+        out.append(
+            {
+                "id": str(model_id),
+                "free": bool(priced_free) or str(model_id).endswith(":free"),
+            }
+        )
+    out.sort(key=lambda m: (not m["free"], m["id"]))
+    return out
+
+
+def _is_zero(value: Any) -> bool:
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 @app.delete("/api/providers/{name}")
 def remove_provider_route(name: str) -> dict[str, Any]:
     """Drop an entry. The key stays in the keychain, deliberately.
@@ -776,12 +1022,20 @@ def update_conversation(conversation_id: str, body: UpdateConversation) -> dict[
         existing = repo.get(conversation_id)
         if existing is None:
             raise HTTPException(404, "no such conversation")
+        provider = body.provider or existing["provider"]
         # Validated together: switching provider without naming a model has to
-        # land on that provider's default, not carry the old provider's model
-        # name across to an endpoint that has never heard of it.
-        model = _validate_model(
-            body.provider or existing["provider"], body.model or existing["model"]
+        # land on THAT provider's own default, not carry the old provider's
+        # model name across to an endpoint that has never heard of it. This
+        # used to fall back to `existing["model"]` whenever the picker sent no
+        # model (which it does for any provider with no declared default) --
+        # a real model name is not a PLACEHOLDER_MODELS entry, so it passed
+        # `_validate_model` unchanged and every later turn failed against a
+        # model the new provider has never heard of.
+        switching_provider = body.provider is not None and body.provider != existing["provider"]
+        model_in = "" if switching_provider and body.model is None else (
+            body.model if body.model is not None else existing["model"]
         )
+        model = _validate_model(provider, model_in)
 
     if body.fallback is not None:
         # Rejected here rather than at turn time: a chain naming a provider that
@@ -937,7 +1191,17 @@ async def run_turn(conversation_id: str, body: TurnRequest) -> StreamingResponse
         # Whether the reader has been told how the turn ended.
         settled = False
         try:
-            async for event in director.run(conversation_id, body.message, cancel):
+            async for event in _with_heartbeats(
+                director.run(conversation_id, body.message, cancel)
+            ):
+                if event is _HEARTBEAT:
+                    # A keepalive, not progress. It carries the elapsed seconds
+                    # so an interface *could* show "still working", but its only
+                    # job is to keep the stream from going silent through a long
+                    # tool call -- which is what a proxy drops and the client's
+                    # watchdog gives up on.
+                    yield _frame("ping")
+                    continue
                 # default=str so one unexpected value in a tool argument degrades
                 # to a string instead of killing the response mid-stream.
                 payload = json.dumps({"type": event.type, **event.data}, default=str)
@@ -1072,6 +1336,7 @@ class CreateAutomation(BaseModel):
     provider: str | None = None
     model: str | None = None
     enabled: bool = True
+    capability_profile: str | None = None
 
 
 class UpdateAutomation(BaseModel):
@@ -1081,6 +1346,16 @@ class UpdateAutomation(BaseModel):
     enabled: bool | None = None
     provider: str | None = None
     model: str | None = None
+    capability_profile: str | None = None
+
+
+def _check_capability_profile(name: str | None) -> None:
+    if name is None:
+        return
+    from backend.capabilities import CapabilityService
+
+    if name not in {p["name"] for p in CapabilityService().profiles()}:
+        raise HTTPException(400, f"no capability profile called '{name}'")
 
 
 @app.get("/api/automations")
@@ -1096,6 +1371,7 @@ def list_automations() -> dict[str, Any]:
 def create_automation(body: CreateAutomation) -> dict[str, Any]:
     if body.provider is not None and not is_known_provider(body.provider):
         raise HTTPException(400, f"provider '{body.provider}' is not configured")
+    _check_capability_profile(body.capability_profile)
     try:
         automation = AutomationRepository().create(
             body.name,
@@ -1104,6 +1380,7 @@ def create_automation(body: CreateAutomation) -> dict[str, Any]:
             provider=body.provider,
             model=body.model,
             enabled=body.enabled,
+            capability_profile=body.capability_profile,
         )
     except AutomationError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1114,6 +1391,7 @@ def create_automation(body: CreateAutomation) -> dict[str, Any]:
 def update_automation(automation_id: int, body: UpdateAutomation) -> dict[str, Any]:
     if body.provider is not None and not is_known_provider(body.provider):
         raise HTTPException(400, f"provider '{body.provider}' is not configured")
+    _check_capability_profile(body.capability_profile)
     repo = AutomationRepository()
     if repo.get(automation_id) is None:
         raise HTTPException(404, "no such automation")
@@ -1127,6 +1405,7 @@ def update_automation(automation_id: int, body: UpdateAutomation) -> dict[str, A
             enabled=body.enabled,
             provider=body.provider,
             model=body.model,
+            capability_profile=body.capability_profile,
         )
     except AutomationError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -1665,7 +1944,9 @@ async def mcp_connect(name: str) -> dict[str, Any]:
     async with _registry_lock:
         manager.errors.pop(name, None)  # an explicit request retries a failed server
         try:
-            count = await manager.connect_server(config)
+            # Someone pressed the button. `force` because they are asking for a
+            # fresh session, not for the tool count they can already see.
+            count = await manager.connect_server(config, force=True)
         except Exception as exc:
             _mcp["errors"][name] = str(exc)
             return {"name": name, "tools": 0, "error": str(exc)}
@@ -1726,11 +2007,104 @@ def list_capabilities(conversation_id: str | None = None) -> dict[str, list[dict
             row = _capability_json(capability)
             if capability.kind is Kind.CONNECTOR:
                 row["live"] = live.get(
-                    capability.name, {"connected": False, "tools": 0, "error": None}
+                    capability.name,
+                    {"connected": False, "tools": 0, "error": None, "ready": False},
                 )
             rows.append(row)
         out[group] = rows
     return out
+
+
+# --------------------------------------------------------------- profiles
+#
+# A named, reusable set of connectors -- switching a conversation between
+# "everything" and "just search" used to mean toggling each connector by
+# hand, every time, which is a chore nobody repeats. See the schema comment
+# on capability_profiles for why this exists.
+#
+# Registered before the generic `{kind}/{name}` routes below: both shapes are
+# two path segments, and Starlette matches routes in registration order, not
+# by which segment is a literal -- after `{kind}/{name}`, `.../profiles/x`
+# was being parsed as kind="profiles", a 400 rather than the route below.
+
+
+@app.get("/api/capabilities/profiles")
+def list_capability_profiles() -> list[dict[str, Any]]:
+    from backend.capabilities import CapabilityService
+
+    return CapabilityService().profiles()
+
+
+class SaveProfile(BaseModel):
+    name: str
+    conversation_id: str | None = None
+
+
+@app.post("/api/capabilities/profiles")
+def save_capability_profile(body: SaveProfile) -> dict[str, Any]:
+    """Snapshot a conversation's current connector on/off state under a name."""
+    from backend.capabilities import CapabilityService
+
+    try:
+        CapabilityService().save_profile(body.name, conversation_id=body.conversation_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"status": "saved", "name": body.name}
+
+
+class ApplyProfile(BaseModel):
+    conversation_id: str
+
+
+@app.post("/api/capabilities/profiles/{name}/apply")
+async def apply_capability_profile(name: str, body: ApplyProfile) -> dict[str, Any]:
+    """Make a conversation's connectors match a profile, live -- not just in the DB.
+
+    Mirrors `toggle_capability`: a profile that says a connector is on means
+    that connector is actually running when this returns, and one it leaves
+    off is actually disconnected, not merely marked off for the next turn.
+    """
+    from backend.capabilities import CapabilityService, Kind
+
+    service = CapabilityService()
+    # Both sides of this diff read the raw capability-state toggle -- not
+    # `Capability.enabled`, which is `config.enabled AND is_enabled(...)`.
+    # Comparing an AND'd `before` against a raw `after` (the original shape
+    # here) misclassified a connector as "changed" whenever its `mcp.yaml`
+    # `enabled: false` disagreed with a stale capability-state row, and
+    # `_apply_connector` below does not itself check `config.enabled` --
+    # so applying a profile could reconnect a connector the user had
+    # administratively switched off in mcp.yaml.
+    before = {
+        c.name: service.is_enabled(Kind.CONNECTOR, c.name, body.conversation_id)
+        for c in service.connectors(body.conversation_id)
+    }
+    try:
+        on = service.apply_profile(name, body.conversation_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    changed = [
+        c.name
+        for c in service.connectors(body.conversation_id)
+        if before.get(c.name) != service.is_enabled(Kind.CONNECTOR, c.name, body.conversation_id)
+    ]
+    for connector_name in changed:
+        await _apply_connector(
+            connector_name,
+            service.is_enabled(Kind.CONNECTOR, connector_name, body.conversation_id),
+        )
+    return {"status": "applied", "name": name, "on": on, "changed": changed}
+
+
+@app.delete("/api/capabilities/profiles/{name}")
+def delete_capability_profile(name: str) -> dict[str, Any]:
+    from backend.capabilities import CapabilityService
+
+    found = CapabilityService().delete_profile(name)
+    if not found:
+        raise HTTPException(404, f"no profile called '{name}'")
+    return {"status": "deleted"}
 
 
 class CapabilityToggle(BaseModel):
@@ -1792,7 +2166,9 @@ async def _apply_connector(name: str, enabled: bool) -> dict[str, Any]:
 
         manager.errors.pop(name, None)  # an explicit switch-on retries a failure
         try:
-            tools = await manager.connect_server(config)
+            # A switch the user just flipped means "start it now", so the
+            # already-connected shortcut is not what they asked for.
+            tools = await manager.connect_server(config, force=True)
         except Exception as exc:
             _mcp["errors"][name] = str(exc)
             return {"connected": False, "tools": 0, "error": str(exc)}
@@ -2414,6 +2790,42 @@ def list_memories(conversation_id: str | None = None, limit: int = 200) -> dict[
             for m in store.live(limit)
         ],
     }
+
+
+class Settings(BaseModel):
+    #: The agent loop's iteration ceiling. Optional so a PATCH can carry only
+    #: the fields it changes.
+    max_iterations: int | None = None
+
+
+@app.get("/api/settings")
+def get_settings() -> dict[str, Any]:
+    """User-adjustable knobs that are not per-provider or per-conversation."""
+    from backend.config import (
+        DEFAULT_MAX_ITERATIONS,
+        MAX_MAX_ITERATIONS,
+        MIN_MAX_ITERATIONS,
+        load_max_iterations,
+    )
+
+    return {
+        "max_iterations": load_max_iterations(),
+        # The bounds the interface should offer, so it does not have to hardcode
+        # numbers that could drift from the ones the server clamps to.
+        "max_iterations_default": DEFAULT_MAX_ITERATIONS,
+        "max_iterations_min": MIN_MAX_ITERATIONS,
+        "max_iterations_max": MAX_MAX_ITERATIONS,
+    }
+
+
+@app.patch("/api/settings")
+def update_settings(body: Settings) -> dict[str, Any]:
+    """Change a knob. Only the fields present are touched; the value is clamped."""
+    from backend.config import save_max_iterations
+
+    if body.max_iterations is not None:
+        save_max_iterations(body.max_iterations)
+    return get_settings()
 
 
 @app.post("/api/memory/toggle")

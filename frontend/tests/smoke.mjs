@@ -349,11 +349,24 @@ try {
     `${await page.locator('.msg-assistant').count()} bubbles`,
   )
 
-  if (await page.locator('.md-copy').count()) {
-    await page.locator('.md-copy').first().click()
+  // The copy control is the second button in a block's header; the first is
+  // the wrap toggle. Addressed by label rather than by position, so adding a
+  // third control does not silently start testing the wrong one.
+  const copyBlock = page.locator('.md-pre-wrap button[aria-label="Copy this block"]')
+  if (await copyBlock.count()) {
+    await copyBlock.first().click()
     await page.waitForTimeout(150)
     const clip = await page.evaluate(() => navigator.clipboard.readText())
     check('a code block copies', clip.length > 0, JSON.stringify(clip.slice(0, 28)))
+  }
+
+  // Highlighting is fetched per language after the block closes, so it is a
+  // real asynchronous step rather than a styling detail.
+  const fenced = await page.locator('.msg-assistant .md-pre code').count()
+  if (fenced) {
+    await page.waitForTimeout(1200)
+    const tokens = await page.locator('.msg-assistant .md-pre .token').count()
+    check('fenced code is highlighted', tokens > 0, `${tokens} tokens`)
   }
   await shot('chat')
 

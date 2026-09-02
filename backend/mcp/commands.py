@@ -880,7 +880,11 @@ async def _server_side_login(
         connection = manager.connections.get(config.name)
         if connection is None:
             await manager.shutdown()
-            return f"'{config.name}' did not start, so its sign-in could not begin"
+            return _finish(
+                config.name,
+                "failed",
+                f"'{config.name}' did not start, so its sign-in could not begin",
+            )
 
         raw = await connection.call(
             entry.auth_tool or "", _auth_arguments(connection, entry, config, account_hint)
@@ -892,9 +896,11 @@ async def _server_side_login(
         url = _authorization_url_in(result.content)
         if url is None:
             await manager.shutdown()
-            return (
+            return _finish(
+                config.name,
+                "failed",
                 f"'{config.name}' did not return a sign-in link. It said: "
-                f"{result.content.strip()[:400]}"
+                f"{result.content.strip()[:400]}",
             )
         url = always_ask_which_account(url)
 
@@ -919,8 +925,14 @@ async def _server_side_login(
         return f"opened {entry.title}'s sign-in page.\n\n{result.content.strip()[:600]}"
     except Exception as exc:
         await manager.shutdown()
-        PENDING.pop(config.name, None)
-        return f"could not start sign-in for '{config.name}': {exc}"
+        # Was `PENDING.pop(config.name, None)` -- deleting the placeholder
+        # rather than resolving it. That did not just leave the connector
+        # stuck reporting "authenticating"; it erased the only place this
+        # message was going, since the caller (`mcp_login` in
+        # `backend/api/main.py`) never captures `login()`'s return value.
+        # Any exception here -- a dropped connection, `connection.call`
+        # raising -- vanished with no trace at all.
+        return _finish(config.name, "failed", f"could not start sign-in for '{config.name}': {exc}")
 
 
 async def _watch_server_side_login(config: ServerConfig, entry: cat.CatalogueEntry) -> None:
@@ -988,7 +1000,7 @@ async def _command_login(config: ServerConfig, entry: cat.CatalogueEntry) -> str
     """
     command = entry.auth_command or config.command
     if not command:
-        return f"'{config.name}' has no command to sign in with"
+        return _finish(config.name, "failed", f"'{config.name}' has no command to sign in with")
 
     process = await asyncio.create_subprocess_exec(
         command,
@@ -1052,11 +1064,23 @@ async def login(
     servers = load_servers()
     config = servers.get(name)
     if config is None:
-        return f"no server named '{name}' in mcp.yaml"
+        # Reachable by a race: `mcp_login` plants a "waiting" placeholder
+        # before scheduling this as a task, and a concurrent
+        # `DELETE /api/mcp/servers/{name}` can remove the server before the
+        # task actually runs. Rare, but the placeholder must not be left
+        # stuck at "authenticating" for a server that no longer exists.
+        return _finish(name, "failed", f"no server named '{name}' in mcp.yaml")
 
     kind = auth_kind(config)
     if kind == "none":
-        return f"'{name}' needs no account — it has nothing to sign in to"
+        # `/api/mcp/servers/{name}/login` plants a "waiting" placeholder in
+        # PENDING before calling here (main.py's `mcp_login`), on the
+        # assumption that every call ends in `_finish`. This branch used to
+        # return early instead, so a connector with nothing to sign in to
+        # stuck at "authenticating" for the full TTL if `login` was ever
+        # called on it -- rare for "none", but the same shape of bug as the
+        # "setup" branch below, which is not rare.
+        return _finish(name, "done", f"'{name}' needs no account — it has nothing to sign in to")
 
     if force:
         sign_out(name)
@@ -1066,9 +1090,18 @@ async def login(
         if entry is not None and entry.auth_command_args:
             return await _command_login(config, entry)
         if entry is None or not entry.auth_tool:
-            return (
+            # This connector's own tools carry its auth (an API key already in
+            # the keychain, here) -- there is no browser flow for PSOK to
+            # drive. Resolving the placeholder immediately is what keeps the
+            # lifecycle from reporting "authenticating" for a connector that
+            # is, underneath, already fully connected: `/login`'s caller
+            # always plants a "waiting" entry first and relies on every path
+            # through here to settle it.
+            return _finish(
+                name,
+                "done",
                 f"'{name}' signs in on its own when a tool first needs it. Give it the"
-                " credentials it documents, then run any of its tools."
+                " credentials it documents, then run any of its tools.",
             )
         return await _server_side_login(config, entry, account_hint)
 
@@ -1207,6 +1240,8 @@ def missing_credentials(config: ServerConfig) -> list[str]:
         path = Path(entry.credentials_file).expanduser()
         key = entry.credentials_file_keys.get("client_id", "clientId")
         return [] if _json_key_present(path, key) else ["a client id and secret"]
+    if entry.api_key_ref:
+        return [] if get_secret(config.api_key_ref or entry.api_key_ref) else ["an API key"]
     wanted = [v for v in (entry.client_id_env, entry.client_secret_env) if v]
     return [key for key in wanted if key not in config.env]
 

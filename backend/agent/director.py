@@ -33,12 +33,17 @@ from backend.agent.planning import (
     parse_plan,
 )
 from backend.agent.prompt import (
+    BASE_PROMPT,
     budget_history,
     build_system_prompt,
     cap_tools,
     dropped_summary,
+    environment_block,
+    estimate_tokens,
     extract_skill_invocations,
+    fit_tools_to_budget,
     to_wire_messages,
+    tool_schema_tokens,
 )
 from backend.db.repositories import ConversationRepository, MessageRepository
 from backend.runtime import availability
@@ -51,10 +56,14 @@ from backend.tools.registry import ToolRegistry
 
 log = logging.getLogger(__name__)
 
+#: Applied to the estimated token count when checking a provider's
+#: tokens-per-minute ceiling -- see the comment at its one use site.
+TPM_SAFETY_MARGIN = 1.5
+
 
 @dataclass
 class Guards:
-    max_iterations: int = 12
+    max_iterations: int = 16
     max_tool_calls: int = 40
     max_seconds: float = 600.0
     max_repeated_calls: int = 3
@@ -77,6 +86,13 @@ CONTINUE_AFTER_EMPTY = (
 CONTINUE_AFTER_TRUNCATION = (
     "Your previous message was cut off before it finished. Continue from"
     " exactly where it stopped. Do not repeat what you already wrote."
+)
+
+FINAL_STEP_INSTRUCTION = (
+    "This is the last step available for this turn. You cannot call any more"
+    " tools. Answer the user now with what you already have: give the result if"
+    " you have it, and if the work is unfinished, say plainly what you did, what"
+    " you found, and what is left. Do not apologise for the limit."
 )
 
 
@@ -200,6 +216,44 @@ def _conversation_fallback(conversation: Any) -> list[str] | None:
     return [str(name) for name in parsed] if isinstance(parsed, list) else None
 
 
+def _fingerprint(call: ToolCall) -> str:
+    """A stable key for "this exact call again", from arguments of any shape.
+
+    `json.dumps(..., default=str)` is not enough: a self-referential argument
+    still raises `ValueError`, and a raise here happens *before* the tool runs,
+    so a malformed tool call from the model used to end the entire turn rather
+    than the one call. `repr` is a worse key -- unordered, so two equal dicts can
+    differ -- and a worse key only weakens a loop guard, which is the right
+    thing to lose.
+    """
+    try:
+        rendered = json.dumps(call.arguments, sort_keys=True, default=str)
+    except Exception:
+        rendered = repr(call.arguments)
+    return f"{call.name}:{rendered}"
+
+
+def _guard(
+    reason: str, said: list[str], iteration: int, tool_calls: int, started: float
+) -> Event:
+    """A guard frame that hands back the work, not only the reason it stopped.
+
+    `guard` is terminal -- the API closes the stream on it -- and it used to
+    carry a reason and nothing else, so a turn stopped at its iteration limit
+    after twelve useful steps reported "iteration limit reached" and threw away
+    everything the user had watched arrive. The reason is why it ended; the text
+    is what it is worth.
+    """
+    return Event(
+        "guard",
+        {
+            "reason": reason,
+            "text": "".join(said).strip(),
+            **_cost(iteration + 1, tool_calls, started),
+        },
+    )
+
+
 def _cost(iterations: int, tool_calls: int, started: float) -> dict[str, Any]:
     """What the turn cost, in the three numbers a person can read.
 
@@ -260,11 +314,27 @@ class Director:
         browser as a truncated body the interface cannot distinguish from a
         network drop.
         """
+        # What the user has already been shown. A failure this far out used to
+        # discard it, so a turn that streamed two paragraphs and then hit an
+        # unhandled error rendered as an error and nothing else -- and nothing
+        # was in the transcript either, so reloading did not bring it back.
+        shown: list[str] = []
         try:
             async for event in self._run(conversation_id, user_message, cancel):
+                if event.type in ("assistant_delta", "assistant_text"):
+                    shown.append(event.data.get("text") or "")
                 yield event
         except Exception as exc:
-            yield Event("error", {"message": f"{type(exc).__name__}: {exc}"})
+            log.exception("the turn failed outside the loop's own handling")
+            partial = "".join(shown).strip()
+            message = f"{type(exc).__name__}: {exc}"
+            if partial:
+                self._persist(conversation_id, "assistant", f"{partial}\n\n[error] {message}")
+            yield Event("status", {"state": "failed"})
+            # `error` is the terminal frame and stays the only one -- the API
+            # closes the stream on it. It carries the partial answer so the
+            # reader has the work as well as the reason.
+            yield Event("error", {"message": message, "text": partial})
         except BaseException as exc:
             # `except Exception` does not catch CancelledError, which is what a
             # server shutdown, a reload, or Starlette dropping the task raises
@@ -273,7 +343,13 @@ class Director:
             # is indistinguishable from a truncated download, so the interface
             # sat on "Thinking" forever. Say what happened, then let it
             # propagate: swallowing cancellation would keep the loop alive.
-            yield Event("error", {"message": f"the turn was interrupted: {type(exc).__name__}"})
+            yield Event(
+                "error",
+                {
+                    "message": f"the turn was interrupted: {type(exc).__name__}",
+                    "text": "".join(shown).strip(),
+                },
+            )
             raise
 
     async def _run(
@@ -315,7 +391,7 @@ class Director:
         # the slash menu in the interface. The marker is stripped so the model
         # sees the request, not the routing syntax.
         pinned, user_message = extract_skill_invocations(user_message)
-        self.messages.append(conversation_id, "user", user_message)
+        self._persist(conversation_id, "user", user_message)
 
         # Fetched once for the turn, not once per iteration: it answers the
         # question the user actually asked, and search_documents is there for
@@ -345,6 +421,10 @@ class Director:
             yield Event("status", {"state": "recalling"})
         recalled = await self._recall(conversation_id, user_message)
         hidden_servers = self._disabled_connectors(conversation_id)
+        # Which connectors can actually be reached this turn. Resolved once:
+        # it is the same answer on every round trip, and it is read twice per
+        # iteration -- for the schema order and for the tool cap.
+        ready_servers = self._ready_connectors()
 
         context = ToolContext(
             conversation_id=conversation_id,
@@ -362,6 +442,13 @@ class Director:
         # withheld every round trip, and fifteen identical warnings is noise
         # covering the one line that mattered.
         warned_about_tools = False
+        # Whether this turn has already said that some of its context could not
+        # be assembled. Said once, for the same reason as `warned_about_tools`.
+        degraded = False
+        # Everything the user has been shown this turn. A guard or a failure
+        # used to end the turn on a bare reason, discarding an answer that was
+        # already on screen -- which reads as the turn having produced nothing.
+        said: list[str] = []
         # Carried into the next iteration's prompt only. It is an instruction
         # about how to continue, not part of what was said, so it never reaches
         # the transcript.
@@ -369,11 +456,18 @@ class Director:
 
         for iteration in range(self.guards.max_iterations):
             if cancel is not None and cancel.is_set():
-                yield Event("guard", {"reason": "stopped by the user"})
+                yield _guard("stopped by the user", said, iteration, tool_calls_made, started)
                 break
             if time.monotonic() - started > self.guards.max_seconds:
-                yield Event("guard", {"reason": "time limit reached"})
+                yield _guard("time limit reached", said, iteration, tool_calls_made, started)
                 break
+
+            # The last iteration is spent forcing an answer, not another tool
+            # call: withholding the schemas below turns "iteration limit
+            # reached" -- a dead end with nothing to show -- into a real
+            # wrap-up of whatever the turn has. The hard guard in the `else`
+            # branch stays as a backstop for the case a provider ignores it.
+            final_step = iteration == self.guards.max_iterations - 1
 
             response = None
             # Whether the answer already reached the interface as deltas -- not
@@ -387,13 +481,27 @@ class Director:
             while True:
                 links_after = len(chain) - 1 - active
                 allowance = budget.allowance(links_after)
-                system_prompt = build_system_prompt(
-                    workspace_root=self.workspace_root,
-                    conversation_id=conversation_id,
-                    pinned_skills=pinned,
-                    retrieved_context=retrieved_context,
-                    memories=recalled,
-                )
+                try:
+                    system_prompt = build_system_prompt(
+                        workspace_root=self.workspace_root,
+                        conversation_id=conversation_id,
+                        pinned_skills=pinned,
+                        retrieved_context=retrieved_context,
+                        memories=recalled,
+                    )
+                except Exception as exc:
+                    # An unreadable skill file, a capability table mid-migration,
+                    # a memory row that will not render. None of that is a reason
+                    # the user cannot have an answer: the model can work from the
+                    # base prompt alone, and it used to lose the whole turn here.
+                    log.warning("system prompt assembly failed, using the base prompt: %s", exc)
+                    system_prompt = f"{BASE_PROMPT}\n\n{environment_block(self.workspace_root)}"
+                    if not degraded:
+                        degraded = True
+                        yield Event(
+                            "warning",
+                            {"message": "some context could not be assembled for this turn"},
+                        )
                 # Built before the history is budgeted, not after: the schemas go
                 # out on every round trip and measured 29,620 tokens across 132
                 # tools, so budgeting without them overstates the room left by more
@@ -409,7 +517,9 @@ class Director:
                     system_prompt = f"{system_prompt}\n\n{REASONING_INSTRUCTION}"
                 tool_schemas = (
                     self.registry.schemas(
-                        hidden_servers=hidden_servers, read_only=planning
+                        hidden_servers=hidden_servers,
+                        read_only=planning,
+                        priority_servers=ready_servers,
                     )
                     if model.capabilities.tools
                     else None
@@ -436,29 +546,145 @@ class Director:
                 # adapter so the turn can say what it lost: a tool withheld
                 # silently is the same failure one layer further from the person
                 # who can fix it.
+                if final_step:
+                    # No tools on the last step. A model handed tools spends the
+                    # step calling one, and there is no iteration left to read
+                    # the result -- so it is offered none and asked to answer.
+                    tool_schemas = None
                 if tool_schemas is not None and model.capabilities.max_tools:
                     tool_schemas, dropped = cap_tools(
-                        tool_schemas, model.capabilities.max_tools
+                        tool_schemas,
+                        model.capabilities.max_tools,
+                        priority_servers=ready_servers,
                     )
                     if dropped and not warned_about_tools:
                         warned_about_tools = True
                         yield Event("warning", {"message": dropped_summary(dropped)})
-                history = to_wire_messages(self.messages.history(conversation_id))
-                # Re-budgeted against whichever model is about to be called.
-                # Carrying a 200,000-token history into a 32,000-token
-                # fallback trades one provider's outage for the next one's
-                # refusal.
-                history = budget_history(
-                    history,
-                    context_window=model.capabilities.context_window,
-                    system_prompt=system_prompt,
-                    tools=tool_schemas,
-                )
+                try:
+                    history = to_wire_messages(self.messages.history(conversation_id))
+                    # Re-budgeted against whichever model is about to be called.
+                    # Carrying a 200,000-token history into a 32,000-token
+                    # fallback trades one provider's outage for the next one's
+                    # refusal.
+                    history = budget_history(
+                        history,
+                        context_window=model.capabilities.context_window,
+                        system_prompt=system_prompt,
+                        tools=tool_schemas,
+                    )
+                except Exception as exc:
+                    # A row the budgeter cannot measure -- a tool_calls blob that
+                    # will not serialize, most likely. The last exchange is
+                    # enough to answer from, and is strictly better than the
+                    # error frame this used to become.
+                    log.warning("history assembly failed, sending the last exchange: %s", exc)
+                    history = [{"role": "user", "content": user_message}]
+                    if not degraded:
+                        degraded = True
+                        yield Event(
+                            "warning",
+                            {"message": "earlier messages could not be read for this turn"},
+                        )
                 wire = [{"role": "system", "content": system_prompt}, *history]
                 if nudge:
                     # Cleared once a call succeeds, not here: a fallback
                     # attempt has to carry the same instruction.
                     wire.append({"role": "system", "content": nudge})
+                if final_step:
+                    wire.append({"role": "system", "content": FINAL_STEP_INSTRUCTION})
+
+                # Some accounts cap tokens *per minute*, not just context window
+                # or tool count -- Groq's free tier is 8,000, and the system
+                # prompt plus tool schemas alone measured 21,000-29,000 on this
+                # machine. That request 413s regardless of what the user typed,
+                # every time, so sending it is a guaranteed-fail round trip that
+                # ends with raw provider JSON in the chat. Checked here, after
+                # `cap_tools` has already trimmed what it can, so this only
+                # fires when trimming genuinely was not enough.
+                #
+                # `estimate_tokens` is `len(text) // 4` -- tuned against prose,
+                # and a live 413 was observed carrying this margin's estimate
+                # under budget while Groq's own tokenizer reported 18,091 for
+                # the same request: dense, punctuation-heavy tool-schema JSON
+                # tokenizes worse than the 4-chars-per-token the heuristic
+                # assumes. `TPM_SAFETY_MARGIN` is a deliberately conservative
+                # correction for that gap, not a measured ratio -- there is no
+                # cheap way to get Groq's real tokenizer client-side, and the
+                # cost of guessing low is a request already known likely to
+                # fail going out anyway; the cost of guessing high is only an
+                # earlier, cleaner fallback.
+                # A tokens-per-minute cap is the free tier's real ceiling, and
+                # the tool schemas are what blow it -- so trim the tools to fit
+                # and still answer, rather than skipping the provider. This is
+                # the difference between "groq is unusable with connectors on"
+                # and "groq answers with as many tools as fit", which is what a
+                # small client on the same free tier does implicitly. The skip
+                # below now only fires when the system prompt *alone* is over
+                # budget, which trimming cannot help.
+                if model.capabilities.tokens_per_minute and tool_schemas is not None:
+                    tool_schemas, tpm_dropped = fit_tools_to_budget(
+                        tool_schemas,
+                        system_prompt=system_prompt,
+                        token_budget=model.capabilities.tokens_per_minute,
+                        margin=TPM_SAFETY_MARGIN,
+                        priority_servers=ready_servers,
+                    )
+                    if tpm_dropped and not warned_about_tools:
+                        warned_about_tools = True
+                        yield Event("warning", {"message": dropped_summary(tpm_dropped)})
+                if model.capabilities.tokens_per_minute:
+                    baseline = round(
+                        (estimate_tokens(system_prompt) + tool_schema_tokens(tool_schemas))
+                        * TPM_SAFETY_MARGIN
+                    )
+                    if baseline > model.capabilities.tokens_per_minute:
+                        kind = FailureKind.NON_RETRYABLE_RATE_LIMIT
+                        budget.spend(1)
+                        availability.record_failure(
+                            chain[active].provider,
+                            kind,
+                            f"a single request here needs about {baseline:,} tokens,"
+                            f" over its {model.capabilities.tokens_per_minute:,}"
+                            " tokens-per-minute limit",
+                        )
+                        reason = "cannot take a request this size"
+                        can_hand_over = links_after > 0 and budget.remaining > 0
+                        if can_hand_over:
+                            failed = chain[active]
+                            active += 1
+                            model = resolve(
+                                chain[active].provider,
+                                chain[active].model,
+                                max_retries=budget.allowance(len(chain) - 1 - active) - 1,
+                            )
+                            log.warning(
+                                "%s %s (%s); falling back to %s",
+                                failed, reason, kind, chain[active],
+                            )
+                            yield Event(
+                                "status",
+                                {"state": "switching", "provider": chain[active].provider},
+                            )
+                            yield Event(
+                                "warning",
+                                {"message": announcement(failed, reason, chain[active])},
+                            )
+                            continue
+                        message = (
+                            f"{chain[active].provider} {reason} ({baseline:,} tokens needed,"
+                            f" {model.capabilities.tokens_per_minute:,} per minute allowed) and"
+                            " no other provider is configured to try instead."
+                        )
+                        partial = "".join(streamed_text).strip()
+                        noted = f"[model error] {message}"
+                        self._persist(
+                            conversation_id,
+                            "assistant",
+                            f"{partial}\n\n{noted}" if partial else noted,
+                        )
+                        yield Event("status", {"state": "failed"})
+                        yield Event("error", {"message": message})
+                        return
 
                 response = None
                 streamed = False
@@ -483,6 +709,7 @@ class Director:
                                     # underneath text that was already arriving.
                                     yield Event("status", {"state": "generating"})
                                 streamed_text.append(chunk.text)
+                                said.append(chunk.text)
                                 yield Event("assistant_delta", {"text": chunk.text})
                             elif chunk.type == "reasoning" and chunk.text:
                                 yield Event("reasoning_delta", {"text": chunk.text})
@@ -509,13 +736,15 @@ class Director:
                     # keeping; the rest of the turn is not.
                     partial = "".join(streamed_text).strip()
                     if partial:
-                        self.messages.append(conversation_id, "assistant", partial)
+                        self._persist(conversation_id, "assistant", partial)
                     yield Event("status", {"state": "cancelled"})
-                    yield Event("guard", {"reason": "stopped by the user"})
+                    yield _guard(
+                        "stopped by the user", said, iteration, tool_calls_made, started
+                    )
                     self.conversations.touch(conversation_id)
                     return
                 except Exception as exc:
-                    message = f"{type(exc).__name__}: {exc}"
+                    raw_message = f"{type(exc).__name__}: {exc}"
                     # A failure that was never classified is a bad request as
                     # far as anything downstream is concerned: it stops rather
                     # than spending another provider on a guess.
@@ -542,7 +771,8 @@ class Director:
                             max_retries=budget.allowance(len(chain) - 1 - active) - 1,
                         )
                         log.warning(
-                            "%s failed (%s); falling back to %s", failed, kind, chain[active]
+                            "%s failed (%s): %s; falling back to %s",
+                            failed, kind, raw_message, chain[active],
                         )
                         yield Event(
                             "status",
@@ -554,13 +784,23 @@ class Director:
                         )
                         continue
 
+                    # Every fallback exhausted, or this failure was never
+                    # fallback-worthy. The provider's own error body -- a
+                    # paragraph of JSON on Groq, for one -- goes to the log,
+                    # already the audit trail; it does not belong in the
+                    # transcript as if it were the model's own answer. A user
+                    # who got a raw 413 body reading "please reduce your
+                    # message size" in place of a reply is what "the model
+                    # isn't responding" looks like from outside.
+                    log.warning("%s failed (%s): %s", chain[active].provider, kind, raw_message)
+                    message = f"{chain[active].provider} {reason_for(kind)}."
                     # Keep whatever already reached the user. Persisting only the
                     # error meant a partial answer they could read on screen
                     # vanished the moment they reloaded -- which reads as the turn
                     # having produced nothing at all.
                     partial = "".join(streamed_text).strip()
                     noted = f"[model error] {message}"
-                    self.messages.append(
+                    self._persist(
                         conversation_id,
                         "assistant",
                         f"{partial}\n\n{noted}" if partial else noted,
@@ -583,6 +823,7 @@ class Director:
             if response.text and not streamed:
                 # Already delivered chunk by chunk when the provider streamed;
                 # re-emitting it whole would render the same answer twice.
+                said.append(response.text)
                 yield Event("status", {"state": "generating"})
                 yield Event("assistant_text", {"text": response.text})
 
@@ -599,7 +840,7 @@ class Director:
                 if unfinished and continuations < self.guards.max_continuations:
                     continuations += 1
                     if answer.strip():
-                        self.messages.append(conversation_id, "assistant", answer)
+                        self._persist(conversation_id, "assistant", answer)
                         nudge = CONTINUE_AFTER_TRUNCATION
                         yield Event("status", {"state": "retrying"})
                         yield Event(
@@ -616,14 +857,24 @@ class Director:
                     continue
 
                 if not answer.strip():
-                    # Out of continuations and still nothing. Say so rather than
-                    # closing the turn on an empty bubble.
+                    # Out of continuations and still nothing from the model. The
+                    # turn is not empty, though -- it has whatever it streamed
+                    # before it stopped, and whatever its tools came back with --
+                    # and handing that over beats closing on an empty bubble and
+                    # making the user ask again for work already done.
                     yield Event(
                         "warning",
                         {"message": "the model ended the turn without an answer"},
                     )
+                    # Kept apart from `answer` on purpose: this is PSOK's
+                    # account of the turn, not the model's, and feeding it back
+                    # into memory extraction would file a sentence PSOK wrote as
+                    # something the model said.
+                    delivered = self._summarise(conversation_id, said)
+                else:
+                    delivered = answer
 
-                self.messages.append(conversation_id, "assistant", answer)
+                self._persist(conversation_id, "assistant", delivered)
                 self.conversations.touch(conversation_id)
                 if step_open is not None:
                     yield Event("step_done", {"number": step_open})
@@ -632,7 +883,7 @@ class Director:
                 yield Event(
                     "done",
                     {
-                        "text": answer,
+                        "text": delivered,
                         "iterations": iteration + 1,
                         **_cost(iteration + 1, tool_calls_made, started),
                     },
@@ -662,7 +913,7 @@ class Director:
                     # what the user reads if they reload, and it is what stops
                     # the tool being offered again on the retry -- "answer
                     # anyway" works because the transcript remembers being asked.
-                    self.messages.append(
+                    self._persist(
                         conversation_id, "assistant", escalation.as_markdown()
                     )
                     self.conversations.touch(conversation_id)
@@ -688,7 +939,7 @@ class Director:
                     # the interface renders, but the transcript is what the
                     # *model* reads on the executing turn -- "approved" means
                     # nothing if the thing approved is not in the history.
-                    self.messages.append(conversation_id, "assistant", plan.as_markdown())
+                    self._persist(conversation_id, "assistant", plan.as_markdown())
                     self.conversations.touch(conversation_id)
                     yield Event("plan", plan.as_dict())
                     yield Event("status", {"state": "completed"})
@@ -702,7 +953,7 @@ class Director:
                     )
                     return
 
-            self.messages.append(
+            self._persist(
                 conversation_id,
                 "assistant",
                 response.text,
@@ -729,7 +980,7 @@ class Director:
                         "step_started",
                         {"number": number, "title": call.arguments.get("title") or ""},
                     )
-                    self.messages.append(
+                    self._persist(
                         conversation_id,
                         "tool",
                         f"step {number} noted",
@@ -739,11 +990,14 @@ class Director:
                     continue
 
                 if tool_calls_made >= self.guards.max_tool_calls:
-                    yield Event("guard", {"reason": "tool call limit reached"})
+                    yield _guard(
+                        "tool call limit reached", said, iteration, tool_calls_made, started
+                    )
+                    self.conversations.touch(conversation_id)
                     return
                 tool_calls_made += 1
 
-                fingerprint = f"{call.name}:{json.dumps(call.arguments, sort_keys=True)}"
+                fingerprint = _fingerprint(call)
                 call_fingerprints[fingerprint] = call_fingerprints.get(fingerprint, 0) + 1
                 if call_fingerprints[fingerprint] > self.guards.max_repeated_calls:
                     result = ToolResult.error(
@@ -789,7 +1043,7 @@ class Director:
                     else:
                         result = dispatch.result()
 
-                self.messages.append(
+                self._persist(
                     conversation_id,
                     "tool",
                     result.content,
@@ -804,13 +1058,52 @@ class Director:
 
                 if cancel is not None and cancel.is_set():
                     yield Event("status", {"state": "cancelled"})
-                    yield Event("guard", {"reason": "stopped by the user"})
+                    yield _guard(
+                        "stopped by the user", said, iteration, tool_calls_made, started
+                    )
                     self.conversations.touch(conversation_id)
                     return
         else:
-            yield Event("guard", {"reason": "iteration limit reached"})
+            yield _guard(
+                "iteration limit reached",
+                said,
+                self.guards.max_iterations - 1,
+                tool_calls_made,
+                started,
+            )
 
         self.conversations.touch(conversation_id)
+
+    #: How many tool results a fallback summary names before it stops listing.
+    SUMMARY_TOOL_LIMIT = 8
+
+    def _summarise(self, conversation_id: str, said: list[str]) -> str:
+        """What this turn has, when the model would not say it itself.
+
+        Not a model call -- a second one is exactly what is unavailable at this
+        point -- but a plain reading of the trajectory. Anything already shown
+        to the user first, then the tools that ran, so the user can see the work
+        happened and decide what to ask next.
+        """
+        spoken = "".join(said).strip()
+        if spoken:
+            return spoken
+        try:
+            history = self.messages.history(conversation_id)
+        except Exception:
+            history = []
+        ran = [m.tool_name for m in history if m.role == "tool" and m.tool_name]
+        if not ran:
+            return (
+                "I could not produce an answer this turn — the model returned nothing."
+                " Please ask again."
+            )
+        listed = ", ".join(dict.fromkeys(ran[-self.SUMMARY_TOOL_LIMIT :]))
+        return (
+            "The model stopped before writing an answer, so here is what this turn"
+            f" actually did: it ran {listed}. Their results are above. Ask again and"
+            " I will work from them."
+        )
 
     def _disabled_connectors(self, conversation_id: str) -> set[str]:
         """Connectors whose tools this turn must not be offered.
@@ -852,6 +1145,21 @@ class Director:
         if unsigned:
             log.info("withholding tools of connectors with no account: %s", sorted(unsigned))
         return hidden | unsigned
+
+    @staticmethod
+    def _ready_connectors() -> set[str]:
+        """Connectors that are connected and signed in, for the schema order.
+
+        Best-effort by construction, and the failure is cheap: an empty set is
+        the order this loop has always used.
+        """
+        try:
+            from backend.mcp import live
+
+            return set(live.ready_connectors())
+        except Exception as exc:
+            log.debug("could not read connector readiness for this turn: %s", exc)
+            return set()
 
     async def _recall(self, conversation_id: str, user_message: str) -> list[str]:
         """Standing facts about the user, for the top of the prompt.
@@ -951,8 +1259,48 @@ class Director:
             log.debug("retrieval unavailable for this turn: %s", exc)
             return None
 
+    def _persist(self, *args: Any, **kwargs: Any) -> None:
+        """Write to the transcript, and never fail a turn over it.
+
+        A locked database, a disk that filled, a row that will not encode: none
+        of that is a reason the user cannot have the answer that is already on
+        their screen. The write is how the turn is remembered, not how it is
+        delivered, so a failure here costs the history and nothing else --
+        whereas raising cost the whole turn, from inside a `for` loop with no
+        handler over it.
+        """
+        try:
+            self.messages.append(*args, **kwargs)
+        except Exception as exc:
+            log.warning("could not persist a message for this turn: %s", exc)
+
     async def _execute(self, call: ToolCall, context: ToolContext) -> ToolResult:
-        return await self.registry.dispatch(call.name, call.arguments, context)
+        """Dispatch, converting anything it raises into a result (ADR-0016).
+
+        `ToolRegistry.dispatch` already catches what the *handler* raises, which
+        left everything before the handler uncovered: the permission gate, the
+        connector-enabled lookup, the audit write. A raise from any of those
+        went up through the dispatch task, out of `_run`, and ended the whole
+        turn on an error frame -- the model never heard that one tool failed,
+        and the user lost the work of every step before it.
+
+        `CancelledError` is re-raised deliberately. Stop depends on it: the loop
+        checks `dispatch.cancelled()` to record the call as interrupted, and
+        swallowing it here would turn "the user pressed Stop" into "the tool
+        returned an error" and let the turn keep going.
+        """
+        try:
+            return await self.registry.dispatch(call.name, call.arguments, context)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            log.exception("dispatching %s failed outside the tool handler", call.name)
+            return ToolResult.error(
+                f"'{call.name}' could not be run: {type(exc).__name__}: {exc}."
+                " This is a fault in PSOK, not in the request. Carry on without this"
+                " tool and tell the user which part of the task it cost.",
+                recoverable=True,
+            )
 
     @staticmethod
     def _cancel_on_request(

@@ -67,6 +67,28 @@ re-emitted on every write and hand-written per-entry comments are lost on the
 first programmatic edit — the honest trade for being able to edit the file at
 all. Other top-level keys, `memory:` in particular, are left alone.
 
+## Cloudflare Workers AI, and a content shim it needed
+
+Cloudflare rides the OpenAI-compatible adapter like every other non-native
+provider — its `/ai/v1/chat/completions` endpoint speaks standard
+chat-completions, so the whole integration is one catalogue preset. The one
+quirk: the account id lives in the base URL
+(`.../accounts/<id>/ai/v1`), so the preset ships an `ACCOUNT_ID` placeholder
+that must be filled in, and a wrong one 404s visibly rather than failing as a
+mystery. Verified live 2026-08-28: `complete`, streaming and tool calls all work
+through the runtime on `@cf/meta/llama-3.3-70b-instruct-fp8-fast` (the preset
+default — fast, tool-capable, no reasoning overhead; `@cf/openai/gpt-oss-120b`
+also works but spends a few hundred tokens thinking before it answers, which
+starves a small `max_tokens`).
+
+It also surfaced a real robustness bug in the shared adapter. Cloudflare
+serialises a purely **numeric** content token — the "3" in a reply that counts —
+as a JSON number, so `delta.content` arrived as an int and `"".join(text_parts)`
+raised `expected str instance, int found`, killing the whole stream over one
+token. The spec says content is a string; `_as_text` is the shim for the
+providers that treat that as advisory, applied on both the streaming and
+non-streaming paths. Locked down by two mutation-checked tests.
+
 ## Declared context windows
 
 `ProviderConfig` gained `context_window`. The adapters take it and fall back to

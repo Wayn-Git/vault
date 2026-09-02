@@ -37,14 +37,21 @@ class ToolResult:
     content: str
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     is_error: bool = False
+    #: Whether the agent loop may carry on after this. True for every error a
+    #: tool can produce -- a refused permission, a missing file, a dead
+    #: connector -- because all of them are information the model can act on
+    #: (ADR-0016). It exists so that a failure the loop converts on the model's
+    #: behalf can say so explicitly rather than being inferred from `is_error`,
+    #: which says nothing about whether continuing is safe.
+    recoverable: bool = True
 
     @classmethod
     def ok(cls, content: str, artifacts: list[dict[str, Any]] | None = None) -> ToolResult:
         return cls(content=content, artifacts=artifacts or [])
 
     @classmethod
-    def error(cls, message: str) -> ToolResult:
-        return cls(content=message, is_error=True)
+    def error(cls, message: str, *, recoverable: bool = True) -> ToolResult:
+        return cls(content=message, is_error=True, recoverable=recoverable)
 
 
 @dataclass

@@ -169,3 +169,102 @@ class CapabilityService:
             "skills": self.skills(conversation_id),
             "connectors": self.connectors(conversation_id),
         }
+
+    # ---------------------------------------------------------- profiles
+
+    def profiles(self) -> list[dict[str, Any]]:
+        """Every saved profile, with how many connectors each turns on.
+
+        The count only, not the full item list -- a picker needs to say
+        "Search-only (4)", not enumerate four rows for every entry it lists.
+        """
+        rows = self.conn.execute(
+            "SELECT p.id, p.name, p.updated_at,"
+            " sum(i.enabled) AS on_count, count(i.name) AS total_count"
+            " FROM capability_profiles p LEFT JOIN capability_profile_items i"
+            " ON i.profile_id = p.id GROUP BY p.id ORDER BY p.name"
+        ).fetchall()
+        return [
+            {
+                "name": row["name"],
+                "updated_at": row["updated_at"],
+                "on_count": row["on_count"] or 0,
+                "total_count": row["total_count"] or 0,
+            }
+            for row in rows
+        ]
+
+    def save_profile(self, name: str, conversation_id: str | None = None) -> None:
+        """Snapshot this conversation's current connector state under `name`.
+
+        Connectors only, not skills: skills are inert prompt text and do not
+        touch a provider's tool-schema budget, which is the entire reason this
+        exists (see the schema comment on `capability_profiles`). Re-saving an
+        existing name replaces its contents rather than refusing, since
+        "update my Search-only profile" is the expected way to revise one.
+
+        Reads the raw toggle (`is_enabled`), not `Capability.enabled` (which
+        is `config.enabled AND is_enabled(...)`) -- a connector switched on
+        for this conversation but administratively disabled in mcp.yaml would
+        otherwise be saved as off, silently dropping the choice the profile
+        exists to remember the moment mcp.yaml's own flag disagreed with it.
+        """
+        name = name.strip()
+        if not name:
+            raise ValueError("a profile needs a name")
+        items = [
+            (c.name, self.is_enabled(Kind.CONNECTOR, c.name, conversation_id))
+            for c in self.connectors(conversation_id)
+        ]
+        self.conn.execute(
+            "INSERT INTO capability_profiles (name) VALUES (?)"
+            " ON CONFLICT(name) DO UPDATE SET updated_at = datetime('now')",
+            (name,),
+        )
+        profile_id = self.conn.execute(
+            "SELECT id FROM capability_profiles WHERE name = ?", (name,)
+        ).fetchone()["id"]
+        self.conn.execute(
+            "DELETE FROM capability_profile_items WHERE profile_id = ?", (profile_id,)
+        )
+        self.conn.executemany(
+            "INSERT INTO capability_profile_items (profile_id, kind, name, enabled)"
+            " VALUES (?, 'connector', ?, ?)",
+            [(profile_id, cname, int(enabled)) for cname, enabled in items],
+        )
+        self.conn.commit()
+
+    def apply_profile(self, name: str, conversation_id: str) -> int:
+        """Turn this conversation's connectors into exactly what `name` stored.
+
+        Authoritative: a connector the profile does not mention is switched
+        off, not left alone -- see the schema comment for why "additive"
+        would not fix the problem profiles exist to fix. Returns how many
+        connectors ended up on, so the caller can say so.
+        """
+        profile_id_row = self.conn.execute(
+            "SELECT id FROM capability_profiles WHERE name = ?", (name,)
+        ).fetchone()
+        if profile_id_row is None:
+            raise ValueError(f"no profile called '{name}'")
+        wanted = {
+            row["name"]: bool(row["enabled"])
+            for row in self.conn.execute(
+                "SELECT name, enabled FROM capability_profile_items"
+                " WHERE profile_id = ? AND kind = 'connector'",
+                (profile_id_row["id"],),
+            )
+        }
+        on = 0
+        for connector in self.connectors(conversation_id):
+            enabled = wanted.get(connector.name, False)
+            self.set_enabled(
+                Kind.CONNECTOR, connector.name, enabled, conversation_id=conversation_id
+            )
+            on += int(enabled)
+        return on
+
+    def delete_profile(self, name: str) -> bool:
+        cur = self.conn.execute("DELETE FROM capability_profiles WHERE name = ?", (name,))
+        self.conn.commit()
+        return cur.rowcount > 0

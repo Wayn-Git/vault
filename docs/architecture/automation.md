@@ -36,14 +36,27 @@ Runs are rescheduled from *now*, not from the time they were due. A server that
 was off for a day comes back and runs an hourly automation once, not twenty-four
 times.
 
-One at a time, and with a five-minute ceiling per run: three automations coming
-due in the same minute and all reaching for the shell are three unattended turns
-competing over one machine, and a hung one must not wedge the runner for the
-rest of the session.
+One at a time, and with a three-minute ceiling per run (`RUN_TIMEOUT_SECONDS =
+180`): three automations coming due in the same minute and all reaching for the
+shell are three unattended turns competing over one machine, and a hung one must
+not wedge the runner for the rest of the session. Because the runner is serial,
+that ceiling is also how long one stuck automation can delay everything queued
+behind it, which is why it came down from five minutes. An unattended turn is
+allowed twenty iterations (`AUTOMATION_MAX_ITERATIONS`), more than an
+interactive one because a browser task spends one per tool call and nobody is
+there to say "carry on" — and no more than fits inside the timeout.
 
-Below five minutes an "automation" is a busy loop wearing a schedule — 1440
-model calls a day by accident — so the interval floor is five minutes and the
-ceiling is thirty days.
+The runner wakes every ten seconds (`TICK_SECONDS`) and the interval floor is
+one minute (`MIN_MINUTES`); the ceiling is thirty days. Both were looser — a
+thirty-second tick under a five-minute floor — and together they meant the
+tightest automation PSOK would accept actually fired somewhere between five and
+six minutes from now. A minute is still six ticks, so an interval is honoured
+rather than approximated, and the tick no longer costs a third of the shortest
+period. Below the tick an "automation" would be a busy loop wearing a schedule.
+
+"Run now" ignores all of this. The floor governs how often PSOK starts a run by
+itself; a person pressing the button has already decided. It still queues behind
+a run in flight, so two unattended turns never share the machine.
 
 ## Decision 2: what the permission gate does with nobody watching
 
@@ -83,10 +96,56 @@ interactive turn running at that moment.
 - **No cron expressions.** An interval, from a fixed list.
 - **No trigger other than the clock.** Not "when a file changes", not "when mail
   arrives".
-- **No retries.** A failed run reschedules normally; it does not back off or
-  try again sooner.
+- **No retry within a run.** A run that fails does not try again sooner; it
+  only reschedules later than usual (below).
 - **Nothing that can answer a permission prompt.** See above. If that changes,
   it needs its own design, not a flag.
+
+## Tool scope
+
+An automation can be pointed at a saved capability profile
+(`backend/capabilities.py`), the same connector on/off snapshot a person saves
+from Skills & connectors. When it is, `run_once` applies that profile to the
+run's own conversation directly — not through `POST
+/api/capabilities/profiles/{name}/apply`, which also connects and disconnects
+servers live on the shared MCP manager. A scheduled run must never do that to a
+connector another conversation is using, so it only writes the conversation's
+own `capability_state` rows, exactly what the Director already reads per turn.
+
+This exists because the tool list is not free: one real setup measured 29,620
+tokens across 132 tools, and a provider with a 128-tool cap starts dropping
+tools once the catalogue passes it. An automation that only ever needs Gmail
+does not need GitHub, Spotify, LinkedIn, and a browser in the same schema list
+— narrowing it is what keeps the model from second-guessing the right tool as
+the catalogue grows. No profile set means every enabled connector, same as
+before this existed. A profile that is deleted after an automation is pointed
+at it fails that run loudly, naming the missing profile, rather than silently
+running unscoped — a bigger surprise than not running.
+
+## Backing off a broken automation
+
+A run that ends `error` no longer reschedules on the plain interval: each
+consecutive failure doubles the wait (capped at the existing thirty-day
+ceiling), and one `ok` run resets it to nothing. A `blocked` run — the gate
+correctly refusing something it was never approved for — does neither: it is
+not progress, but it is not a failure to retry past either, and backing it off
+would read as PSOK giving up on approval rather than waiting for it.
+
+This does not make a run retry, or make a flaky provider more reliable. It
+means an automation stuck failing every fifteen minutes settles into failing
+every few hours instead, so a bad prompt or a dead connector does not keep
+spending turns — and, on a provider that is down, keep re-announcing the same
+failure — until someone reads the record.
+
+**Provider fallback is a configuration fact, not something this code decides.**
+`backend/runtime/chain.py` builds a fallback chain only from providers that
+actually have a key; with one provider configured, the chain is length one and
+a 5xx there has nowhere to hand off to. An automation created with no explicit
+provider now picks the same one a plain chat turn would — the `default:` tier
+in `providers.yaml` when one is named, rather than whichever provider happens
+to sort first — but that only routes an automation to *a* provider correctly;
+it does not give it somewhere to fall back to. The fallback chain still gets
+longer only when a second provider actually has a key.
 
 ## Endpoints
 

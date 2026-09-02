@@ -173,6 +173,7 @@ export default function Tasks() {
     buckets: {}, lists: [], connected: false, my_day_list_id: null,
   })
   const [events, setEvents] = useState([])
+  const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [busyTask, setBusyTask] = useState(null)
@@ -184,20 +185,37 @@ export default function Tasks() {
   const [loaded, setLoaded] = useState(false)
   useViewEntrance(rootRef)
 
+  // Which request is the current one. Switching buckets quickly fires a new
+  // `load()` before the previous one's response has landed, and an older
+  // response arriving after a newer one used to overwrite the rows for the
+  // bucket now showing in the rail with the bucket it left — a stale answer
+  // is discarded here rather than applied.
+  const loadToken = useRef(0)
+
   const load = useCallback(async () => {
+    const token = ++loadToken.current
     try {
       const [rows, summary, cal] = await Promise.all([
         api.tasks(view.listId ? { listId: view.listId } : { bucket: view.bucket }),
         api.taskBuckets(),
         api.calendar(21),
       ])
+      if (loadToken.current !== token) return
       setTasks(rows)
       setCounts(summary)
       setEvents(cal)
+      setError(null)
     } catch (err) {
+      if (loadToken.current !== token) return
+      // `loaded` still flips true below, so without this a failed fetch
+      // rendered the same empty-state copy an actually-empty bucket shows.
+      // Rows cleared too, matching Mail's pattern -- a stale list under an
+      // error card reads as "it half-loaded", not as "this request failed".
+      setError(err.message)
+      setTasks([])
       toast(err.message, 'bad')
     } finally {
-      setLoaded(true)
+      if (loadToken.current === token) setLoaded(true)
     }
   }, [view, toast])
 
@@ -273,12 +291,22 @@ export default function Tasks() {
     return () => { cancelled = true }
   }, [load])
 
-  const newList = useCallback(async () => {
-    const name = window.prompt('Name the list')
-    if (!name?.trim()) return
+  /* Naming a list used to go through `window.prompt`, which is the one piece
+     of browser chrome nobody in this application chose: it cannot be styled,
+     it blocks the whole tab, Firefox lets a page suppress it after the second
+     use, and it looks like a phishing attempt. An inline field in the rail it
+     is adding to is both prettier and closer to the thing it makes. */
+  const [namingList, setNamingList] = useState(false)
+  const [listName, setListName] = useState('')
+
+  const newList = useCallback(async (name) => {
+    const clean = name.trim()
+    if (!clean) return
     try {
-      const made = await api.createTaskList(name.trim())
+      const made = await api.createTaskList(clean)
       toast(made.note ? `List created — ${made.note}` : 'List created', 'ok')
+      setNamingList(false)
+      setListName('')
       await load()
     } catch (err) {
       toast(err.message, 'bad')
@@ -337,10 +365,41 @@ export default function Tasks() {
 
             <div className="task-rail-head">
               <span>Lists</span>
-              <button type="button" className="icon-btn" title="New list" onClick={newList}>
-                <Icon name="plus" size={13} />
+              <button
+                type="button"
+                className="icon-btn"
+                title="New list"
+                aria-label="New list"
+                aria-expanded={namingList}
+                onClick={() => setNamingList((n) => !n)}
+              >
+                <Icon name={namingList ? 'x' : 'plus'} size={13} />
               </button>
             </div>
+            {namingList && (
+              <form
+                className="task-rail-new"
+                onSubmit={(e) => { e.preventDefault(); newList(listName) }}
+              >
+                <input
+                  autoFocus
+                  value={listName}
+                  placeholder="List name"
+                  aria-label="New list name"
+                  onChange={(e) => setListName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.stopPropagation()
+                      setNamingList(false)
+                      setListName('')
+                    }
+                  }}
+                />
+                <button type="submit" className="btn btn--primary btn--small" disabled={!listName.trim()}>
+                  Add
+                </button>
+              </form>
+            )}
             {loaded
               && counts.lists.filter((l) => l.id !== counts.my_day_list_id).length === 0 && (
               <div className="task-rail-empty">No other lists yet.</div>
@@ -386,7 +445,21 @@ export default function Tasks() {
 
               {!loaded && <SkeletonRows rows={5} controls={3} />}
 
-              {loaded && tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
+              {loaded && error && (
+                <div className="empty-state" style={{ padding: 18 }}>
+                  <Icon name="alert" size={20} />
+                  <div>
+                    <div>{error}</div>
+                    <div className="empty-actions">
+                      <button type="button" className="btn btn--small" onClick={load}>
+                        <Icon name="refresh" size={13} /> Retry
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {loaded && !error && tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
                 <div className="empty-state empty-state--do" style={{ padding: 18 }}>
                   <Icon name="sun" size={20} />
                   <div>
@@ -425,7 +498,7 @@ export default function Tasks() {
                 </div>
               )}
 
-              {loaded && tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
+              {loaded && !error && tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
                 <div className="empty-state" style={{ padding: 18 }}>
                   <Icon name="check" size={20} />
                   {view.bucket === 'missed'

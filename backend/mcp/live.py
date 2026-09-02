@@ -31,6 +31,32 @@ def get_manager() -> Any | None:
     return _manager
 
 
+def ready_connectors() -> dict[str, int]:
+    """Connectors serving tools right now, name -> registered tool count.
+
+    Here rather than in the API because the two callers that need it are the
+    system-prompt builder and the agent loop, and neither can import the API --
+    the same reason `connection` lives here. Empty whenever nothing has built a
+    registry yet, which is the honest answer: no connector is reachable.
+    """
+    manager = _manager
+    if manager is None:
+        return {}
+    try:
+        from backend.mcp.config import load_servers
+
+        names = set(load_servers()) | set(getattr(manager, "connections", {}))
+        return {
+            name: manager.registered_tool_count(name)
+            for name in sorted(names)
+            if manager.is_ready(name)
+        }
+    except Exception:
+        # A usefulness signal, not a gate: failing to answer costs the model a
+        # hint, while raising would cost it the turn.
+        return {}
+
+
 def connection(server_name: str):
     """A connected server by name, or None.
 

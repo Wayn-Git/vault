@@ -85,6 +85,64 @@ def test_api_key_resolves_from_the_keychain(psok_home):
     assert config.resolved_headers()["Authorization"] == "Bearer sekrit"
 
 
+def test_a_custom_header_name_sends_the_raw_key_not_bearer_wrapped(psok_home):
+    from backend.secrets import set_secret
+
+    set_secret("psok-test/apikey", "sekrit")
+    config = ServerConfig(
+        name="x",
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://example.com",
+        api_key_ref="psok-test/apikey",
+        api_key_header="x-api-key",
+    )
+    assert config.resolved_headers()["x-api-key"] == "sekrit"
+
+
+def test_a_query_param_key_is_appended_to_the_url_not_the_headers(psok_home):
+    from backend.secrets import set_secret
+
+    set_secret("psok-test/apikey", "sekrit")
+    config = ServerConfig(
+        name="x",
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://example.com/mcp/",
+        api_key_ref="psok-test/apikey",
+        api_key_query_param="tavilyApiKey",
+    )
+    assert config.resolved_url() == "https://example.com/mcp/?tavilyApiKey=sekrit"
+    assert "Authorization" not in config.resolved_headers()
+
+
+def test_a_query_param_key_never_reaches_the_url_on_disk(psok_home):
+    """`resolved_url()` is a spawn-time computation. `to_dict()` -- what
+    actually gets written to mcp.yaml -- must still carry only the bare url
+    and the reference, never the resolved key."""
+    from backend.secrets import set_secret
+
+    set_secret("psok-test/apikey", "sekrit")
+    config = ServerConfig(
+        name="x",
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://example.com/mcp/",
+        api_key_ref="psok-test/apikey",
+        api_key_query_param="tavilyApiKey",
+    )
+    assert config.to_dict()["url"] == "https://example.com/mcp/"
+    assert "sekrit" not in str(config.to_dict())
+
+
+def test_an_unresolved_query_param_key_leaves_the_url_bare(psok_home):
+    config = ServerConfig(
+        name="x",
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://example.com/mcp/",
+        api_key_ref="psok-test/never-set",
+        api_key_query_param="tavilyApiKey",
+    )
+    assert config.resolved_url() == "https://example.com/mcp/"
+
+
 # ---------------------------------------------------------------- catalogue
 
 
@@ -111,6 +169,100 @@ def test_adding_from_catalogue_marks_it_bundled(psok_home):
     assert config.source is Source.BUNDLED
     assert config.catalogue_id == "playwright"
     assert load_servers()["playwright"].command == "npx"
+
+
+def test_an_api_key_catalogue_entry_carries_its_ref_into_the_config(psok_home):
+    config = mcp_commands.add_from_catalogue("exa")
+    assert config.api_key_ref == "psok-mcp/exa.api_key"
+    assert config.api_key_header == "x-api-key"
+
+
+def test_a_query_param_catalogue_entry_carries_its_param_name(psok_home):
+    config = mcp_commands.add_from_catalogue("tavily")
+    assert config.api_key_query_param == "tavilyApiKey"
+
+
+def test_an_api_key_server_reports_missing_before_the_key_is_set(psok_home):
+    mcp_commands.add_from_catalogue("firecrawl")
+    config = load_servers()["firecrawl"]
+    assert mcp_commands.missing_credentials(config) == ["an API key"]
+
+
+def test_an_api_key_server_reports_nothing_missing_once_the_key_is_set(psok_home):
+    from backend.secrets import set_secret
+
+    mcp_commands.add_from_catalogue("firecrawl")
+    set_secret("psok-mcp/firecrawl.api_key", "sekrit")
+    config = load_servers()["firecrawl"]
+    assert mcp_commands.missing_credentials(config) == []
+
+
+async def test_login_on_a_setup_connector_with_no_flow_resolves_its_own_placeholder(psok_home):
+    """`/api/mcp/servers/{name}/login` plants a PENDING placeholder before
+    calling `login()`, on the assumption every path through it ends in
+    `_finish`. A server whose auth is entirely its own (an API key, no
+    `auth_tool`/`auth_command`) used to return a plain string instead --
+    leaving that placeholder stuck reporting "authenticating" until its TTL
+    expired, for a connector that was, underneath, already fully connected."""
+    from backend.mcp.oauth import PENDING, PendingAuthorization
+
+    mcp_commands.add_from_catalogue("firecrawl")
+    PENDING["firecrawl"] = PendingAuthorization(server_name="firecrawl", authorization_url="")
+
+    await mcp_commands.login("firecrawl")
+
+    assert PENDING["firecrawl"].status == "done"
+
+
+async def test_login_on_a_connector_with_nothing_to_sign_into_also_resolves_it(psok_home):
+    from backend.mcp.oauth import PENDING, PendingAuthorization
+
+    mcp_commands.add_from_catalogue("fetch")
+    PENDING["fetch"] = PendingAuthorization(server_name="fetch", authorization_url="")
+
+    await mcp_commands.login("fetch")
+
+    assert PENDING["fetch"].status == "done"
+
+
+async def test_a_broken_sign_in_reports_failure_rather_than_erasing_the_record(
+    psok_home, monkeypatch
+):
+    """`_server_side_login`'s exception handler used to do
+    `PENDING.pop(config.name, None)` -- deleting the placeholder instead of
+    resolving it. Since `mcp_login` (backend/api/main.py) never captures
+    `login()`'s return value, that erased the only place a real failure (a
+    dropped connection, the server's own tool raising) would ever surface."""
+    from backend.mcp.manager import MCPManager
+    from backend.mcp.oauth import PENDING, PendingAuthorization
+
+    mcp_commands.add_from_catalogue("microsoft-todo")
+    PENDING["microsoft-todo"] = PendingAuthorization(
+        server_name="microsoft-todo", authorization_url=""
+    )
+
+    async def boom(self, config):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(MCPManager, "connect_server", boom)
+
+    await mcp_commands.login("microsoft-todo")
+
+    pending = PENDING["microsoft-todo"]
+    assert pending.status == "failed", "the record must survive, not be deleted"
+    assert "connection refused" in (pending.message or "")
+
+
+async def test_login_on_a_server_removed_mid_flow_resolves_rather_than_orphans(psok_home):
+    """Reachable by a race: `mcp_login` plants a placeholder before scheduling
+    `login()` as a task, and a concurrent remove can delete the server first."""
+    from backend.mcp.oauth import PENDING, PendingAuthorization
+
+    PENDING["never-added"] = PendingAuthorization(server_name="never-added", authorization_url="")
+
+    await mcp_commands.login("never-added")
+
+    assert PENDING["never-added"].status == "failed"
 
 
 def test_unknown_catalogue_id_lists_alternatives(psok_home):

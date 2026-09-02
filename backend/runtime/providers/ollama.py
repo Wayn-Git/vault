@@ -45,5 +45,6 @@ def initialize(
             # the person who pulled it knows.
             context_window=config.context_window or 32_768,
             max_tools=config.max_tools,
+            tokens_per_minute=config.tokens_per_minute,
         ),
     )

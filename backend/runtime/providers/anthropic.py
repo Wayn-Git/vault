@@ -308,5 +308,6 @@ def initialize(
             # declares a million; an entry that states its window wins.
             context_window=config.context_window or 200_000,
             max_tools=config.max_tools,
+            tokens_per_minute=config.tokens_per_minute,
         ),
     )

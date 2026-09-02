@@ -44,9 +44,10 @@ _cache: tuple[float, frozenset[str]] | None = None
 
 
 def forget() -> None:
-    """Drop the cache, so a sign-in that just landed is believed at once."""
-    global _cache
+    """Drop the caches, so a sign-in that just landed is believed at once."""
+    global _cache, _connectors_cache
     _cache = None
+    _connectors_cache = None
 
 
 def unsigned_connectors() -> frozenset[str]:
@@ -79,6 +80,75 @@ def unsigned_connectors() -> frozenset[str]:
 
     _cache = (now + CACHE_TTL_SECONDS, names)
     return names
+
+
+#: What a connector is *for*, in one line, when its own config does not say.
+#: Only the connectors whose purpose is not obvious from the name -- a list that
+#: restated every catalogue entry would be a second catalogue to keep in step.
+_PURPOSES: dict[str, str] = {
+    "playwright": "drive a real browser: navigate, click, fill forms, screenshot",
+    "chrome-devtools": "drive Chrome and read its devtools traces",
+    "github": "repositories, issues, pull requests, code search, actions",
+    "google-workspace": "the signed-in Google account: mail, calendar, drive, docs, sheets",
+    "fetch": "fetch a URL and return it as markdown",
+    "memory": "a persistent entity-relation knowledge graph",
+    "vercel": "projects, deployments and their logs",
+    "microsoft-todo": "the signed-in To Do account: lists, tasks, checklists",
+    "spotify": "search, playback and playlists",
+    "tavily": "web search tuned for language models",
+    "exa": "semantic web search, by meaning rather than keyword",
+    "firecrawl": "crawl a site and return clean markdown",
+}
+
+_connectors_cache: tuple[float, str | None] | None = None
+
+
+def ready_connectors_block() -> str | None:
+    """The connectors the model may actually reach this turn, named for it.
+
+    The model had no way to know a connector existed short of reading 44 tool
+    names and inferring it, so it reached for `fetch_url` and `search_web` --
+    which work everywhere and answer worse -- while an authenticated GitHub
+    connection sat unused beside them. Tool schemas are a menu; this is the
+    sentence that says which half of the menu is hot.
+
+    `None` when nothing is ready, so a machine with no connectors pays no tokens
+    for a heading over an empty list. Cached on the same short clock as
+    `unsigned_connectors`: it is rebuilt on every round trip of every turn.
+    """
+    global _connectors_cache
+    now = time.monotonic()
+    if _connectors_cache is not None and now < _connectors_cache[0]:
+        return _connectors_cache[1]
+
+    try:
+        from backend.mcp import live
+        from backend.mcp.config import load_servers
+
+        ready = live.ready_connectors()
+        configured = load_servers()
+        lines = []
+        for name, count in ready.items():
+            config = configured.get(name)
+            purpose = (config.description if config else None) or _PURPOSES.get(name) or ""
+            suffix = f" — {purpose}" if purpose else ""
+            lines.append(f"  - {name} ({count} tool{'' if count == 1 else 's'}){suffix}")
+        block = (
+            "<connectors>\n"
+            "These connectors are connected and signed in right now. Their tools are"
+            " already authenticated and reach the live service, so they answer"
+            " questions about it that no builtin tool can.\n"
+            + "\n".join(lines)
+            + "\n</connectors>"
+        ) if lines else None
+    except Exception as exc:
+        # A hint, not a gate. The permission gate is the boundary and it runs
+        # regardless; failing to describe a connector must not fail the turn.
+        log.debug("could not describe ready connectors: %s", exc)
+        block = None
+
+    _connectors_cache = (now + CACHE_TTL_SECONDS, block)
+    return block
 
 
 def sign_in_instruction(server_name: str) -> str:

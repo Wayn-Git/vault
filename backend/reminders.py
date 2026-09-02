@@ -32,10 +32,11 @@ from backend.sync.microsoft_todo import sync as sync_microsoft_todo
 
 log = logging.getLogger(__name__)
 
-# Matched to the automation runner's tick. A reminder is not a stopwatch: a
-# deadline is worth knowing about within half a minute, and a tighter loop would
-# be a wakeup a second for a table that changes a few times a day.
-TICK_SECONDS = 30
+# Matched to the automation runner's tick. A reminder is not a stopwatch, but
+# ten seconds is the difference between "due now" arriving when it is due and
+# arriving when it has already been true for a while, and the scan is one
+# indexed read against a table that changes a few times a day.
+TICK_SECONDS = 10
 
 # Past this, a reminder is delivered with a note saying when it was actually
 # due, rather than as if it had just come round. Being told "due now" about

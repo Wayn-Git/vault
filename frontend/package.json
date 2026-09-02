@@ -8,12 +8,16 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "smoke": "node tests/smoke.mjs"
+    "smoke": "node tests/smoke.mjs",
+    "test:markdown": "node tests/markdown.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.3",
+    "refractor": "^5.0.0",
+    "simple-icons": "^16.29.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

@@ -4,6 +4,7 @@ import ServiceIcon from '../../components/ServiceIcon.jsx'
 import { useApp } from '../../store.jsx'
 import { api, copyText } from '../../api.js'
 import Skeleton, { SkeletonRows } from '../../components/Skeleton.jsx'
+import { useConfirm } from '../../components/ui/ConfirmDialog.jsx'
 
 /* Connectors: what is added, what is running, and whose account it is using.
 
@@ -359,6 +360,7 @@ function ActionList({ tools }) {
    questions "whose account is this" and "what can it do" had no answer
    anywhere in the interface. */
 function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChanged }) {
+  const ready = Boolean(live?.ready || (live?.tools ?? 0) > 0)
   const information = [
     ['Category', server.category],
     ['Transport', server.transport],
@@ -391,10 +393,13 @@ function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChan
       </header>
 
       <div className="conn-detail-status">
-        <span className={`conn-status conn-status--${live?.error ? 'error' : live?.connected ? 'live' : 'off'}`}>
-          {live?.connected ? `${live.tools} tools live` : live?.error ? 'Failed to start' : 'Not running'}
+        {/* Tools reaching the agent is the ground truth, and it outranks an
+            error string: a connector serving 122 tools must never headline
+            "Failed to start" over them. */}
+        <span className={`conn-status conn-status--${ready ? 'live' : live?.error ? 'error' : 'off'}`}>
+          {ready ? `Ready (${live.tools} tools)` : live?.error ? 'Failed to start' : 'Not running'}
         </span>
-        {live?.error && <span className="conn-error">{String(live.error).slice(0, 200)}</span>}
+        {!ready && live?.error && <span className="conn-error">{String(live.error).slice(0, 200)}</span>}
       </div>
 
       <section className="conn-detail-section">
@@ -483,7 +488,13 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   // `reason` is only passed for a connector that is not usable, and it outranks
   // the tool count: a running process whose account is missing was reporting
   // "122 tools live" for tools that would every one of them have failed.
-  const state = reason ?? `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`
+  // Ready is read off the registry, not off the absence of an error -- see
+  // `backend/mcp/lifecycle.py`. `reason` still outranks it: a running connector
+  // nobody has signed in to has tools that would every one of them fail.
+  const ready = Boolean(server.lifecycle?.ready || live?.ready || (live?.tools ?? 0) > 0)
+  const state = reason ?? (ready
+    ? `Ready (${live?.tools ?? 0} tools)`
+    : `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`)
   // A working connector can still have something to say -- a sign-in a day from
   // lapsing, two accounts in a single-user store -- and it is not "off" for it.
   // Colouring the row by the sentence rather than by the state made a warning
@@ -717,8 +728,195 @@ function AuthCard({ auth, title, onRetry, onCancel, onDismiss, onCopy, onCopyCod
   )
 }
 
+/* A named, reusable set of connectors, applied to the active conversation in
+   one step instead of toggling each connector by hand -- see the schema
+   comment on `capability_profiles` for why this exists: a provider's
+   tool-schema budget (Groq's is 128 tools) is exceeded by everything switched
+   on at once far sooner than any one conversation actually needs it all. */
+function ProfileBar({ activeId, onApplied }) {
+  const { toast } = useApp()
+  const confirm = useConfirm()
+  const [profiles, setProfiles] = useState([])
+  const [selected, setSelected] = useState('')
+  const [newName, setNewName] = useState('')
+  const [busy, setBusy] = useState('')
+  /* Folded away until asked for. This is the most advanced control on the page
+     and it was the first thing on it: three fields and two buttons about a
+     feature nobody has used yet, above the connectors the page is actually
+     for. Someone who has saved a profile gets it open, because for them it is
+     the fastest control here. */
+  const [open, setOpen] = useState(false)
+
+  const refresh = useCallback(async () => {
+    try {
+      setProfiles(await api.capabilityProfiles())
+    } catch {
+      /* Quiet: the page still works with no profiles listed. */
+    }
+  }, [])
+  useEffect(() => { refresh() }, [refresh])
+
+  // Not reachable today -- every path that changes `activeId` also unmounts
+  // this component -- but `apply()` below trusts `selected` to still mean
+  // what it meant when it was picked, and nothing else here defends that.
+  useEffect(() => { setSelected('') }, [activeId])
+
+  const apply = async () => {
+    if (!selected || !activeId) return
+    setBusy('apply')
+    try {
+      const result = await api.applyCapabilityProfile(selected, activeId)
+      toast(`Applied '${selected}' — ${result.on} connector${result.on === 1 ? '' : 's'} on`, 'ok')
+      onApplied?.()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const save = async () => {
+    const name = newName.trim()
+    if (!name || !activeId) return
+    setBusy('save')
+    try {
+      await api.saveCapabilityProfile(name, activeId)
+      toast(`Saved '${name}' from this conversation's connectors`, 'ok')
+      setNewName('')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const remove = async () => {
+    if (!selected) return
+    // Deleting a saved profile is not undoable and the control is an unlabelled
+    // bin next to a dropdown, which is the shape of an accidental click.
+    const ok = await confirm({
+      title: `Delete the "${selected}" profile?`,
+      description: 'The connectors themselves are untouched — only the saved set goes.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setBusy('delete')
+    try {
+      await api.deleteCapabilityProfile(selected)
+      toast(`Deleted '${selected}'`, 'ok')
+      setSelected('')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const expanded = open || profiles.length > 0
+
+  return (
+    <section data-enter className="cap-cat conn-profiles">
+      <button
+        type="button"
+        className="cap-section-head cap-section-head--toggle"
+        aria-expanded={expanded}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Icon name="chevron" size={12} className={`disclosure${expanded ? ' is-open' : ''}`} />
+        <span>Profiles</span>
+        <span className="cap-section-tail">
+          {profiles.length ? `${profiles.length} saved` : 'none saved'}
+        </span>
+      </button>
+
+      {expanded && (
+        <>
+          <p className="cap-note">
+            A named set of connectors. Applying one switches this conversation to exactly those,
+            off for the rest — the fix for a provider&rsquo;s tool budget disappearing under
+            everything switched on at once.
+          </p>
+
+          {!activeId && (
+            <p className="conn-setup-note">
+              Open or start a conversation to save or apply a profile — a profile is applied
+              to one conversation, not to the machine.
+            </p>
+          )}
+
+          {/* Its own row rather than `.field-row`, which is a two-column grid:
+              the Apply button landed in the second column stretched to half the
+              page, and the delete button wrapped onto a line of its own between
+              the two forms. */}
+          <div className="conn-profile-row">
+            <div className="field">
+              <label htmlFor="profile-apply">apply to this conversation</label>
+              <select
+                id="profile-apply"
+                value={selected}
+                disabled={!profiles.length}
+                onChange={(e) => setSelected(e.target.value)}
+              >
+                <option value="">{profiles.length ? 'Choose a profile…' : 'No profiles saved yet'}</option>
+                {profiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name} ({p.on_count}/{p.total_count})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              className="btn btn--small btn--primary"
+              disabled={!selected || !activeId || Boolean(busy)}
+              onClick={apply}
+            >
+              {busy === 'apply' ? 'Applying…' : 'Apply'}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--small btn--danger"
+              disabled={!selected || Boolean(busy)}
+              title="Delete this profile"
+              aria-label="Delete this profile"
+              onClick={remove}
+            >
+              <Icon name="trash" size={13} />
+            </button>
+          </div>
+
+          <div className="conn-profile-row">
+            <div className="field">
+              <label htmlFor="profile-save">save this conversation&rsquo;s connectors as</label>
+              <input
+                id="profile-save"
+                value={newName}
+                placeholder="e.g. Search-only"
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && newName.trim()) save() }}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn--small"
+              disabled={!newName.trim() || !activeId || Boolean(busy)}
+              onClick={save}
+            >
+              {busy === 'save' ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
-  const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health } = useApp()
+  const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health, activeId } = useApp()
+  const confirm = useConfirm()
   const [servers, setServers] = useState([])
   const [catalogue, setCatalogue] = useState([])
   const [live, setLive] = useState({})
@@ -743,7 +941,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       setAuths(auth)
       setTools(allTools)
       setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
-        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null, ready: false }) },
       ])))
       refreshCaps()
     } catch (err) {
@@ -765,7 +963,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       const [srv, capabilities] = await Promise.all([api.mcpServers(true), api.capabilities()])
       setServers(srv)
       setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
-        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null, ready: false }) },
       ])))
     } catch {
       /* A failed poll is not worth a toast: the next one is three seconds away,
@@ -865,7 +1063,13 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     setBusy((b) => ({ ...b, [server.name]: action }))
     try {
       if (action === 'remove') {
-        if (!window.confirm(`Remove ${server.title}? Its stored credentials and signed-in account are forgotten too.`)) return
+        const ok = await confirm({
+          title: `Remove ${server.title}?`,
+          description: 'Its stored credentials and signed-in account are forgotten too.',
+          confirmLabel: 'Remove',
+          tone: 'danger',
+        })
+        if (!ok) return
         await api.mcpRemove(server.name)
         toast(`Removed ${server.title}`, 'ok')
         setOpen(null)
@@ -908,7 +1112,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     } finally {
       setBusy((b) => ({ ...b, [server.name]: undefined }))
     }
-  }, [caps, refresh, refreshHealth, setCapEnabled, toast])
+  }, [caps, refresh, refreshHealth, setCapEnabled, toast, confirm])
 
   const addFromCatalogue = useCallback(async (entry) => {
     setBusy((b) => ({ ...b, [entry.id]: 'add' }))
@@ -1063,6 +1267,8 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
           ))}
         </div>
       )}
+
+      <ProfileBar activeId={activeId} onApplied={refresh} />
 
       {running.length > 0 && (
         <section data-enter>

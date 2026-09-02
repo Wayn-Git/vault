@@ -4,19 +4,27 @@ import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api, fmtDate } from '../api.js'
 import { SkeletonCard } from '../components/Skeleton.jsx'
+import EmptyState from '../components/ui/EmptyState.jsx'
+import ErrorState from '../components/ui/ErrorState.jsx'
 
 export default function Memory() {
   const rootRef = useRef(null)
   const { toast } = useApp()
   const [state, setState] = useState(null)
+  const [error, setError] = useState(null)
   const [busy, setBusy] = useState('')
   const [filter, setFilter] = useState('')
   useViewEntrance(rootRef)
 
   const load = useCallback(async () => {
+    setError(null)
     try {
       setState(await api.memory())
     } catch (err) {
+      // A toast alone disappears in a few seconds, leaving the permanent
+      // loading skeleton below as the only thing on screen -- indistinguishable
+      // from "still loading" for as long as the page stays open.
+      setError(err.message)
       toast(err.message, 'bad')
     }
   }, [toast])
@@ -90,29 +98,39 @@ export default function Memory() {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }} data-enter>
+        {/* The filter used to be an `<input>` carrying its own hand-written
+            colours and radius in a style attribute — a control that belonged
+            to no design system and drifted from every other field on sight.
+            This is the same one the log and the mailbox use. */}
+        <div className="log-controls" data-enter>
           <span className="badge">{state?.facts?.length ?? 0} held</span>
-          <input
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="filter facts…"
-            style={{
-              background: 'var(--canvas-deep)', border: '1px solid var(--hairline)', borderRadius: 4,
-              padding: '5px 10px', fontSize: 12, fontFamily: 'var(--font-mono)',
-              color: 'var(--text-dim)', minWidth: 240,
-            }}
-          />
+          <div className="inline-search">
+            <Icon name="search" size={13} />
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter facts"
+              aria-label="Filter facts"
+              onKeyDown={(e) => { if (e.key === 'Escape' && filter) { e.stopPropagation(); setFilter('') } }}
+            />
+            {filter && (
+              <button type="button" className="icon-btn" onClick={() => setFilter('')} aria-label="Clear the filter">
+                <Icon name="x" size={13} />
+              </button>
+            )}
+          </div>
         </div>
 
-        {!state && <SkeletonCard rows={5} controls={1} />}
+        {!state && !error && <SkeletonCard rows={5} controls={1} />}
+
+        {!state && error && <ErrorState message={error} onRetry={load} />}
 
         {state && facts.length === 0 && (
-          <div className="card empty-state" data-enter>
-            <Icon name="spark" size={22} />
+          <EmptyState icon="spark">
             {state.facts.length === 0
               ? 'Nothing remembered yet. Tell PSOK something durable about you — a preference, a project, a constraint — and it will be recorded after the turn.'
               : 'No fact matches that filter.'}
-          </div>
+          </EmptyState>
         )}
 
         {facts.length > 0 && (
@@ -120,7 +138,9 @@ export default function Memory() {
             <div className="card-title">live facts</div>
             {facts.map((f) => (
               <div className="server-row" key={f.id}>
-                <div style={{ minWidth: 0 }}>
+                {/* `flex: 1`, so every Forget lands in the same column instead
+                    of wherever its own fact happens to end. */}
+                <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="server-name" style={{ whiteSpace: 'normal' }}>{f.fact}</div>
                   <div className="server-target">
                     id {f.id} · learned {fmtDate(f.created_at)}

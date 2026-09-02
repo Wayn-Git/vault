@@ -48,6 +48,12 @@ def _forget_availability():
         (429, "slow down", FailureKind.RATE_LIMITED),
         (429, "You exceeded your current quota", FailureKind.NON_RETRYABLE_RATE_LIMIT),
         (402, "", FailureKind.NON_RETRYABLE_RATE_LIMIT),
+        (
+            413,
+            "Request too large for model on tokens per minute (TPM): Limit 8000,"
+            " Requested 21757, please reduce your message size and try again.",
+            FailureKind.NON_RETRYABLE_RATE_LIMIT,
+        ),
         (404, "model not found", FailureKind.NON_RETRYABLE),
         (401, "bad key", FailureKind.NON_RETRYABLE),
     ],
@@ -89,15 +95,29 @@ def test_stream_error_frames_are_classified_from_their_own_names():
     assert (
         classify_stream_error({"code": "context_length_exceeded"}) is FailureKind.NON_RETRYABLE
     )
-    # Unrecognised is treated as a bad request: it stops rather than retries.
-    assert classify_stream_error({"type": "who_knows"}) is FailureKind.NON_RETRYABLE
+    # An unrecognised error *inside a 200 stream* is treated as a transient
+    # upstream fault, not a bad request: the stream already opened, so auth and
+    # validation passed, and the break is almost always the provider faltering
+    # mid-generation. NVIDIA's bare "Error in input stream" is the case this
+    # protects -- it used to be non-retryable and killed the turn outright.
+    # Mutation check: return NON_RETRYABLE for an unknown stream error again.
+    assert classify_stream_error({"type": "who_knows"}) is FailureKind.UPSTREAM_UNHEALTHY
+    assert classify_stream_error("Error in input stream") is FailureKind.UPSTREAM_UNHEALTHY
+    assert should_retry(classify_stream_error("Error in input stream"))
+    # But an unknown frame that names a quota problem still stops.
+    assert (
+        classify_stream_error("your credit balance is too low")
+        is FailureKind.NON_RETRYABLE_RATE_LIMIT
+    )
 
 
 async def test_a_quota_429_is_not_retried_over_http(monkeypatch):
     """The taxonomy has to reach `post_json`, not merely exist beside it.
 
-    Mutation check: revert `is_retryable` to `status in RETRYABLE_STATUS or
-    status >= 500` and this makes four attempts instead of one.
+    Mutation check: replace `should_retry(classify_status(status, body))`
+    with `status >= 500` (or any check that ignores the body) and this makes
+    four attempts instead of one -- it can no longer tell an exhausted quota
+    from an ordinary 429.
     """
     import httpx
 
@@ -272,6 +292,16 @@ def test_a_bad_model_name_does_not_take_the_provider_out_of_the_picker():
     assert availability.cached("groq") is None
 
 
+def test_an_exhausted_rate_limit_does_take_the_provider_out_of_the_picker():
+    """An account whose request needs more tokens per minute than it is
+    allowed will fail the same way on the very next turn -- three near
+    identical 413s landed in the live database two minutes apart before this,
+    because nothing told the picker to stop offering it in the meantime."""
+    availability.record_failure("groq", FailureKind.NON_RETRYABLE_RATE_LIMIT)
+    state = availability.cached("groq")
+    assert state is not None and not state.available
+
+
 # --- the chain --------------------------------------------------------------
 
 
@@ -442,6 +472,65 @@ async def test_a_404_fails_immediately_without_trying_the_fallback(db, monkeypat
     assert events[-1].type == "error"
     assert never.calls == 0, "the fallback must not be burned on a bad request"
     assert not [e for e in events if e.type == "warning"]
+
+
+async def test_a_request_too_big_for_the_provider_skips_straight_to_fallback(db, monkeypatch):
+    """Groq's free tier is 8,000 tokens per minute -- smaller than this
+    machine's own system prompt plus tool schemas on any turn with more than
+    a couple of connectors on. Sending that request anyway is a guaranteed
+    413, so it must never be attempted at all once the ceiling is known.
+
+    Mutation check: remove the `tokens_per_minute` precheck in `Director._run`.
+    """
+    never = _Answers("must never be seen")
+    up = _Answers("the fallback answered")
+    models = {
+        "groq": ResolvedModel(
+            provider="groq",
+            model="groq-1",
+            client=never,
+            capabilities=Capabilities(
+                streaming=False, context_window=131_072, tokens_per_minute=1
+            ),
+        ),
+        "nvidia": _model("nvidia", up),
+    }
+    _patch_chain(monkeypatch, ["groq", "nvidia"], models)
+
+    cid = ConversationRepository().create("groq", "groq-1")
+    events = [e async for e in Director(_registry(), stream=False, memory=False).run(cid, "hi")]
+
+    assert never.calls == 0, "a request already known to exceed the budget must never be sent"
+    assert up.calls == 1
+    assert events[-1].type == "done"
+    warnings = [e.data["message"] for e in events if e.type == "warning"]
+    assert warnings and "cannot take a request this size" in warnings[0]
+    assert "nvidia/nvidia-1" in warnings[0], "the user is told which provider answered"
+
+
+async def test_a_too_big_request_with_no_fallback_fails_cleanly(db, monkeypatch):
+    """No raw provider body, ever -- a human sentence naming the provider and
+    the actual numbers, which is what a user can act on."""
+    never = _Answers("must never be seen")
+    models = {
+        "groq": ResolvedModel(
+            provider="groq",
+            model="groq-1",
+            client=never,
+            capabilities=Capabilities(
+                streaming=False, context_window=131_072, tokens_per_minute=1
+            ),
+        ),
+    }
+    _patch_chain(monkeypatch, ["groq"], models)
+
+    cid = ConversationRepository().create("groq", "groq-1")
+    events = [e async for e in Director(_registry(), stream=False, memory=False).run(cid, "hi")]
+
+    assert never.calls == 0
+    assert events[-1].type == "error"
+    assert "cannot take a request this size" in events[-1].data["message"]
+    assert "groq" in events[-1].data["message"]
 
 
 async def test_a_failed_provider_is_not_retried_on_every_later_iteration(db, monkeypatch):
@@ -923,3 +1012,339 @@ def test_an_environment_variable_name_survives_a_hyphenated_slug():
     assert PRESETS_BY_SLUG["ollama-cloud"].api_key_env == "PSOK_OLLAMA_CLOUD_API_KEY"
     assert "-" not in PRESETS_BY_SLUG["ollama-cloud"].api_key_env
 
+
+
+# --- writing tiers, on-demand ping, and the live model list ----------------
+#
+# `load_tiers` had no write half and no API: the go-to model was hand-edited in
+# providers.yaml. These cover the three surfaces the interface now drives --
+# assigning a role, pinging a provider on demand, and listing what its endpoint
+# actually serves so the user picks a model instead of retyping one from docs.
+
+
+def _two_provider_file(tmp_path):
+    path = tmp_path / "providers.yaml"
+    path.write_text(
+        """
+providers:
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    default_model: openai/gpt-oss-120b
+  - name: nvidia
+    base_url: https://integrate.api.nvidia.com/v1
+    default_model: nvidia/nemotron-3-super-120b-a12b
+"""
+    )
+    return path
+
+
+def test_setting_a_tier_leaves_the_other_keys_alone(tmp_path):
+    """The write half of `load_tiers`, modelled on `save_providers`: `providers:`
+    and any other tier are nobody's business here, so the document is mutated
+    rather than rebuilt.
+
+    Mutation check: rebuild the document from scratch in `set_tier`.
+    """
+    from backend.config import load_providers, load_tiers, set_tier
+
+    path = _two_provider_file(tmp_path)
+    set_tier("default", "groq", "openai/gpt-oss-120b", path)
+    set_tier("heavy", "nvidia", "deepseek-ai/deepseek-v4-pro-0813", path)
+
+    tiers = load_tiers(path)
+    assert tiers["default"].model == "openai/gpt-oss-120b"
+    assert tiers["heavy"].provider == "nvidia"
+    # The providers list survived both writes.
+    assert set(load_providers(path)) == {"groq", "nvidia"}
+
+
+def test_a_tier_naming_an_unconfigured_provider_is_refused(tmp_path):
+    """`load_tiers` silently drops such an entry, so writing one would look like
+    it took and then vanish on the next read. Refuse it at the door instead.
+
+    Mutation check: drop the `provider not in load_providers` guard from `set_tier`.
+    """
+    import pytest
+
+    from backend.config import set_tier
+
+    path = _two_provider_file(tmp_path)
+    with pytest.raises(ValueError, match="not a configured provider"):
+        set_tier("default", "anthropic", "claude-opus-4", path)
+    with pytest.raises(ValueError, match="unknown tier"):
+        set_tier("nonsense", "groq", "m", path)
+    with pytest.raises(ValueError, match="both a provider and a model"):
+        set_tier("default", "groq", "  ", path)
+
+
+def test_clearing_a_tier_is_idempotent(tmp_path):
+    """Clearing a tier that was never set is the state the caller wanted, not an
+    error. And the last tier leaving drops the whole `tiers:` block rather than
+    leaving an empty mapping behind.
+
+    Mutation check: raise from `clear_tier` when the tier is absent.
+    """
+    import yaml
+
+    from backend.config import clear_tier, set_tier
+
+    path = _two_provider_file(tmp_path)
+    assert clear_tier("default", path) is False, "nothing to clear is not a failure"
+
+    set_tier("default", "groq", "openai/gpt-oss-120b", path)
+    assert clear_tier("default", path) is True
+    assert "tiers" not in (yaml.safe_load(path.read_text()) or {}), "empty block is removed"
+
+
+def _seed_home(psok_home):
+    """Write a two-provider file to the isolated home the API actually reads."""
+    from backend.config import paths
+
+    path = paths().providers_yaml
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """
+providers:
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    default_model: openai/gpt-oss-120b
+    api_key_env: GROQ_KEY
+  - name: nvidia
+    base_url: https://integrate.api.nvidia.com/v1
+    default_model: nvidia/nemotron-3-super-120b-a12b
+    api_key_env: NVIDIA_KEY
+"""
+    )
+    return path
+
+
+def test_the_tier_endpoints_round_trip(client, monkeypatch, psok_home):
+    """Assign the go-to model over HTTP, read it back, clear it."""
+    monkeypatch.setenv("GROQ_KEY", "g")
+    monkeypatch.setenv("NVIDIA_KEY", "n")
+    _seed_home(psok_home)
+
+    r = client.put("/api/tiers/default", json={"provider": "groq", "model": "openai/gpt-oss-120b"})
+    assert r.status_code == 200
+
+    listed = client.get("/api/tiers").json()
+    assert "default" in listed["roles"] and "fast" in listed["roles"] and "heavy" in listed["roles"]
+    assert listed["tiers"]["default"] == {"provider": "groq", "model": "openai/gpt-oss-120b"}
+
+    bad = client.put("/api/tiers/default", json={"provider": "ghost", "model": "m"})
+    assert bad.status_code == 400
+
+    assert client.delete("/api/tiers/default").status_code == 200
+    assert "default" not in client.get("/api/tiers").json()["tiers"]
+
+
+def test_ping_forces_a_fresh_probe_ignoring_the_cache(client, monkeypatch, psok_home):
+    """The picker's badge is a passive survey; Ping means "check this one now".
+
+    Mutation check: return `cached(name)` from `availability.ping` instead of
+    forgetting first.
+    """
+    from backend.runtime import availability
+
+    monkeypatch.setenv("GROQ_KEY", "g")
+    monkeypatch.setenv("NVIDIA_KEY", "n")
+    _seed_home(psok_home)
+
+    calls = {"n": 0}
+
+    async def fake_probe(cfg):
+        calls["n"] += 1
+        return availability.Availability(name=cfg.name, available=True, source="probe")
+
+    monkeypatch.setattr(availability, "_probe_now", fake_probe)
+    # Seed a stale "down" so the test proves the cache was ignored.
+    availability.record_failure("groq", availability.FailureKind.UNREACHABLE, "stale")
+
+    r = client.post("/api/providers/groq/ping")
+    body = r.json()
+    assert r.status_code == 200
+    assert body["available"] is True, "the fresh probe wins over the cached failure"
+    assert body["latency_ms"] is not None
+    assert calls["n"] == 1, "the endpoint was actually hit, not read from cache"
+
+    assert client.post("/api/providers/ghost/ping").status_code == 404
+
+
+def test_ping_all_reports_every_provider(client, monkeypatch, psok_home):
+    from backend.runtime import availability
+
+    monkeypatch.setenv("GROQ_KEY", "g")
+    monkeypatch.setenv("NVIDIA_KEY", "n")
+    _seed_home(psok_home)
+
+    async def fake_probe(cfg):
+        return availability.Availability(name=cfg.name, available=cfg.name == "groq")
+
+    monkeypatch.setattr(availability, "_probe_now", fake_probe)
+    results = client.post("/api/providers/ping-all").json()["results"]
+    assert results["groq"]["available"] is True
+    assert results["nvidia"]["available"] is False
+
+
+def test_the_model_list_parses_openai_and_openrouter_shapes():
+    """Free is flagged where the API says so (OpenRouter pricing, `:free`
+    suffix); an unknown shape yields nothing rather than a guessed id.
+
+    Mutation check: return every row regardless of shape from `_model_list`.
+    """
+    from backend.api.main import _model_list
+
+    openai_shape = {"data": [{"id": "gpt-oss-120b"}, {"id": "gpt-oss-20b"}]}
+    assert [m["id"] for m in _model_list(openai_shape)] == ["gpt-oss-120b", "gpt-oss-20b"]
+    assert all(m["free"] is False for m in _model_list(openai_shape))
+
+    openrouter_shape = {
+        "data": [
+            {"id": "paid/model", "pricing": {"prompt": "0.0005", "completion": "0.001"}},
+            {"id": "zero/model", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "vendor/model:free", "pricing": {"prompt": "0.0", "completion": "0.0"}},
+        ]
+    }
+    parsed = _model_list(openrouter_shape)
+    # Free ones sort first.
+    assert parsed[0]["free"] is True and parsed[1]["free"] is True
+    assert {m["id"] for m in parsed if m["free"]} == {"zero/model", "vendor/model:free"}
+    assert next(m for m in parsed if m["id"] == "paid/model")["free"] is False
+
+    assert _model_list("not a shape") == []
+    assert _model_list({"unexpected": 1}) == []
+
+
+# --- the iteration ceiling is a setting, clamped and persisted -------------
+
+
+def test_the_iteration_limit_is_stored_clamped_and_read_back(db):
+    """A turn spends one step per round trip; the ceiling used to be a hardcoded
+    constant. It is a setting now, clamped so neither a stuck loop nor a
+    cut-short task can be configured by a fat-fingered number.
+
+    Mutation check: drop the clamp from `save_max_iterations`.
+    """
+    from backend.config import (
+        DEFAULT_MAX_ITERATIONS,
+        MAX_MAX_ITERATIONS,
+        MIN_MAX_ITERATIONS,
+        load_max_iterations,
+        save_max_iterations,
+    )
+
+    assert load_max_iterations() == DEFAULT_MAX_ITERATIONS, "unset reads the default"
+
+    assert save_max_iterations(24) == 24
+    assert load_max_iterations() == 24, "a later turn reads the new value, no restart"
+
+    assert save_max_iterations(1000) == MAX_MAX_ITERATIONS, "clamped to the ceiling"
+    assert save_max_iterations(1) == MIN_MAX_ITERATIONS, "clamped to the floor"
+
+
+def test_the_settings_endpoints_round_trip(client, db):
+    got = client.get("/api/settings").json()
+    assert got["max_iterations"] == got["max_iterations_default"]
+    assert got["max_iterations_min"] < got["max_iterations_max"]
+
+    updated = client.patch("/api/settings", json={"max_iterations": 22}).json()
+    assert updated["max_iterations"] == 22
+    assert client.get("/api/settings").json()["max_iterations"] == 22
+
+    # A PATCH with nothing to change leaves the value alone.
+    assert client.patch("/api/settings", json={}).json()["max_iterations"] == 22
+
+
+# --- NVIDIA's transient bodyless 404 is a blip, not a bad model name -------
+
+
+def test_a_bodyless_404_is_retryable_but_a_404_with_a_body_is_fatal():
+    """NVIDIA's NIM gateway returns an empty-bodied 404 when the node a request
+    hit has not loaded the model yet -- transient, ~50% on nemotron, cleared by
+    one retry. A real "model not found" 404 carries a JSON error body and must
+    still stop the chain, or a genuine typo burns the whole fallback.
+
+    Mutation check: drop the `status == 404 and not body.strip()` branch, or
+    make it fire regardless of body.
+    """
+    from backend.runtime.failures import FailureKind, classify_status, should_retry
+    from backend.runtime.http import is_retryable
+
+    # Bodyless (empty, whitespace, or absent) -> retry the same provider.
+    for empty in ("", "   ", "\n", None):
+        assert classify_status(404, empty) is FailureKind.RETRYABLE, repr(empty)
+        assert should_retry(classify_status(404, empty))
+        assert is_retryable(404, empty)
+
+    # A 404 that actually says what is missing stays fatal.
+    real = '{"error":{"message":"model \'ghost/model\' not found","code":404}}'
+    assert classify_status(404, real) is FailureKind.NON_RETRYABLE
+    assert not is_retryable(404, real)
+
+
+# --- fitting tools to a free tier's token budget ---------------------------
+
+
+def test_tools_are_trimmed_to_fit_a_tokens_per_minute_ceiling():
+    """Groq's free tier is 8,000 TPM and this machine's full tool set is
+    ~19,000 tokens, so every turn used to be *skipped* on groq. Trimming the
+    tools to fit is what lets the provider answer -- the same thing a small
+    client on the same tier does by sending few tools. Builtins are kept first;
+    a ready connector's tools next.
+
+    Mutation check: return `tools` unchanged from `fit_tools_to_budget`.
+    """
+    from backend.agent.prompt import (
+        build_system_prompt,
+        estimate_tokens,
+        fit_tools_to_budget,
+        tool_schema_tokens,
+    )
+    from backend.runtime.types import ToolSchema
+    from backend.tools.registry import MCP_DELIMITER
+
+    builtins = [
+        ToolSchema(name=n, description="d", parameters={"type": "object", "properties": {}})
+        for n in ("view_file", "write_file", "run_shell_command")
+    ]
+    big = "navigate click screenshot fill " * 8
+    connector = [
+        ToolSchema(
+            name=f"t{i}{MCP_DELIMITER}playwright",
+            description=big,
+            parameters={"type": "object", "properties": {"x": {"type": "string"}}},
+        )
+        for i in range(200)
+    ]
+    tools = builtins + connector
+    sysp = build_system_prompt()
+    margin, tpm = 1.5, 8000
+
+    kept, dropped = fit_tools_to_budget(
+        tools, system_prompt=sysp, token_budget=tpm, margin=margin, priority_servers=set()
+    )
+
+    fitted = round((estimate_tokens(sysp) + tool_schema_tokens(kept)) * margin)
+    assert fitted <= tpm, f"the trimmed request ({fitted}) must fit the ceiling ({tpm})"
+    assert len(kept) < len(tools) and dropped, "something was actually trimmed"
+    # Builtins are never the ones dropped: a turn without them is broken.
+    kept_names = {t.name for t in kept}
+    assert {"view_file", "write_file", "run_shell_command"} <= kept_names
+
+
+def test_a_generous_budget_keeps_every_tool():
+    """The trim only bites when it has to; a roomy ceiling changes nothing.
+
+    Mutation check: make `fit_tools_to_budget` always drop the last tool.
+    """
+    from backend.agent.prompt import fit_tools_to_budget
+    from backend.runtime.types import ToolSchema
+
+    tools = [
+        ToolSchema(name=n, description="d", parameters={"type": "object", "properties": {}})
+        for n in ("a", "b", "c")
+    ]
+    kept, dropped = fit_tools_to_budget(
+        tools, system_prompt="short", token_budget=1_000_000, margin=1.5
+    )
+    assert kept == tools and dropped == []

@@ -43,6 +43,12 @@ class ProviderPreset:
     #: it has one. Groq answers `400 'tools' : maximum number of items is 128`;
     #: everyone else observed so far takes what they are given.
     max_tools: int | None = None
+    #: The account-level tokens-per-minute ceiling, where the free/default tier
+    #: has one smaller than the context window. Groq's is 8,000 -- smaller than
+    #: this machine's own system prompt plus tool schemas before a single word
+    #: of conversation, which is why a Groq turn 413s close to deterministically
+    #: on any machine with more than a couple of connectors switched on.
+    tokens_per_minute: int | None = None
     #: Native adapter name for providers that do not speak chat-completions.
     #: None means the OpenAI-compatible fall-through, which is most of them.
     adapter: str | None = None
@@ -121,6 +127,7 @@ PROVIDER_PRESETS: tuple[ProviderPreset, ...] = (
         default_model="llama-3.3-70b-versatile",
         context_window=131_072,
         max_tools=128,
+        tokens_per_minute=8_000,
         keys_url="https://console.groq.com/keys",
         docs_url="https://console.groq.com/docs/models",
         note="Free tier, no card. Fast enough that the round trip stops being the bottleneck.",
@@ -362,6 +369,8 @@ def entry_for(preset: ProviderPreset) -> dict:
         entry["context_window"] = preset.context_window
     if preset.max_tools:
         entry["max_tools"] = preset.max_tools
+    if preset.tokens_per_minute:
+        entry["tokens_per_minute"] = preset.tokens_per_minute
     return entry
 
 

@@ -1,35 +1,21 @@
-import { useCallback, useEffect } from 'react'
+import { Suspense, useCallback, useEffect, useRef } from 'react'
+import { Routes, Route } from 'react-router-dom'
 import Icon from './components/Icon.jsx'
 import ErrorBoundary from './components/ErrorBoundary.jsx'
 import CommandPalette from './components/CommandPalette.jsx'
 import Shortcuts from './components/Shortcuts.jsx'
 import Settings from './components/Settings.jsx'
 import Sidebar from './components/Sidebar.jsx'
-import { BootScreen } from './components/Skeleton.jsx'
+import ConfirmDialogHost from './components/ui/ConfirmDialog.jsx'
+import { BootScreen, SkeletonView } from './components/Skeleton.jsx'
 import { useApp } from './store.jsx'
 import { chord, isTyping, MOD_LABEL } from './keys.js'
-import Dashboard from './views/Dashboard.jsx'
+import { NAV, byDigit, byId } from './nav.js'
+import { COMPONENTS } from './views/registry.js'
 import Chat from './views/Chat.jsx'
-import Capabilities from './views/Capabilities.jsx'
-import Automations from './views/Automations.jsx'
-import Memory from './views/Memory.jsx'
-import Logs from './views/Logs.jsx'
-import Tasks from './views/Tasks.jsx'
-import Mail from './views/Mail.jsx'
 
-const VIEWS = {
-  chat: Chat,
-  tasks: Tasks,
-  mail: Mail,
-  capabilities: Capabilities,
-  automations: Automations,
-  memory: Memory,
-  logs: Logs,
-  dash: Dashboard,
-}
-
-// What ⌘1…7 reaches, in the order the rail lists them.
-const ORDER = ['chat', 'tasks', 'mail', 'capabilities', 'automations', 'memory', 'logs']
+// Every routed view except chat, which is rendered outside <Routes> below.
+const ROUTED = NAV.filter((v) => v.id !== 'chat')
 
 /* Every binding in one listener.
 
@@ -39,7 +25,8 @@ const ORDER = ['chat', 'tasks', 'mail', 'capabilities', 'automations', 'memory',
    field or that menu, and they stop propagation when they act. */
 function useGlobalKeys() {
   const {
-    view, setView, overlay, setOverlay, chat, conversations, activeId, setSidebar,
+    view, setView, overlay, setOverlay, chat, conversations, activeId,
+    toggleRail, closeRail, compact, railOpen,
   } = useApp()
 
   const cycleConversation = useCallback((delta) => {
@@ -58,9 +45,11 @@ function useGlobalKeys() {
       const typing = isTyping(e.target)
 
       // Escape is shared: whatever is open closes first, and only when nothing
-      // is open does it reach the running turn.
+      // is open does it reach the running turn. The drawer sits between them --
+      // it covers the page on a phone, so it is "what is open" there too.
       if (combo === 'escape') {
         if (overlay) { e.preventDefault(); setOverlay(null); return }
+        if (compact && railOpen) { e.preventDefault(); closeRail(); return }
         if (chat.turnRunning) { e.preventDefault(); chat.stop?.(); return }
         return
       }
@@ -70,7 +59,7 @@ function useGlobalKeys() {
       if (combo === 'mod+l') { e.preventDefault(); setView('chat'); chat.focusComposer?.(); return }
       if (combo === 'mod+/') { e.preventDefault(); setView('chat'); chat.openPlus?.(); return }
       if (combo === 'mod+u') { e.preventDefault(); setView('chat'); chat.attach?.(); return }
-      if (combo === 'mod+b') { e.preventDefault(); setSidebar((s) => !s); return }
+      if (combo === 'mod+b') { e.preventDefault(); toggleRail(); return }
       if (combo === 'mod+,') { e.preventDefault(); setOverlay(overlay === 'settings' ? null : 'settings'); return }
       if (combo === 'mod+arrowup') { e.preventDefault(); cycleConversation(-1); return }
       if (combo === 'mod+arrowdown') { e.preventDefault(); cycleConversation(1); return }
@@ -81,7 +70,8 @@ function useGlobalKeys() {
       const digit = /^mod\+([1-7])$/.exec(combo)
       if (digit) {
         e.preventDefault()
-        setView(ORDER[Number(digit[1]) - 1])
+        const target = byDigit(Number(digit[1]))
+        if (target) setView(target.id)
         return
       }
 
@@ -99,15 +89,39 @@ function useGlobalKeys() {
 
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [view, setView, overlay, setOverlay, chat, cycleConversation, setSidebar, activeId])
+  }, [
+    view, setView, overlay, setOverlay, chat, cycleConversation, activeId,
+    toggleRail, closeRail, compact, railOpen,
+  ])
 }
 
 function StageTop() {
-  const { setOverlay, health, healthError, view, setView } = useApp()
+  const {
+    setOverlay, health, healthError, view, setView, compact, railOpen, toggleRail,
+  } = useApp()
   const degraded = health?.status === 'degraded'
+  const here = byId(view)
   return (
     <div className="stage-top">
-      {view !== 'chat' && (
+      {/* On a phone the rail is off-canvas, so the header carries the way back
+          into it — and the name of where you are, which the rail was the only
+          thing saying. */}
+      {compact && (
+        <>
+          <button
+            type="button"
+            className="icon-btn stage-menu"
+            onClick={toggleRail}
+            aria-label="Open navigation"
+            aria-expanded={railOpen}
+            aria-controls="rail"
+          >
+            <Icon name="sidebar" size={18} />
+          </button>
+          <span className="stage-where">{here?.label ?? 'Chat'}</span>
+        </>
+      )}
+      {!compact && view !== 'chat' && (
         <button type="button" className="stage-back" onClick={() => setView('chat')}>
           <Icon name="chevron" size={13} style={{ transform: 'rotate(180deg)' }} /> Chat
         </button>
@@ -125,22 +139,27 @@ function StageTop() {
         )}
         <button
           type="button"
-          className="stage-cmd"
+          className={compact ? 'icon-btn' : 'stage-cmd'}
           onClick={() => setOverlay('palette')}
           title="Command palette"
+          aria-label="Command palette"
         >
-          <Icon name="search" size={13} />
-          <kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd>
+          <Icon name="search" size={compact ? 17 : 13} />
+          {/* The chord is the point of the wide form, and there is no chord on
+              a touch device — so the label goes when the keyboard does. */}
+          {!compact && <><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd></>}
         </button>
-        <button
-          type="button"
-          className="icon-btn"
-          onClick={() => setOverlay('shortcuts')}
-          title="Keyboard shortcuts"
-          aria-label="Keyboard shortcuts"
-        >
-          <Icon name="keyboard" size={15} />
-        </button>
+        {!compact && (
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setOverlay('shortcuts')}
+            title="Keyboard shortcuts"
+            aria-label="Keyboard shortcuts"
+          >
+            <Icon name="keyboard" size={15} />
+          </button>
+        )}
         <button
           type="button"
           className="icon-btn"
@@ -148,17 +167,37 @@ function StageTop() {
           title={`Settings — ${MOD_LABEL}+,`}
           aria-label="Settings"
         >
-          <Icon name="sliders" size={15} />
+          <Icon name="sliders" size={compact ? 17 : 15} />
         </button>
       </div>
     </div>
   )
 }
 
+/* The drawer's backdrop.
+ *
+ * It is a button rather than a div because tapping it is the ordinary way out
+ * of the drawer on a touch device, and an interactive element that only a
+ * pointer can reach is exactly the thing this pass exists to remove. */
+function RailScrim({ onClose }) {
+  return (
+    <button
+      type="button"
+      className="rail-scrim"
+      aria-label="Close navigation"
+      onClick={onClose}
+    />
+  )
+}
+
 function Toasts() {
   const { toasts } = useApp()
+  /* `aria-live` is the whole point of a toast for anyone not looking at the
+     corner of the screen: "connector ready, 16 tools" was visible feedback and
+     silent feedback at the same time. Polite, because none of these interrupt
+     anything. */
   return (
-    <div className="toast-wrap">
+    <div className="toast-wrap" role="status" aria-live="polite">
       {toasts.map((t) => (
         <div key={t.id} className={`toast toast--${t.tone}`}>
           <span>{t.message}</span>
@@ -169,14 +208,19 @@ function Toasts() {
 }
 
 export default function App() {
-  const { view, server, retryServer } = useApp()
+  const { view, server, retryServer, compact, railOpen, closeRail } = useApp()
   useGlobalKeys()
+  const stageRef = useRef(null)
 
-  const Active = VIEWS[view] || Chat
-
+  /* The tab reports where you are. It used to say the same eleven words on
+     every page, which makes a row of pinned tabs unreadable and a browser's
+     history search useless. */
   useEffect(() => {
-    document.title = 'PSOK · personal operating system'
-  }, [])
+    const here = byId(view)
+    document.title = here && here.id !== 'chat'
+      ? `${here.label} · PSOK`
+      : 'PSOK · personal operating system'
+  }, [view])
 
   // Nothing is mounted until the backend answers. Every view here opens by
   // fetching, so mounting them against a container that is still booting draws
@@ -187,24 +231,48 @@ export default function App() {
     return <BootScreen server={server} onRetry={retryServer} />
   }
 
+  const isChat = view === 'chat'
+  const drawerOpen = compact && railOpen
+
   return (
-    <div className="app">
+    <div className={`app${compact ? ' app--compact' : ''}${drawerOpen ? ' app--drawer' : ''}`}>
       <Sidebar />
-      <div className="stage">
+      {drawerOpen && <RailScrim onClose={closeRail} />}
+      {/* `inert` is what keeps a screen reader and the Tab key out of the page
+          the drawer is covering. Without it the drawer looks modal and behaves
+          like a decoration. */}
+      {/* A real boolean: React 19 reflects `inert` from one, and an empty
+          string is treated as false, which quietly left the page behind the
+          drawer fully tabbable. */}
+      <div className="stage" ref={stageRef} inert={drawerOpen}>
         <StageTop />
-        {/* Chat stays mounted: unmounting it mid-turn would drop the stream. */}
-        <main className={`main${view === 'chat' ? '' : ' main--hidden'}`}>
+        {/* Chat stays mounted, outside <Routes>: unmounting it mid-turn
+            would drop the stream. */}
+        <main className={`main${isChat ? '' : ' main--hidden'}`}>
           <ErrorBoundary><Chat /></ErrorBoundary>
         </main>
-        {view !== 'chat' && (
+        {!isChat && (
           <main className="main view-swap" key={view}>
-            <ErrorBoundary><Active /></ErrorBoundary>
+            <ErrorBoundary>
+              {/* The skeleton stands in for the chunk arriving, which on a
+                  local server is one frame and on a slow connection is the
+                  difference between a blank stage and a page loading. */}
+              <Suspense fallback={<SkeletonView rows={5} aside={view === 'tasks' || view === 'mail'} />}>
+                <Routes>
+                  {ROUTED.map((v) => {
+                    const Comp = COMPONENTS[v.id]
+                    return <Route key={v.id} path={v.path} element={<Comp />} />
+                  })}
+                </Routes>
+              </Suspense>
+            </ErrorBoundary>
           </main>
         )}
       </div>
       <CommandPalette />
       <Shortcuts />
       <Settings />
+      <ConfirmDialogHost />
       <Toasts />
     </div>
   )

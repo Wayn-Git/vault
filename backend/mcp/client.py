@@ -346,10 +346,11 @@ class MCPConnection:
             else None
         )
         headers = cfg.resolved_headers()
+        url = cfg.resolved_url() or ""
 
         if cfg.transport is Transport.SSE:
             return sse_client(
-                cfg.url or "",
+                url,
                 headers=headers,
                 timeout=cfg.timeout_seconds,
                 auth=auth,
@@ -357,7 +358,7 @@ class MCPConnection:
             )
 
         http_client = mcp_http_client_factory(headers=headers or None, auth=auth)
-        return streamable_http_client(cfg.url or "", http_client=http_client)
+        return streamable_http_client(url, http_client=http_client)
 
     async def call(self, tool_name: str, arguments: dict[str, Any]):
         if not self.connected:

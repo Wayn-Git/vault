@@ -236,7 +236,11 @@ async def test_repeated_identical_calls_are_broken_out_of(db, patched_resolve):
     assert nudges, "the loop should tell the model to stop repeating itself"
 
 
-async def test_model_error_is_reported_not_raised(db, monkeypatch):
+async def test_model_error_is_reported_not_raised(db, monkeypatch, caplog):
+    """The user-facing message is a clean sentence, not the raw exception --
+    a provider's own error body (a paragraph of JSON, on some) is exactly
+    what "the model isn't responding" looked like from outside before this
+    was fixed. The raw detail still reaches the log, for whoever debugs it."""
     class Failing:
         async def complete(self, *a, **k):
             raise ConnectionError("provider unreachable")
@@ -245,8 +249,11 @@ async def test_model_error_is_reported_not_raised(db, monkeypatch):
     monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
 
     cid = ConversationRepository().create("fake", "fake-1")
-    events = await collect(Director(echo_registry()), cid, "hi")
-    assert events[-1].type == "error" and "unreachable" in events[-1].data["message"]
+    with caplog.at_level("WARNING"):
+        events = await collect(Director(echo_registry()), cid, "hi")
+    assert events[-1].type == "error"
+    assert events[-1].data["message"] == "fake failed."
+    assert "provider unreachable" in caplog.text, "the raw detail must still reach the log"
 
 
 async def test_denied_tool_result_reaches_the_model(db, patched_resolve):

@@ -231,6 +231,32 @@ CREATE TABLE IF NOT EXISTS capability_state (
     PRIMARY KEY (scope, kind, name)
 );
 
+-- A named snapshot of capability_state's rows, so switching what a
+-- conversation can reach is one action instead of toggling connectors one at
+-- a time. Written because a provider's tool-schema budget (Groq: 128 tools,
+-- 8,000 tokens/min) is exceeded by every connector switched on at once far
+-- sooner than any one conversation actually needs them all -- see
+-- docs/roadmap/ideas.md's "the lever nobody has pulled".
+CREATE TABLE IF NOT EXISTS capability_profiles (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Applying a profile is authoritative, not additive: every capability of a
+-- kind the profile covers is set to exactly what is stored here, including
+-- off for anything the profile omits -- otherwise applying "Search-only"
+-- would leave whatever was already on still on, and the budget problem this
+-- exists to fix would not actually be fixed.
+CREATE TABLE IF NOT EXISTS capability_profile_items (
+    profile_id INTEGER NOT NULL REFERENCES capability_profiles(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('skill', 'connector')),
+    name       TEXT NOT NULL,
+    enabled    INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, kind, name)
+);
+
 -- BETA. Automations: a turn that runs without anyone typing.
 --
 -- Deliberately the smallest thing that is honestly a scheduled turn: a prompt,
@@ -257,6 +283,17 @@ CREATE TABLE IF NOT EXISTS automations (
     last_summary  TEXT,
     last_conversation_id TEXT,    -- the transcript it wrote; not a foreign key,
                                   -- the record outlives a deleted conversation
+    -- Which saved capability profile (backend/capabilities.py) this run's own
+    -- conversation is scoped to. NULL: every enabled connector, same as before
+    -- this column existed. Not a foreign key to capability_profiles(name) --
+    -- a deleted profile must fail the run loudly, not silently widen a
+    -- deliberately narrowed automation back to full access.
+    capability_profile   TEXT,
+    -- Consecutive `error` runs, reset to 0 by the next `ok`. Backs off
+    -- next_run_at so a permanently broken automation is not retried every
+    -- interval forever; a `blocked` run neither increments nor resets this,
+    -- because a correct denial is not a failure to route around.
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, next_run_at);

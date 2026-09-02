@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Icon from '../components/Icon.jsx'
-import Markdown from '../components/Markdown.jsx'
+import Markdown from '../components/markdown/Markdown.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
 import ConfirmModal from '../components/ConfirmModal.jsx'
 import PlusMenu from '../components/PlusMenu.jsx'
@@ -438,8 +438,8 @@ export default function Chat() {
   const {
     health, refreshHealth, setView, toast, registerChat,
     conversations, refreshConvs, activeId, setActiveId, setRenaming,
-    refreshCaps,
-    workspace, setWorkspace,
+    refreshCaps, setCapabilitiesTab,
+    workspace, setWorkspace, notify,
   } = useApp()
 
   const [items, setItems] = useState([])
@@ -468,6 +468,23 @@ export default function Chat() {
   const [atBottom, setAtBottom] = useState(true)
   const [lastSent, setLastSent] = useState('')
   const [pinsOpen, setPinsOpen] = useState(true)
+  /* Health banners the user has waved away. Keyed by a signature of what the
+     banner says, not just "hidden": a connector that starts failing for a new
+     reason, or a different connector going down, is a new fact worth showing
+     again. Persisted so a reload does not resurrect one the user already
+     dismissed for a condition that has not changed. */
+  const [dismissedBanners, setDismissedBanners] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('psok.dismissed.v1') || '[]')) }
+    catch { return new Set() }
+  })
+  const dismissBanner = useCallback((sig) => {
+    setDismissedBanners((prev) => {
+      const next = new Set(prev)
+      next.add(sig)
+      try { localStorage.setItem('psok.dismissed.v1', JSON.stringify([...next])) } catch { /* private mode */ }
+      return next
+    })
+  }, [])
 
   const abortRef = useRef(null)
   const scrollRef = useRef(null)
@@ -565,6 +582,10 @@ export default function Chat() {
     setTurnState('idle')
     setStopping(false)
     setTool(null)
+    // `settle` clears this and `done` always goes through `settle` -- but a
+    // stream that closes with no terminal frame lands here instead, and used
+    // to leave the last status ("Running view_file") behind a finished turn.
+    setStatus(null)
     setPending([])
     setElsewhere([])
     refreshConvs()
@@ -572,7 +593,7 @@ export default function Chat() {
     // failure only become knowable once one has run.
     refreshHealth()
     refreshCaps()
-  }, [pushAssistant, refreshConvs, refreshHealth, refreshCaps, setTool])
+  }, [pushAssistant, refreshConvs, refreshHealth, refreshCaps, setTool, setStatus])
 
   /* `done`, `guard` and `error` end the turn as far as anyone typing is
      concerned, even though the stream stays open behind them: memory extraction
@@ -589,6 +610,17 @@ export default function Chat() {
     setStopping(false)
     refreshConvs()
   }, [pushAssistant, setTool, setStatus, refreshConvs])
+
+  /* One desktop notification for a finished turn, titled by the conversation it
+     belongs to. The store decides whether to actually show it (opted in,
+     permission granted, tab in the background) -- here we only say what it says
+     and what clicking it does: come back to this conversation. */
+  const notifyDone = useCallback((title, body) => {
+    const cid = runningRef.current
+    const conv = conversations.find((c) => c.id === cid)
+    const heading = conv?.title ? `${title} — ${conv.title}` : title
+    notify(heading, body || '', () => { if (cid) selectConversation(cid) })
+  }, [notify, conversations, selectConversation])
 
   const onEvent = useCallback((evt) => {
     switch (evt.type) {
@@ -705,13 +737,18 @@ export default function Chat() {
             durationMs: evt.duration_ms,
           }])
         }
+        notifyDone('Reply ready', evt.text)
         settle()
         break
-      case 'guard': pushNote('guard', evt.reason); settle(); break
-      case 'error': pushNote('error', evt.message); settle(); break
+      case 'guard': pushNote('guard', evt.reason); notifyDone('Turn stopped', evt.reason); settle(); break
+      case 'error': pushNote('error', evt.message); notifyDone('Turn failed', evt.message); settle(); break
       // Not terminal: the loop is continuing a turn that came back empty or
       // truncated, and the composer stays disabled while it does.
       case 'warning': pushNote('warning', evt.message); break
+      // A keepalive during a long tool call. Nothing to render -- its whole job
+      // is done by having arrived: the `beat()` wrapping onEvent has already
+      // reset the silence watchdog, and the byte kept the socket alive.
+      case 'ping': break
       default:
         /* A frame added on the server used to vanish here without trace, which
            is how you spend an afternoon wondering why the backend's new event
@@ -719,7 +756,7 @@ export default function Chat() {
         console.warn('[psok] unhandled turn frame', evt.type, evt) // eslint-disable-line no-console
         break
     }
-  }, [pushAssistant, pushNote, settle, setBuffer, setReasoning, setTool, setStatus])
+  }, [pushAssistant, pushNote, settle, setBuffer, setReasoning, setTool, setStatus, notifyDone])
 
   const openTurn = useCallback(async (cid, message, mode = 'chat') => {
     const token = ++turnTokenRef.current
@@ -1061,7 +1098,18 @@ export default function Chat() {
   const pins = useMemo(() => rendered.filter((i) => i.pinned && i.text), [rendered])
 
   const isEmpty = rendered.length === 0 && turnState === 'idle'
+  /* "Nobody has signed in yet" is not a failure, and the server has said so
+     since connectors shipped -- `connectors_awaiting_sign_in` exists for
+     exactly this. The banner showed both in the same red sentence, which made
+     an ordinary un-signed-in Gmail look like a crash and made a real crash
+     look ordinary. Split, and each gets the sentence it deserves. */
+  const awaitingSignIn = health?.connectors_awaiting_sign_in ?? []
   const connectorErrors = Object.entries(health?.connector_errors ?? {})
+    .filter(([name]) => !awaitingSignIn.includes(name))
+  // A banner's signature is its content: dismissing "gmail: refused" hides that
+  // exact sentence, and a later "gmail: timed out" is a new one that shows.
+  const errorSig = `err:${connectorErrors.map(([n, e]) => `${n}=${e}`).join('|')}`
+  const signInSig = `signin:${[...awaitingSignIn].sort().join(',')}`
   const shownModel = (active?.model ?? draftModel ?? '').split('/').pop() || 'no model'
   // Follow the stream, but never yank the view away from someone reading back.
   const onScroll = useCallback(() => {
@@ -1282,13 +1330,61 @@ export default function Chat() {
           </div>
         )}
 
-        {connectorErrors.length > 0 && (
+        {connectorErrors.length > 0 && !dismissedBanners.has(errorSig) && (
           <div className="chat-banner msg-note msg-note--error">
             <Icon name="plug" size={14} />
             <span>
               {connectorErrors.map(([name, err]) => `${name}: ${String(err).slice(0, 90)}`).join(' · ')}
               {' '}— its tools are not reaching the agent.
             </span>
+            <button
+              type="button"
+              className="btn btn--small"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => { setCapabilitiesTab('connectors'); setView('capabilities') }}
+            >
+              Open connectors
+            </button>
+            <button
+              type="button"
+              className="chat-banner-dismiss"
+              title="Dismiss until this changes"
+              aria-label="Dismiss"
+              onClick={() => dismissBanner(errorSig)}
+            >
+              <Icon name="x" size={13} />
+            </button>
+          </div>
+        )}
+
+        {/* Amber, not coral, and with the one action that fixes it. A connector
+            nobody has signed in to is a switch waiting to be flipped. */}
+        {awaitingSignIn.length > 0 && !dismissedBanners.has(signInSig) && (
+          <div className="chat-banner msg-note msg-note--guard">
+            <Icon name="key" size={14} />
+            <span>
+              {awaitingSignIn.length === 1
+                ? `${awaitingSignIn[0]} is switched on but not signed in.`
+                : `${awaitingSignIn.join(', ')} are switched on but not signed in.`}
+              {' '}Their tools stay out of reach until they are.
+            </span>
+            <button
+              type="button"
+              className="btn btn--small"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => { setCapabilitiesTab('connectors'); setView('capabilities') }}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              className="chat-banner-dismiss"
+              title="Dismiss until this changes"
+              aria-label="Dismiss"
+              onClick={() => dismissBanner(signInSig)}
+            >
+              <Icon name="x" size={13} />
+            </button>
           </div>
         )}
 

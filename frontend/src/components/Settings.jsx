@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Icon from './Icon.jsx'
 import { api } from '../api.js'
 import { useApp } from '../store.jsx'
+import { forSettings } from '../nav.js'
+import { useConfirm } from './ui/ConfirmDialog.jsx'
+import Badge from './ui/Badge.jsx'
+import { useModalDismiss, onOverlayMouseDown } from '../hooks/useModalDismiss.js'
+import { useFocusTrap } from '../hooks/useFocusTrap.js'
 
 /* Settings, and only settings.
 
@@ -26,20 +31,50 @@ const SECTIONS = [
 // Every one of these is a full view in the rail. The nav links to them so that
 // looking for skills in the settings finds them, rather than finding a smaller
 // second copy.
-const PAGES = [
-  { id: 'capabilities', label: 'Skills & connectors', icon: 'grid' },
-  { id: 'automations', label: 'Automations', icon: 'clock' },
-  { id: 'memory', label: 'Memory', icon: 'spark' },
-  { id: 'tasks', label: 'Tasks', icon: 'check' },
-  { id: 'logs', label: 'Activity', icon: 'logs' },
+const PAGES = forSettings()
+
+/* The three answers, in the order they are chosen. `system` first because it
+   is the one that needs no decision — an application that opens in the wrong
+   palette at 9am is one more thing to go and configure. */
+const THEME_CHOICES = [
+  { id: 'system', label: 'Match the system', hint: 'Follows the machine’s own light or dark setting' },
+  { id: 'dark', label: 'Graphite', hint: 'The console, always' },
+  { id: 'light', label: 'Paper', hint: 'The same panel with the light on' },
 ]
 
 function General() {
-  const { health, healthError, workspace, setWorkspace } = useApp()
+  const { health, healthError, workspace, setWorkspace, theme, setTheme } = useApp()
   const [draft, setDraft] = useState(workspace || '')
 
   return (
     <div className="set-panel">
+      <h3>Appearance</h3>
+      <div className="theme-picker" role="radiogroup" aria-label="Colour theme">
+        {THEME_CHOICES.map((choice) => (
+          <button
+            key={choice.id}
+            type="button"
+            role="radio"
+            aria-checked={theme === choice.id}
+            className={`theme-swatch theme-swatch--${choice.id}${theme === choice.id ? ' is-on' : ''}`}
+            onClick={() => setTheme(choice.id)}
+          >
+            {/* The swatch is the palette itself rather than a word for it, so
+                picking one is a comparison instead of a guess. */}
+            <span className="theme-chip" aria-hidden="true">
+              <i className="theme-chip-bg" />
+              <i className="theme-chip-fg" />
+              <i className="theme-chip-live" />
+            </span>
+            <span className="theme-swatch-text">
+              <span className="theme-swatch-label">{choice.label}</span>
+              <span className="theme-swatch-hint">{choice.hint}</span>
+            </span>
+            {theme === choice.id && <Icon name="check" size={14} />}
+          </button>
+        ))}
+      </div>
+
       <h3>This machine</h3>
       <div className="set-rows">
         <div className="set-row">
@@ -71,7 +106,115 @@ function General() {
         </button>
       </div>
 
+      <IterationLimit />
+
+      <TurnNotifications />
+
     </div>
+  )
+}
+
+/* A desktop notification when a turn finishes, for the long ones you tab away
+ * from. Off by default -- it needs the browser's permission, which only a user
+ * gesture can request -- and it only fires while this tab is in the background,
+ * since a notification about the answer already on screen is just noise. */
+function TurnNotifications() {
+  const { notifyOnDone, setNotifyOnDone, toast } = useApp()
+
+  const toggle = async () => {
+    const { value, blocked } = await setNotifyOnDone(!notifyOnDone)
+    if (blocked) {
+      toast('Your browser blocked notifications — allow them for this site, then try again', 'amber')
+    } else {
+      toast(value ? 'You will be notified when a turn finishes' : 'Turn notifications off', 'ok')
+    }
+  }
+
+  return (
+    <>
+      <h3>Notifications</h3>
+      <p className="set-note">
+        A desktop notification when a turn finishes, so you can tab away from a long one.
+        Only fires while this tab is in the background; click it to jump back to the conversation.
+      </p>
+      <div className="set-rows">
+        <div className="set-row">
+          <span>
+            Notify when a turn finishes
+            <span className="set-sub">Uses your browser&apos;s notifications — it will ask permission once.</span>
+          </span>
+          <span className="set-row-tail">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={notifyOnDone}
+              className={`btn btn--small${notifyOnDone ? ' btn--primary' : ' btn--ghost'}`}
+              onClick={toggle}
+            >
+              {notifyOnDone ? 'On' : 'Off'}
+            </button>
+          </span>
+        </div>
+      </div>
+    </>
+  )
+}
+
+/* How many steps a single turn may take before it is made to wrap up.
+ *
+ * A turn spends one step per model round trip -- each tool call is a step -- so
+ * a browse-search-read-act task eats several. Too low cuts multi-step work
+ * short with "iteration limit reached"; too high lets a stuck loop run a while
+ * before the time guard stops it. The last step always forces an answer, so
+ * raising this buys more tool calls, not a longer dead end. */
+function IterationLimit() {
+  const { toast } = useApp()
+  const [value, setValue] = useState('')
+  const [bounds, setBounds] = useState({ min: 4, max: 40, default: 16 })
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api.settings()
+      .then((s) => {
+        setValue(String(s.max_iterations))
+        setBounds({ min: s.max_iterations_min, max: s.max_iterations_max, default: s.max_iterations_default })
+      })
+      .catch((err) => toast(err.message, 'bad'))
+  }, [toast])
+
+  const save = async () => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) { toast('Enter a number', 'bad'); return }
+    setSaving(true)
+    try {
+      const s = await api.updateSettings({ max_iterations: Math.round(n) })
+      setValue(String(s.max_iterations))  // reflect the server's clamp
+      toast(`Turns may now take up to ${s.max_iterations} steps`, 'ok')
+    } catch (err) { toast(err.message, 'bad') } finally { setSaving(false) }
+  }
+
+  return (
+    <>
+      <h3>Steps per turn</h3>
+      <p className="set-note">
+        How many tool calls and model round trips one message may take before the turn is made
+        to answer with what it has. Higher lets longer multi-step tasks finish;
+        lower keeps turns short. Between {bounds.min} and {bounds.max}; default {bounds.default}.
+      </p>
+      <div className="set-inline">
+        <input
+          type="number"
+          min={bounds.min}
+          max={bounds.max}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') save() }}
+        />
+        <button type="button" className="btn btn--primary btn--small" disabled={saving} onClick={save}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </>
   )
 }
 
@@ -96,6 +239,15 @@ function AddProviderForm({ preset, onDone, onCancel }) {
   const needsKey = custom || !preset.local
 
   const save = async () => {
+    // A custom entry is named after its host, and the host alone is not
+    // enough to tell two endpoints apart -- `nameFor` needs the model too, or
+    // it sends the server an empty name and the 400 that comes back names the
+    // wrong field. Caught here, before the request, so the message points at
+    // what is actually missing.
+    if (custom && !model.trim()) {
+      toast('Give it a model id — a custom provider is named from it', 'bad')
+      return
+    }
     setBusy(true)
     try {
       const result = await api.addProvider({
@@ -197,6 +349,162 @@ function nameFor(baseUrl) {
   }
 }
 
+const ROLE_META = [
+  { id: 'default', label: 'Go-to model', hint: 'The everyday default a new conversation starts on.' },
+  { id: 'fast', label: 'Fast', hint: 'The quick, cheap model — hand-offs and the memory extractor.' },
+  { id: 'heavy', label: 'Heavy', hint: 'What the fast model escalates to for hard reasoning.' },
+]
+
+/* Assign a provider and model to each job (the `tiers:` block of providers.yaml).
+ *
+ * The model field is a datalist, not a plain input: choosing a provider fetches
+ * what its own API lists right now, so the user picks from what the endpoint
+ * actually serves instead of retyping an id from a docs page. Free-flagged
+ * models (OpenRouter pricing, a `:free` suffix) sort first and are marked. The
+ * field still takes free text, because a brand-new model id beats a stale list. */
+function RolesEditor({ providers, defaults, unavailable }) {
+  const { toast, refreshHealth } = useApp()
+  const [tiers, setTiers] = useState({})
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(async () => {
+    try { setTiers((await api.tiers()).tiers || {}) } catch (err) { toast(err.message, 'bad') }
+  }, [toast])
+  useEffect(() => { load() }, [load])
+
+  const save = async (role, provider, model) => {
+    if (!provider || !model?.trim()) return
+    setBusy(role)
+    try {
+      await api.setTier(role, provider, model.trim())
+      await load()
+      refreshHealth?.()
+      toast(`${role} → ${provider} · ${model.trim()}`, 'ok')
+    } catch (err) { toast(err.message, 'bad') } finally { setBusy('') }
+  }
+
+  const clear = async (role) => {
+    setBusy(role)
+    try {
+      await api.clearTier(role)
+      await load()
+      refreshHealth?.()
+      toast(`${role} unassigned — it falls back to the conversation's model`, 'ok')
+    } catch (err) { toast(err.message, 'bad') } finally { setBusy('') }
+  }
+
+  if (providers.length === 0) return null
+
+  return (
+    <>
+      <h3>Roles</h3>
+      <p className="set-note">
+        Which model does which job. The go-to model is where a new conversation starts; an
+        unassigned role falls back to the conversation&apos;s own model.
+      </p>
+      <div className="set-rows">
+        {ROLE_META.map((role) => (
+          <RoleRow
+            key={role.id}
+            role={role}
+            current={tiers[role.id]}
+            providers={providers}
+            defaults={defaults}
+            unavailable={unavailable}
+            busy={busy === role.id}
+            onSave={save}
+            onClear={clear}
+          />
+        ))}
+      </div>
+    </>
+  )
+}
+
+function RoleRow({ role, current, providers, defaults, unavailable, busy, onSave, onClear }) {
+  const [provider, setProvider] = useState(current?.provider || providers[0] || '')
+  const [model, setModel] = useState(current?.model || '')
+  const [models, setModels] = useState([])
+
+  // Re-sync when the saved assignment changes underneath the editor.
+  useEffect(() => {
+    setProvider(current?.provider || providers[0] || '')
+    setModel(current?.model || '')
+  }, [current, providers])
+
+  // The provider's live model list, best-effort. An endpoint that will not
+  // answer just leaves the datalist empty and the free-text field working.
+  useEffect(() => {
+    let live = true
+    if (!provider) { setModels([]); return }
+    api.providerModels(provider)
+      .then((r) => { if (live) setModels(r.models || []) })
+      .catch(() => { if (live) setModels([]) })
+    return () => { live = false }
+  }, [provider])
+
+  const listId = `models-${role.id}`
+  const dirty = provider !== (current?.provider || '') || model !== (current?.model || '')
+
+  return (
+    <div className="set-role-row">
+      <div className="set-role-head">
+        <span>{role.label}</span>
+        <span className="set-sub">{role.hint}</span>
+      </div>
+      <div className="set-role-controls">
+        <select
+          value={provider}
+          onChange={(e) => { setProvider(e.target.value); setModel(defaults[e.target.value] || '') }}
+        >
+          {providers.map((p) => (
+            <option key={p} value={p} disabled={p in unavailable}>
+              {p}{p in unavailable ? ' — not answering' : ''}
+            </option>
+          ))}
+        </select>
+        <input
+          list={listId}
+          value={model}
+          placeholder={defaults[provider] || 'model id'}
+          onChange={(e) => setModel(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && dirty) onSave(role.id, provider, model) }}
+        />
+        <datalist id={listId}>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.free ? 'free — ' : ''}{m.id}</option>
+          ))}
+        </datalist>
+        <button
+          type="button"
+          className="btn btn--small btn--primary"
+          disabled={busy || !dirty || !model.trim()}
+          onClick={() => onSave(role.id, provider, model)}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+        {current && (
+          <button
+            type="button"
+            className="btn btn--ghost btn--small"
+            disabled={busy}
+            onClick={() => onClear(role.id)}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      {models.length > 0 && (
+        <span className="set-sub">
+          {models.length} model{models.length === 1 ? '' : 's'} from its API
+          {models.some((m) => m.free) ? ` · ${models.filter((m) => m.free).length} free` : ''}
+        </span>
+      )}
+    </div>
+  )
+}
+
+
 function Models() {
   const { health, conversations, activeId, refreshConvs, refreshHealth, toast } = useApp()
   const providers = health?.providers ?? []
@@ -207,6 +515,10 @@ function Models() {
   const [catalogue, setCatalogue] = useState([])
   const [configured, setConfigured] = useState([])
   const [adding, setAdding] = useState(null)
+  // Per-provider Ping result: name -> { available, latency_ms, reason } or
+  // 'busy' while the request is in flight. Kept here rather than in the row so
+  // "Ping all" can fill every row at once.
+  const [pinged, setPinged] = useState({})
 
   const load = useCallback(async () => {
     try {
@@ -217,6 +529,30 @@ function Models() {
   }, [toast])
 
   useEffect(() => { load() }, [load])
+
+  const pingOne = useCallback(async (name) => {
+    setPinged((m) => ({ ...m, [name]: 'busy' }))
+    try {
+      const r = await api.pingProvider(name)
+      setPinged((m) => ({ ...m, [name]: r }))
+      refreshHealth?.()
+    } catch (err) {
+      setPinged((m) => ({ ...m, [name]: { available: false, reason: err.message } }))
+    }
+  }, [refreshHealth])
+
+  const pingAll = useCallback(async () => {
+    setPinged((m) => {
+      const busy = { ...m }
+      for (const p of configured) busy[p.name] = 'busy'
+      return busy
+    })
+    try {
+      const { results } = await api.pingAll()
+      setPinged(results)
+      refreshHealth?.()
+    } catch (err) { toast(err.message, 'bad') }
+  }, [configured, refreshHealth, toast])
 
   const apply = async (patch) => {
     if (!activeId) return
@@ -244,10 +580,18 @@ function Models() {
 
   return (
     <div className="set-panel">
-      <h3>Providers</h3>
+      <div className="set-head-row">
+        <h3>Providers</h3>
+        {configured.length > 0 && (
+          <button type="button" className="btn btn--ghost btn--small" onClick={pingAll}>
+            Ping all
+          </button>
+        )}
+      </div>
       <p className="set-note">
         Keys live in the OS keychain; <span className="mono">providers.yaml</span> holds only a
-        reference. A provider with no key is listed and not offered.
+        reference. A provider with no key is listed and not offered. Ping checks the endpoint
+        now, whatever the badge last remembered.
       </p>
       <div className="set-rows">
         {configured.length === 0 && <div className="set-row"><span>none configured</span></div>}
@@ -258,11 +602,27 @@ function Models() {
               <span className="set-sub">{p.default_model || 'no default model'}</span>
             </span>
             <span className="set-row-tail">
-              {!p.has_key && <span className="badge">needs a key</span>}
+              {!p.has_key && <Badge>needs a key</Badge>}
               {p.has_key && !p.available && (
-                <span className="badge" title={p.unavailable_reason}>not answering</span>
+                <Badge title={p.unavailable_reason}>not answering</Badge>
               )}
-              {p.has_key && p.available && <span className="badge">ready</span>}
+              {p.has_key && p.available && <Badge>ready</Badge>}
+              {pinged[p.name] === 'busy' && <span className="set-sub">pinging…</span>}
+              {pinged[p.name] && pinged[p.name] !== 'busy' && (
+                <Badge title={pinged[p.name].reason || undefined}>
+                  {pinged[p.name].available
+                    ? `answered${pinged[p.name].latency_ms != null ? ` · ${pinged[p.name].latency_ms}ms` : ''}`
+                    : 'no answer'}
+                </Badge>
+              )}
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                disabled={pinged[p.name] === 'busy'}
+                onClick={() => pingOne(p.name)}
+              >
+                Ping
+              </button>
               <button
                 type="button"
                 className="btn btn--ghost btn--small"
@@ -330,6 +690,8 @@ function Models() {
         </>
       )}
 
+      <RolesEditor providers={providers} defaults={defaults} unavailable={unavailable} />
+
       {active && (
         <>
           <h3>This conversation</h3>
@@ -378,7 +740,7 @@ function Permissions() {
           <div className="set-row" key={row.operation_key}>
             <span className="mono">{row.operation_key}</span>
             <span className="set-row-tail">
-              <span className="badge">{row.risk_level}</span>
+              <Badge>{row.risk_level}</Badge>
               <button
                 type="button"
                 className="btn btn--ghost btn--small"
@@ -402,22 +764,12 @@ function Permissions() {
 
 /* A destructive row that asks by asking again.
  *
- * Same shape as the rail's delete: the second click is the confirmation. A
- * modal here would be friction on a button nobody presses by accident, and an
- * undo this interface cannot honour would be a lie. The count is shown before
- * the click so "clear everything" is never a guess about how much everything
- * is. */
+ * An undo this interface cannot honour would be a lie, so this asks first --
+ * the count is shown before the click so "clear everything" is never a guess
+ * about how much everything is. */
 function DangerRow({ label, note, count, confirmLabel, onConfirm }) {
-  const [armed, setArmed] = useState(false)
   const [busy, setBusy] = useState(false)
-
-  // Disarm as soon as attention moves, so a click primed minutes ago cannot be
-  // completed by a stray one later.
-  useEffect(() => {
-    if (!armed) return undefined
-    const timer = setTimeout(() => setArmed(false), 6000)
-    return () => clearTimeout(timer)
-  }, [armed])
+  const confirm = useConfirm()
 
   return (
     <div className="set-row">
@@ -426,18 +778,24 @@ function DangerRow({ label, note, count, confirmLabel, onConfirm }) {
         <span className="set-note" style={{ display: 'block', margin: 0 }}>{note}</span>
       </span>
       <span className="set-row-tail">
-        <span className="badge">{count == null ? '—' : count}</span>
+        <Badge>{count == null ? '—' : count}</Badge>
         <button
           type="button"
-          className={armed ? 'btn btn--danger btn--small' : 'btn btn--ghost btn--small'}
+          className="btn btn--ghost btn--small"
           disabled={busy || count === 0}
           onClick={async () => {
-            if (!armed) { setArmed(true); return }
+            const ok = await confirm({
+              title: `Clear ${label.toLowerCase()}?`,
+              description: `${note} This cannot be undone.`,
+              confirmLabel,
+              tone: 'danger',
+            })
+            if (!ok) return
             setBusy(true)
-            try { await onConfirm() } finally { setBusy(false); setArmed(false) }
+            try { await onConfirm() } finally { setBusy(false) }
           }}
         >
-          {busy ? 'Clearing…' : armed ? confirmLabel : 'Clear'}
+          {busy ? 'Clearing…' : 'Clear'}
         </button>
       </span>
     </div>
@@ -466,14 +824,14 @@ function Data() {
           label="Conversations"
           note="Every conversation and its transcript. Automation runs are kept."
           count={conversations.length}
-          confirmLabel="Click again to delete all"
+          confirmLabel="Delete all"
           onConfirm={async () => { await deleteAllConversations(); refreshConvs() }}
         />
         <DangerRow
           label="Memories"
           note="Every fact PSOK has remembered about you. It stops recalling them."
           count={facts}
-          confirmLabel="Click again to forget all"
+          confirmLabel="Forget all"
           onConfirm={async () => {
             try {
               const { superseded } = await api.forgetAllMemories()
@@ -498,20 +856,18 @@ export default function Settings() {
   const { overlay, setOverlay, setView } = useApp()
   const [section, setSection] = useState('general')
   const open = overlay === 'settings'
+  const panelRef = useRef(null)
+  const close = useCallback(() => setOverlay(null), [setOverlay])
 
-  useEffect(() => {
-    if (!open) return undefined
-    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setOverlay(null) } }
-    document.addEventListener('keydown', key, true)
-    return () => document.removeEventListener('keydown', key, true)
-  }, [open, setOverlay])
+  useModalDismiss(open, close)
+  useFocusTrap(panelRef, open)
 
   if (!open) return null
   const Panel = PANELS[section] || General
 
   return (
-    <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setOverlay(null) }}>
-      <div className="settings" role="dialog" aria-modal="true" aria-label="Settings">
+    <div className="modal-overlay" onMouseDown={onOverlayMouseDown(close)}>
+      <div className="settings" ref={panelRef} role="dialog" aria-modal="true" aria-label="Settings">
         <nav className="set-nav">
           {SECTIONS.map((item) => (
             <button

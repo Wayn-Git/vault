@@ -408,8 +408,11 @@ async def test_an_unconfigured_provider_becomes_an_error_event(db):
 
     events = [e async for e in Director(registry, stream=True).run(cid, "hi")]
 
-    assert [e.type for e in events] == ["error"]
-    assert "not-a-real-provider" in events[0].data["message"]
+    # `failed` then `error`: the status frame is what an interface styles the
+    # turn with, and `error` stays the single terminal frame the stream closes on.
+    assert [e.type for e in events] == ["status", "error"]
+    assert events[0].data["state"] == "failed"
+    assert "not-a-real-provider" in events[-1].data["message"]
 
 
 def test_the_turn_stream_never_dies_without_saying_why(api, db):
@@ -431,7 +434,9 @@ def test_the_turn_stream_never_dies_without_saying_why(api, db):
                 if line.startswith("data: ")
             ]
 
-    assert [e["type"] for e in events] == ["error"]
+    assert [e["type"] for e in events] == ["status", "error"]
+    assert events[0]["state"] == "failed", "an interface styles the turn off this"
+    assert events[-1]["type"] == "error", "and closes the stream on this"
 
 
 async def test_a_streamed_answer_is_emitted_once(db):
@@ -599,6 +604,37 @@ def test_a_conversations_model_can_be_switched_after_it_starts(api, db):
         assert client.patch("/api/conversations/missing", json={"title": "x"}).status_code == 404
 
 
+def test_switching_provider_with_no_model_named_lands_on_the_new_providers_own_default(api, db):
+    """The comment directly above `update_conversation`'s validation already
+    said this was the intended behaviour: switching provider without naming a
+    model has to land on that provider's own default. The code instead did
+    `body.model or existing["model"]`, which is the *old* provider's model
+    string -- not a PLACEHOLDER_MODELS entry, so `_validate_model` let it
+    through unchanged, and the next turn against the new provider failed
+    against a model it had never heard of. The model picker triggers exactly
+    this: `ModelMenu.jsx` omits `model` from its PATCH whenever the clicked
+    provider declares no default of its own."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(api.app) as client:
+        # `configured_providers()` -- what `_validate_model` resolves a default
+        # from -- only includes providers with a resolvable key, so the target
+        # provider needs one added, the same way a real user would from
+        # Settings before it ever appears in the model picker.
+        client.post("/api/providers", json={"name": "groq", "api_key": "gsk-not-a-real-key"})
+
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+
+        patched = client.patch(f"/api/conversations/{cid}", json={"provider": "groq"})
+        assert patched.status_code == 200
+        assert patched.json()["provider"] == "groq"
+        assert patched.json()["model"] == "llama-3.3-70b-versatile", (
+            "must be groq's own declared default, not ollama's model carried across"
+        )
+
+
 def test_a_conversation_can_be_deleted_and_takes_its_scoped_rows_with_it(api, db):
     """There was no delete endpoint, so a conversation was permanent. Deleting
     one has to take the transcript with it (messages cascade) and also the two
@@ -634,6 +670,114 @@ def test_a_conversation_can_be_deleted_and_takes_its_scoped_rows_with_it(api, db
         assert count("SELECT count(*) FROM capability_state WHERE scope = ?") == 0
         assert count("SELECT count(*) FROM memory_state WHERE scope = ?") == 0
         assert count("SELECT count(*) FROM memories WHERE conversation_id = ?") == 1
+
+
+def test_a_capability_profile_can_be_saved_applied_and_deleted_over_http(api, db):
+    """End to end through the API, not just the service: saving snapshots the
+    conversation's connectors, applying makes them match live (not just in the
+    DB), and a profile a later connector never saw turns that connector off."""
+    from fastapi.testclient import TestClient
+
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("memory")
+    add_from_catalogue("fetch")
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+
+        assert client.post(
+            "/api/capabilities/connector/memory",
+            json={"enabled": True, "conversation_id": cid},
+        ).status_code == 200
+
+        assert client.post(
+            "/api/capabilities/profiles", json={"name": "memory-only", "conversation_id": cid}
+        ).status_code == 200
+
+        profiles = client.get("/api/capabilities/profiles").json()
+        assert [p["name"] for p in profiles] == ["memory-only"]
+        assert profiles[0]["on_count"] == 1
+        assert profiles[0]["total_count"] == 2
+
+        other = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+        client.post(
+            "/api/capabilities/connector/fetch",
+            json={"enabled": True, "conversation_id": other},
+        )
+
+        applied = client.post(
+            "/api/capabilities/profiles/memory-only/apply", json={"conversation_id": other}
+        )
+        assert applied.status_code == 200
+        assert applied.json()["on"] == 1
+        assert sorted(applied.json()["changed"]) == ["fetch", "memory"]
+
+        state = client.get(f"/api/capabilities?conversation_id={other}").json()
+        by_name = {c["name"]: c["enabled"] for c in state["connectors"]}
+        assert by_name["memory"] is True
+        assert by_name["fetch"] is False
+
+        assert client.delete("/api/capabilities/profiles/memory-only").status_code == 200
+        assert client.delete("/api/capabilities/profiles/memory-only").status_code == 404
+        assert client.get("/api/capabilities/profiles").json() == []
+
+
+def test_applying_a_profile_does_not_reconnect_a_connector_disabled_in_mcp_yaml(api, db):
+    """`before` used to read `Capability.enabled` (config.enabled AND the raw
+    toggle) while the comparison against `after` read the raw toggle alone.
+    For a connector with `enabled: false` in mcp.yaml whose capability-state
+    row was stale at `True`, that asymmetry misclassified an actually-unchanged
+    toggle as "changed" and reconnected a connector the user had
+    administratively switched off."""
+    from fastapi.testclient import TestClient
+
+    from backend.mcp.commands import add_from_catalogue
+    from backend.mcp.config import add_server, load_servers
+
+    add_from_catalogue("memory")
+    disabled = load_servers()["memory"]
+    disabled.enabled = False
+    add_server(disabled)
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+        # Stale capability-state row: switched on before the connector was
+        # disabled in mcp.yaml, matching the scenario the bug needs.
+        client.post(
+            "/api/capabilities/connector/memory",
+            json={"enabled": True, "conversation_id": cid},
+        )
+        client.post(
+            "/api/capabilities/profiles", json={"name": "p", "conversation_id": cid}
+        )
+
+        applied = client.post(
+            "/api/capabilities/profiles/p/apply", json={"conversation_id": cid}
+        )
+        assert applied.status_code == 200
+        assert "memory" not in applied.json()["changed"], (
+            "the toggle did not change, so nothing should have been reconnected"
+        )
+
+
+def test_applying_an_unknown_profile_is_a_404_over_http(api, db):
+    from fastapi.testclient import TestClient
+
+    with TestClient(api.app) as client:
+        cid = client.post(
+            "/api/conversations", json={"provider": "ollama", "model": "qwen2.5:7b"}
+        ).json()["id"]
+        resp = client.post(
+            "/api/capabilities/profiles/never-saved/apply", json={"conversation_id": cid}
+        )
+        assert resp.status_code == 404
 
 
 def test_deleting_a_conversation_is_refused_while_its_turn_is_running(api, db):
@@ -911,23 +1055,232 @@ def test_an_automations_gate_is_its_own_and_not_the_shared_one(db):
 
 
 def test_an_automation_will_not_run_faster_than_the_floor(db):
-    """"Every minute" is not an automation, it is a busy loop wearing a
-    schedule, and it would have this machine talking to a model 1440 times a
-    day by accident."""
-    from backend.automation import AutomationError, AutomationRepository
+    """The floor is one minute, and below it there is no schedule left.
+
+    It was five, chosen against a thirty-second tick: the two together made the
+    tightest possible automation fire somewhere between five and six minutes
+    from now, which is not responsive enough for anything a person is waiting
+    on. One minute is still six ticks, so an interval is honoured rather than
+    approximated -- but zero and negative are not intervals at all, and a
+    sub-tick one would be a busy loop wearing a schedule.
+    """
+    from backend.automation import MIN_MINUTES, AutomationError, AutomationRepository
+
+    assert MIN_MINUTES == 1, "the floor this test pins"
 
     repo = AutomationRepository(db)
     with pytest.raises(AutomationError):
-        repo.create("too eager", "do it", 1)
+        repo.create("no interval at all", "do it", 0)
+    with pytest.raises(AutomationError):
+        repo.create("backwards", "do it", -5)
     with pytest.raises(AutomationError):
         repo.create("too patient", "do it", 60 * 24 * 400)
     with pytest.raises(AutomationError):
         repo.create("hollow", "   ", 60)
 
+    # The floor itself is allowed, and is scheduled forward like any other.
+    eager = repo.create("as often as PSOK will", "do it", MIN_MINUTES)
+    assert eager.every_minutes == MIN_MINUTES
+    assert eager.next_run_at > _utcnow_iso()
+
     made = repo.create("fine", "do it", 60)
     # Scheduled forward, so creating one never fires it before it is re-read.
     assert made.next_run_at > _utcnow_iso()
     assert repo.due() == []
+
+
+def test_a_run_of_errors_backs_off_and_one_ok_resets_it(db):
+    """A provider that is down does not un-break itself between one interval
+    and the next, so retrying every 15 minutes forever just spends a turn (and,
+    on a flaky provider, an announcement of failure) each time nobody is
+    reading the record. The backoff must still leave a next run in the future,
+    and it must be undone the moment a run actually succeeds."""
+    from backend.automation import MAX_MINUTES, AutomationRepository
+
+    repo = AutomationRepository(db)
+    automation = repo.create("flaky", "do it", 15)
+
+    for expected_failures in (1, 2, 3):
+        repo.record(
+            automation.id, status="error", summary="boom",
+            conversation_id=None, every_minutes=15,
+        )
+        row = repo.get(automation.id)
+        assert row.consecutive_failures == expected_failures
+        assert f"failed {expected_failures} time" in row.last_summary
+
+    third_delay = _minutes_between(row.last_run_at, row.next_run_at)
+    assert third_delay == 15 * 2**3, third_delay  # geometric, not linear
+
+    # An automation whose own interval is already close to the ceiling must
+    # still never be pushed out past it, however many times it has failed.
+    slow = repo.create("almost daily-max already", "do it", MAX_MINUTES)
+    for _ in range(3):
+        repo.record(
+            slow.id, status="error", summary="boom",
+            conversation_id=None, every_minutes=MAX_MINUTES,
+        )
+    capped = repo.get(slow.id)
+    assert _minutes_between(capped.last_run_at, capped.next_run_at) == MAX_MINUTES
+
+    repo.record(
+        automation.id, status="ok", summary="fine now", conversation_id=None, every_minutes=15
+    )
+    healed = repo.get(automation.id)
+    assert healed.consecutive_failures == 0
+    assert _minutes_between(healed.last_run_at, healed.next_run_at) == 15
+
+
+def test_a_blocked_run_does_not_back_off_or_reset(db):
+    """Needing an approval is not a failure to retry past, and it is not
+    progress either -- backing it off would read as PSOK giving up on
+    approval rather than waiting for the user to grant it."""
+    from backend.automation import AutomationRepository
+
+    repo = AutomationRepository(db)
+    automation = repo.create("waits for permission", "do it", 15)
+    repo.record(
+        automation.id, status="error", summary="boom", conversation_id=None, every_minutes=15
+    )
+    assert repo.get(automation.id).consecutive_failures == 1
+
+    repo.record(
+        automation.id, status="blocked", summary="needs permission for write_file",
+        conversation_id=None, every_minutes=15,
+    )
+    row = repo.get(automation.id)
+    assert row.consecutive_failures == 1, "a blocked run neither climbs nor resets the count"
+    assert _minutes_between(row.last_run_at, row.next_run_at) == 15, (
+        "the plain interval, no backoff"
+    )
+
+
+def _minutes_between(a: str, b: str) -> int:
+    from backend.automation import parse_iso
+
+    return round((parse_iso(b) - parse_iso(a)).total_seconds() / 60)
+
+
+def test_an_automation_scoped_to_a_profile_only_ever_sees_that_profiles_tools(db):
+    """The point of per-automation scoping: a "check inbox" automation must
+    not also be handed GitHub, Spotify, LinkedIn and a browser just because
+    those connectors happen to be enabled globally -- that is the exact
+    "too many tools" complaint this exists to fix."""
+    import asyncio
+
+    from backend.agent.director import Event
+    from backend.automation import AutomationRepository, run_once
+    from backend.capabilities import CapabilityService, Kind
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("github")
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.set_enabled(Kind.CONNECTOR, "github", True)
+    service.set_enabled(Kind.CONNECTOR, "memory", False)
+    service.save_profile("github-only")
+    # Both look on globally by the time the automation actually runs.
+    service.set_enabled(Kind.CONNECTOR, "memory", True)
+
+    repo = AutomationRepository(db)
+    automation = repo.create(
+        "check github", "go", 15, provider="nvidia", model="m",
+        capability_profile="github-only",
+    )
+    seen: dict[str, bool | None] = {}
+
+    class RecordsCapabilityState:
+        def __init__(self, _gate):
+            pass
+
+        async def run(self, conversation_id, message):
+            seen["github"] = service.is_enabled(Kind.CONNECTOR, "github", conversation_id)
+            seen["memory"] = service.is_enabled(Kind.CONNECTOR, "memory", conversation_id)
+            yield Event("done", {"text": "ok"})
+
+    asyncio.run(run_once(automation, director_for=RecordsCapabilityState, repo=repo))
+
+    assert seen == {"github": True, "memory": False}, seen
+    assert repo.get(automation.id).last_status == "ok"
+
+
+def test_an_automation_whose_profile_was_deleted_fails_before_a_director_is_built(db):
+    """Running unscoped by silent fallback would hand a deliberately-narrowed
+    automation every connector again the moment its profile disappeared --
+    a bigger surprise than simply not running until someone notices and
+    re-points it."""
+    import asyncio
+
+    from backend.automation import AutomationRepository, run_once
+
+    repo = AutomationRepository(db)
+    automation = repo.create(
+        "check github", "go", 15, provider="nvidia", model="m",
+        capability_profile="never-saved",
+    )
+
+    def must_not_be_called(_gate):
+        raise AssertionError("a missing profile must fail before a director is built")
+
+    result = asyncio.run(run_once(automation, director_for=must_not_be_called, repo=repo))
+
+    assert result["status"] == "error"
+    assert "never-saved" in result["summary"]
+    after = repo.get(automation.id)
+    assert after.last_status == "error"
+    assert after.consecutive_failures == 1
+
+
+def test_an_automation_with_no_provider_set_honours_the_configured_default_tier(
+    db, monkeypatch, tmp_path
+):
+    """A user who has named a `default:` tier gets a specific answer to "which
+    provider does a plain turn use" -- an automation left to pick for itself
+    must land on the same one, not on whichever provider happens to sort first
+    or, as this used to hardcode, whichever one happens to be named "nvidia"
+    while the user's own configured default sits unused."""
+    import asyncio
+
+    from backend.agent.director import Event
+    from backend.automation import AutomationRepository, run_once
+    from backend.config import paths
+    from backend.db.repositories import ConversationRepository
+
+    monkeypatch.setenv("GROQ_KEY", "g")
+    monkeypatch.setenv("NVIDIA_KEY", "n")
+    paths().ensure()
+    paths().providers_yaml.write_text(
+        """
+providers:
+  - name: nvidia
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_KEY
+    default_model: nvidia/nemotron-3-super-120b-a12b
+  - name: groq
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_KEY
+    default_model: openai/gpt-oss-120b
+tiers:
+  default: {provider: groq, model: openai/gpt-oss-120b}
+"""
+    )
+
+    repo = AutomationRepository(db)
+    automation = repo.create("no provider set", "go", 15)
+
+    class SaysDone:
+        def __init__(self, _gate):
+            pass
+
+        async def run(self, conversation_id, message):
+            yield Event("done", {"text": "done"})
+
+    result = asyncio.run(run_once(automation, director_for=SaysDone, repo=repo))
+
+    assert result["status"] == "ok"
+    conversation = ConversationRepository(db).get(result["conversation_id"])
+    assert conversation["provider"] == "groq", conversation["provider"]
+    assert conversation["model"] == "openai/gpt-oss-120b"
 
 
 def _utcnow_iso() -> str:
@@ -1565,17 +1918,22 @@ async def test_switching_a_connector_on_starts_it_and_says_what_happened(api, db
                 return ToolResult.ok("ok")
 
             self.connections[config.name] = _AlwaysConnected(tools=[1, 2, 3])
-            self.registry.register(
-                Tool(
-                    name=f"navigate__mcp__{config.name}",
-                    description="",
-                    parameters={},
-                    handler=handler,
-                    risk=RiskLevel.MEDIUM,
-                    source=ToolSource.MCP,
-                    server_name=config.name,
+            # Three, because three is what this fake claims to serve. The count
+            # a row reports is read off the registry now -- registering one tool
+            # and returning 3 was the fake describing a connector that could not
+            # exist.
+            for verb in ("navigate", "click", "screenshot"):
+                self.registry.register(
+                    Tool(
+                        name=f"{verb}__mcp__{config.name}",
+                        description="",
+                        parameters={},
+                        handler=handler,
+                        risk=RiskLevel.MEDIUM,
+                        source=ToolSource.MCP,
+                        server_name=config.name,
+                    )
                 )
-            )
             return 3
 
         async def disconnect_server(self, name):

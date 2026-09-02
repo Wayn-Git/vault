@@ -118,15 +118,22 @@ export function SkeletonView({ rows = 5, aside = false }) {
    that appears at four seconds is the page telling you it knows it is slow. */
 function useElapsed(since) {
   const [now, setNow] = useState(() => Date.now())
+  // Keyed on `since`, so pressing "Try again" restarts the count rather than
+  // continuing to report how long ago the *first* attempt began.
   useEffect(() => {
+    setNow(Date.now())
     const tick = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(tick)
-  }, [])
-  return Math.max(0, Math.round((now - since) / 1000))
+  }, [since])
+  // Derived, never read from a ref: render itself does not touch the clock.
+  return since ? Math.max(0, Math.round((now - since) / 1000)) : 0
 }
 
 export function BootScreen({ server, onRetry }) {
-  const seconds = useElapsed(server.since || Date.now())
+  // `server.since ?? Date.now()` read the clock during render, which makes the
+  // component impure and the elapsed count restart on every re-render. The
+  // hook holds the fallback instead, where it is read once.
+  const seconds = useElapsed(server.since)
   const down = server.phase === 'down'
   const slow = seconds >= 4
 

@@ -216,5 +216,6 @@ def initialize(
             reasoning=False,
             context_window=config.context_window or 1_000_000,
             max_tools=config.max_tools,
+            tokens_per_minute=config.tokens_per_minute,
         ),
     )

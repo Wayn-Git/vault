@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
+import { MOD_LABEL } from '../keys.js'
 import { SkeletonRows } from '../components/Skeleton.jsx'
 
 /* Mail, as a place rather than as fifteen tools.
@@ -81,7 +82,7 @@ function Reply({ threadId, onSent }) {
         }}
       />
       <div className="mail-reply-actions">
-        <span className="empty-note">⌘↵ to send</span>
+        <span className="empty-note"><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">Enter</kbd> to send</span>
         <button
           type="button"
           className="btn btn--primary btn--small"
@@ -111,27 +112,42 @@ export default function Mail() {
 
   const query = search.trim() || box
 
+  // Which request is the current one. Typing in the search box fires a new
+  // `load()` on every keystroke (below, debounced) and clicking through
+  // mailboxes fires one per click -- an older response landing after a newer
+  // one used to overwrite the rows for the box now showing with whatever the
+  // previous query returned.
+  const loadToken = useRef(0)
+
   const load = useCallback(async () => {
-    setError(null)
+    const token = ++loadToken.current
     try {
       const [list, who] = await Promise.all([
         api.mailThreads({ q: query, limit: 30 }),
         api.mailAccount(),
       ])
+      if (loadToken.current !== token) return
       setRows(list)
       setAccount(who)
+      setError(null)
     } catch (err) {
+      if (loadToken.current !== token) return
       // A 409 here is the ordinary "nobody is signed in" case and carries the
       // sentence the server wants shown, so it is the page's content rather
       // than a toast that disappears before it is read.
       setError(err.message)
       setRows([])
     } finally {
-      setLoaded(true)
+      if (loadToken.current === token) setLoaded(true)
     }
   }, [query])
 
-  useEffect(() => { load() }, [load])
+  // Every keystroke firing a request is what makes the race above worth
+  // hitting in practice; the debounce is what makes it rare, not the fix.
+  useEffect(() => {
+    const timer = setTimeout(load, search ? 300 : 0)
+    return () => clearTimeout(timer)
+  }, [load, search])
 
   useEffect(() => {
     if (!open) { setThread(null); return undefined }
@@ -211,13 +227,32 @@ export default function Mail() {
                   : active.blurb}
               </div>
 
-              <input
-                className="mail-search"
-                value={search}
-                placeholder="Search mail — from:someone, subject:invoice"
-                aria-label="Search mail"
-                onChange={(e) => { setSearch(e.target.value); setOpen(null) }}
-              />
+              {/* The same search control the log uses. It was a bare `<input>`
+                  with a width and a margin and no other styling, so it rendered
+                  as the browser's default box in the middle of a designed page
+                  — and had no way to clear itself. */}
+              <div className="inline-search mail-search">
+                <Icon name="search" size={13} />
+                <input
+                  value={search}
+                  placeholder="Search mail — from:someone, subject:invoice"
+                  aria-label="Search mail"
+                  onChange={(e) => { setSearch(e.target.value); setOpen(null) }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape' && search) { e.stopPropagation(); setSearch(''); setOpen(null) }
+                  }}
+                />
+                {search && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    aria-label="Clear the search"
+                    onClick={() => { setSearch(''); setOpen(null) }}
+                  >
+                    <Icon name="x" size={13} />
+                  </button>
+                )}
+              </div>
 
               {!loaded && <SkeletonRows rows={6} controls={2} />}
 
@@ -265,47 +300,53 @@ export default function Mail() {
                       <div className="server-target mail-snippet">{row.snippet}</div>
                     </button>
 
-                    <div className="task-actions">
-                      <button
-                        type="button"
-                        className={`icon-btn task-star${row.starred ? ' is-on' : ''}`}
-                        disabled={busyId === row.id}
-                        title={row.starred ? 'Unstar' : 'Star'}
-                        aria-pressed={row.starred}
-                        aria-label={`Star ${row.subject}`}
-                        onClick={() => act(
-                          row,
-                          row.starred ? { remove: ['STARRED'] } : { add: ['STARRED'] },
-                          row.starred ? 'Unstarred' : 'Starred',
+                    {/* Star/read/archive all call the same Gmail modify
+                        scope Reply's send check guards two lines below --
+                        gated the same way, on the account this sign-in
+                        actually granted rather than assumed. */}
+                    {account?.can_modify !== false && (
+                      <div className="task-actions">
+                        <button
+                          type="button"
+                          className={`icon-btn task-star${row.starred ? ' is-on' : ''}`}
+                          disabled={busyId === row.id}
+                          title={row.starred ? 'Unstar' : 'Star'}
+                          aria-pressed={row.starred}
+                          aria-label={`Star ${row.subject}`}
+                          onClick={() => act(
+                            row,
+                            row.starred ? { remove: ['STARRED'] } : { add: ['STARRED'] },
+                            row.starred ? 'Unstarred' : 'Starred',
+                          )}
+                        >
+                          <Icon name="star" size={14} />
+                        </button>
+                        {row.unread && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            disabled={busyId === row.id}
+                            title="Mark read"
+                            aria-label={`Mark ${row.subject} read`}
+                            onClick={() => act(row, { remove: ['UNREAD'] }, 'Marked read')}
+                          >
+                            <Icon name="check" size={14} />
+                          </button>
                         )}
-                      >
-                        <Icon name="star" size={14} />
-                      </button>
-                      {row.unread && (
-                        <button
-                          type="button"
-                          className="icon-btn"
-                          disabled={busyId === row.id}
-                          title="Mark read"
-                          aria-label={`Mark ${row.subject} read`}
-                          onClick={() => act(row, { remove: ['UNREAD'] }, 'Marked read')}
-                        >
-                          <Icon name="check" size={14} />
-                        </button>
-                      )}
-                      {row.labels?.includes('INBOX') && (
-                        <button
-                          type="button"
-                          className="icon-btn"
-                          disabled={busyId === row.id}
-                          title="Archive"
-                          aria-label={`Archive ${row.subject}`}
-                          onClick={() => act(row, { remove: ['INBOX'] }, 'Archived')}
-                        >
-                          <Icon name="archive" size={14} />
-                        </button>
-                      )}
-                    </div>
+                        {row.labels?.includes('INBOX') && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            disabled={busyId === row.id}
+                            title="Archive"
+                            aria-label={`Archive ${row.subject}`}
+                            onClick={() => act(row, { remove: ['INBOX'] }, 'Archived')}
+                          >
+                            <Icon name="archive" size={14} />
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     {isOpen && (
                       <div className="mail-thread">

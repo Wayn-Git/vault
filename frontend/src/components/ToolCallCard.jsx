@@ -37,7 +37,7 @@ export default function ToolCallCard({ call, running }) {
               </>
             )}
             {running && (
-              <span className="tool-block-label" style={{ color: 'var(--clay)' }}>
+              <span className="tool-block-label" style={{ color: 'var(--confirm)' }}>
                 awaiting completion…
               </span>
             )}

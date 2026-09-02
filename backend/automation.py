@@ -34,16 +34,27 @@ from backend.db.connection import get_connection
 
 log = logging.getLogger(__name__)
 
-# Below this an "automation" is a busy loop wearing a schedule.
-MIN_MINUTES = 5
+# Below this an "automation" is a busy loop wearing a schedule. One minute, not
+# five: five was chosen against a runner that woke every thirty seconds, so the
+# floor and the tick together made "as often as possible" mean "somewhere
+# between five and six minutes from now", which is not a schedule anyone can
+# use for anything that is meant to feel responsive. A minute is still far above
+# the tick, so the guarantee the old floor was protecting -- that an interval is
+# honoured rather than approximated -- survives at the tighter number.
+MIN_MINUTES = 1
 MAX_MINUTES = 60 * 24 * 30
 
 # How often the runner wakes to look for due work. The check is one indexed
-# read, so this is cheap; it also bounds how late a run can be.
-TICK_SECONDS = 30
+# read, so this is cheap; it also bounds how late a run can be -- which is the
+# reason it came down from thirty seconds: a run due now waited up to half a
+# minute for nothing, and on a one-minute interval that is a third of the period
+# spent asleep.
+TICK_SECONDS = 10
 
 # An automation that hangs must not wedge the runner for the rest of the session.
-RUN_TIMEOUT_SECONDS = 300
+# Three minutes rather than five: the runner is serial, so this is also how long
+# one stuck automation can hold up every other one that comes due behind it.
+RUN_TIMEOUT_SECONDS = 180
 
 # How many past runs of one automation to keep. Enough to compare a failure
 # against the run before it, which is the usual reason to look at all, without
@@ -78,6 +89,8 @@ class Automation:
     last_status: str | None
     last_summary: str | None
     last_conversation_id: str | None
+    capability_profile: str | None
+    consecutive_failures: int
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Automation:
@@ -94,6 +107,8 @@ class Automation:
             last_status=row["last_status"],
             last_summary=row["last_summary"],
             last_conversation_id=row["last_conversation_id"],
+            capability_profile=row["capability_profile"],
+            consecutive_failures=row["consecutive_failures"],
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -110,6 +125,8 @@ class Automation:
             "last_status": self.last_status,
             "last_summary": self.last_summary,
             "last_conversation_id": self.last_conversation_id,
+            "capability_profile": self.capability_profile,
+            "consecutive_failures": self.consecutive_failures,
         }
 
 
@@ -131,6 +148,7 @@ class AutomationRepository:
         model: str | None = None,
         enabled: bool = True,
         first_run: datetime | None = None,
+        capability_profile: str | None = None,
     ) -> Automation:
         clean_name = " ".join(name.split())
         clean_prompt = prompt.strip()
@@ -140,15 +158,25 @@ class AutomationRepository:
             raise AutomationError("an automation with no prompt has nothing to run")
         if not MIN_MINUTES <= every_minutes <= MAX_MINUTES:
             raise AutomationError(
-                f"the interval must be between {MIN_MINUTES} minutes and 30 days"
+                f"the interval must be between {MIN_MINUTES} minute"
+                f"{'' if MIN_MINUTES == 1 else 's'} and 30 days"
             )
         # Scheduled forward by default: creating one must not fire it that
         # second, which is how a mistyped prompt runs before it is re-read.
         due = first_run or (_now() + timedelta(minutes=every_minutes))
         cursor = self.conn.execute(
             "INSERT INTO automations (name, prompt, every_minutes, enabled, provider, model,"
-            " next_run_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (clean_name, clean_prompt, every_minutes, int(enabled), provider, model, _iso(due)),
+            " next_run_at, capability_profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                clean_name,
+                clean_prompt,
+                every_minutes,
+                int(enabled),
+                provider,
+                model,
+                _iso(due),
+                capability_profile,
+            ),
         )
         self.conn.commit()
         return self.get(cursor.lastrowid)  # type: ignore[return-value]
@@ -176,13 +204,22 @@ class AutomationRepository:
         ]
 
     def update(self, automation_id: int, **fields: Any) -> Automation | None:
-        allowed = {"name", "prompt", "every_minutes", "enabled", "provider", "model"}
+        allowed = {
+            "name",
+            "prompt",
+            "every_minutes",
+            "enabled",
+            "provider",
+            "model",
+            "capability_profile",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if "every_minutes" in updates and not (
             MIN_MINUTES <= updates["every_minutes"] <= MAX_MINUTES
         ):
             raise AutomationError(
-                f"the interval must be between {MIN_MINUTES} minutes and 30 days"
+                f"the interval must be between {MIN_MINUTES} minute"
+                f"{'' if MIN_MINUTES == 1 else 's'} and 30 days"
             )
         if "enabled" in updates:
             updates["enabled"] = int(updates["enabled"])
@@ -229,16 +266,46 @@ class AutomationRepository:
         Rescheduled from now rather than from the last due time on purpose: a
         server that was off for a day should not come back and fire twenty-four
         catch-up runs of an hourly automation.
+
+        `status == "error"` backs the next run off geometrically, capped at
+        `MAX_MINUTES` -- a permanently broken automation must not keep coming
+        due every interval forever, spending a turn (and, on an unreliable
+        provider, an announcement of failure) each time nobody reads the
+        record. `"ok"` resets the count. `"blocked"` touches neither: an
+        unattended turn correctly refusing to do something it was never
+        approved for is not a failure to retry past, and backing it off would
+        read as PSOK giving up on approval rather than waiting for it.
         """
+        previous = self.conn.execute(
+            "SELECT consecutive_failures FROM automations WHERE id = ?", (automation_id,)
+        ).fetchone()
+        failures = previous["consecutive_failures"] if previous else 0
+
+        if status == "error":
+            failures += 1
+            delay = min(every_minutes * (2 ** min(failures, 6)), MAX_MINUTES)
+            hours = delay / 60
+            summary = (
+                f"{summary[:360]} (failed {failures} time{'s' if failures != 1 else ''} in a"
+                f" row, retrying in {hours:.1f}h)"
+            )
+        elif status == "ok":
+            failures = 0
+            delay = every_minutes
+        else:  # blocked
+            delay = every_minutes
+
         self.conn.execute(
             "UPDATE automations SET last_status = ?, last_summary = ?,"
-            " last_conversation_id = ?, last_run_at = ?, next_run_at = ? WHERE id = ?",
+            " last_conversation_id = ?, last_run_at = ?, next_run_at = ?,"
+            " consecutive_failures = ? WHERE id = ?",
             (
                 status,
                 summary[:400],
                 conversation_id,
                 _iso(_now()),
-                _iso(_now() + timedelta(minutes=every_minutes)),
+                _iso(_now() + timedelta(minutes=delay)),
+                failures,
                 automation_id,
             ),
         )
@@ -309,7 +376,18 @@ async def run_once(
                 every_minutes=automation.every_minutes,
             )
             return {"status": "error", "summary": "no provider is configured"}
-        provider = "nvidia" if "nvidia" in providers else sorted(providers)[0]
+        # The user's own `default:` tier, when they have named one -- an
+        # automation created with no provider should land on the same
+        # provider a plain chat turn would, not on whichever one happens to
+        # sort first (or, as this used to hardcode, whichever one happens to
+        # be named "nvidia") while a configured default sits unused.
+        from backend.config import load_tiers
+
+        default_tier = load_tiers().get("default")
+        if default_tier and default_tier.provider in providers:
+            provider = default_tier.provider
+        else:
+            provider = sorted(providers)[0]
 
     # Outside the branch above on purpose: an automation created with a provider
     # but no model wrote the literal string "default" onto its conversation, and
@@ -323,6 +401,31 @@ async def run_once(
         f"{automation.name} · automation",
         automation_id=automation.id,
     )
+
+    # Scope this run's tools to the saved profile, if one is set, before the
+    # director ever builds a schema list -- the same mechanism a human uses to
+    # narrow a conversation's connectors (backend/capabilities.py), applied
+    # directly rather than through the REST handler, which also disconnects
+    # servers live on the shared MCP manager. An automation's own tool scope
+    # must never do that to a connector another run or conversation is using.
+    if automation.capability_profile:
+        from backend.capabilities import CapabilityService
+
+        try:
+            CapabilityService().apply_profile(automation.capability_profile, conversation_id)
+        except ValueError:
+            summary = (
+                f"its tool profile '{automation.capability_profile}' no longer exists --"
+                " edit this automation and pick another, or clear its scope"
+            )
+            repo.record(
+                automation.id,
+                status="error",
+                summary=summary,
+                conversation_id=conversation_id,
+                every_minutes=automation.every_minutes,
+            )
+            return {"status": "error", "summary": summary}
 
     answer = ""
     status = "ok"
@@ -342,7 +445,10 @@ async def run_once(
                     answer = event.data.get("text", answer)
     except TimeoutError:
         status = "error"
-        summary = f"took longer than {RUN_TIMEOUT_SECONDS // 60} minutes and was stopped"
+        # Seconds, not minutes: the timeout is not a whole number of them, and
+        # rounding it in the one sentence a person reads about a stopped run is
+        # how "it ran for three minutes" gets argued with.
+        summary = f"took longer than {RUN_TIMEOUT_SECONDS} seconds and was stopped"
     except Exception as exc:  # a broken automation must not stop the runner
         status = "error"
         summary = f"{type(exc).__name__}: {exc}"
@@ -372,7 +478,7 @@ async def run_once(
 
 
 class AutomationRunner:
-    """Wakes every half minute, runs whatever is due, one at a time.
+    """Wakes every ten seconds, runs whatever is due, one at a time.
 
     One at a time on purpose: three automations that come due in the same minute
     and all reach for the shell are three unattended turns competing over the
@@ -400,6 +506,14 @@ class AutomationRunner:
         self._task = None
 
     async def run_now(self, automation: Automation) -> dict[str, Any]:
+        """Run it this second, whatever its schedule says.
+
+        `next_run_at` is deliberately not consulted: the interval floor governs
+        how often PSOK starts a run by itself, and a person pressing the button
+        has already decided. It still takes the lock, so "run now" queues behind
+        a run in flight rather than putting two unattended turns on the machine
+        at once.
+        """
         async with self._lock:
             return await run_once(automation, director_for=self.director_for)
 

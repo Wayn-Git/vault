@@ -46,6 +46,13 @@ class Capabilities:
     #: before a token moved. `None` means no cap has been observed, which is not
     #: the same as knowing there is none.
     max_tools: int | None = None
+    #: The account-level throughput ceiling, where the provider has one that is
+    #: smaller than its context window. Groq's free tier is 8,000 tokens per
+    #: *minute* -- a limit `context_window` (131,072) says nothing about, and
+    #: one this machine's own baseline (system prompt plus tool schemas, before
+    #: a single word of the conversation) already exceeds by 3-4x. `None` means
+    #: no such ceiling is known, not that none exists.
+    tokens_per_minute: int | None = None
 
 
 @dataclass

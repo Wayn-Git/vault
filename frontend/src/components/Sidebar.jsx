@@ -3,6 +3,10 @@ import Icon from './Icon.jsx'
 import { useApp } from '../store.jsx'
 import { fmtDate } from '../api.js'
 import { MOD_LABEL } from '../keys.js'
+import { forRail } from '../nav.js'
+import { useConfirm } from './ui/ConfirmDialog.jsx'
+import { useDismiss } from '../hooks/useDismiss.js'
+import { prefetchView } from '../views/registry.js'
 
 /* The rail: what PSOK holds, and every conversation you have had with it.
 
@@ -10,40 +14,15 @@ import { MOD_LABEL } from '../keys.js'
    has to be permanently visible -- it is the thing you switch between most --
    and a top bar that carries both ends up carrying neither well. */
 
-const PLACES = [
-  { id: 'tasks', label: 'Tasks', icon: 'check' },
-  { id: 'mail', label: 'Mail', icon: 'mail' },
-  // Skills and connectors are one place: they are the same kind of thing, and
-  // splitting them meant a third surface existed to browse both.
-  { id: 'capabilities', label: 'Skills & connectors', icon: 'grid' },
-  { id: 'automations', label: 'Automations', icon: 'clock', beta: true },
-  { id: 'memory', label: 'Memory', icon: 'spark' },
-  { id: 'logs', label: 'Activity', icon: 'logs' },
-]
+const PLACES = forRail()
 
-/* One row, and the two things you can do to it that are not opening it.
-
-   Delete is behind a second click rather than a modal: a modal for every
-   discarded conversation is friction on the common case, and an undo this
-   interface cannot honour -- the rows are gone -- would be a lie. */
+/* One row, and the two things you can do to it that are not opening it. */
 function ConvRow({ conv, active, onOpen, onRename, onDelete }) {
   const [menu, setMenu] = useState(false)
-  const [confirming, setConfirming] = useState(false)
   const ref = useRef(null)
+  const confirm = useConfirm()
 
-  useEffect(() => {
-    if (!menu) return undefined
-    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) setMenu(false) }
-    const key = (e) => { if (e.key === 'Escape') { e.stopPropagation(); setMenu(false) } }
-    document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', key, true)
-    return () => {
-      document.removeEventListener('mousedown', away)
-      document.removeEventListener('keydown', key, true)
-    }
-  }, [menu])
-
-  useEffect(() => { if (!menu) setConfirming(false) }, [menu])
+  useDismiss(ref, menu, { onAway: () => setMenu(false) })
 
   return (
     <div className={`rail-conv${active ? ' active' : ''}${menu ? ' menu-open' : ''}`} ref={ref}>
@@ -76,13 +55,18 @@ function ConvRow({ conv, active, onOpen, onRename, onDelete }) {
           <button
             type="button"
             className="danger"
-            onClick={() => {
-              if (!confirming) { setConfirming(true); return }
+            onClick={async () => {
               setMenu(false)
-              onDelete()
+              const ok = await confirm({
+                title: `Delete "${conv.title || 'untitled'}"?`,
+                description: 'This conversation and its messages are gone for good.',
+                confirmLabel: 'Delete',
+                tone: 'danger',
+              })
+              if (ok) onDelete()
             }}
           >
-            <Icon name="trash" size={13} /> {confirming ? 'Click again to delete' : 'Delete'}
+            <Icon name="trash" size={13} /> Delete
           </button>
         </div>
       )}
@@ -93,11 +77,20 @@ function ConvRow({ conv, active, onOpen, onRename, onDelete }) {
 export default function Sidebar() {
   const {
     view, setView, conversations, activeId, chat, health, healthError,
-    setOverlay, sidebar, setSidebar, renaming, setRenaming, renameConversation,
-    deleteConversation,
+    setOverlay, compact, railOpen, toggleRail, closeRail, renaming, setRenaming,
+    renameConversation, deleteConversation,
   } = useApp()
   const [filter, setFilter] = useState('')
   const [searching, setSearching] = useState(false)
+  const firstRef = useRef(null)
+
+  /* Every way out of the drawer, in one place.
+   *
+   * The store closes it when the route changes, which covers the places above
+   * — but opening a conversation and starting a new one both stay on /chat, so
+   * the route never changes and the drawer stayed sitting over the transcript
+   * the tap had just asked for. */
+  const leave = (act) => () => { act(); closeRail() }
 
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -105,12 +98,21 @@ export default function Sidebar() {
     return conversations.filter((c) => (c.title || 'untitled').toLowerCase().includes(q))
   }, [conversations, filter])
 
-  if (!sidebar) {
+  /* Opening the drawer moves focus into it. A drawer that opens behind the
+     keyboard's cursor is a drawer a keyboard user has to hunt for. */
+  useEffect(() => {
+    if (compact && railOpen) firstRef.current?.focus()
+  }, [compact, railOpen])
+
+  // Desktop only: on a phone the header's menu button is the way back in, and
+  // a second floating control for the same thing is one more thing over the
+  // page. The rail stays mounted either way, so the drawer can animate out.
+  if (!compact && !railOpen) {
     return (
       <button
         type="button"
         className="rail-peek"
-        onClick={() => setSidebar(true)}
+        onClick={toggleRail}
         title={`Show the rail — ${MOD_LABEL}+B`}
         aria-label="Show the sidebar"
       >
@@ -120,35 +122,32 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="rail">
+    <aside
+      id="rail"
+      className={`rail${compact ? ' rail--drawer' : ''}${railOpen ? ' is-open' : ''}`}
+      aria-label="Places and conversations"
+      aria-hidden={compact && !railOpen ? 'true' : undefined}
+    >
       <div className="rail-top">
         <span className="rail-brand">PSOK</span>
         <div className="rail-top-actions">
           <button
             type="button"
             className="icon-btn"
-            onClick={() => setSearching((s) => !s)}
-            title="Filter conversations"
-            aria-label="Filter conversations"
+            onClick={toggleRail}
+            title={compact ? 'Close navigation' : `Hide the rail — ${MOD_LABEL}+B`}
+            aria-label={compact ? 'Close navigation' : 'Hide the sidebar'}
           >
-            <Icon name="search" size={15} />
-          </button>
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setSidebar(false)}
-            title={`Hide the rail — ${MOD_LABEL}+B`}
-            aria-label="Hide the sidebar"
-          >
-            <Icon name="sidebar" size={15} />
+            <Icon name={compact ? 'x' : 'sidebar'} size={compact ? 17 : 15} />
           </button>
         </div>
       </div>
 
       <button
         type="button"
+        ref={firstRef}
         className="rail-new"
-        onClick={() => { setView('chat'); chat.startFresh?.() }}
+        onClick={leave(() => { setView('chat'); chat.startFresh?.() })}
         title={`New conversation — ${MOD_LABEL}+Shift+O`}
       >
         <Icon name="plus" size={15} /> New
@@ -160,7 +159,12 @@ export default function Sidebar() {
             key={place.id}
             type="button"
             className={`rail-place${view === place.id ? ' active' : ''}`}
+            aria-current={view === place.id ? 'page' : undefined}
             onClick={() => setView(place.id)}
+            // Each view is its own script now, so the hover is where it gets
+            // fetched: by the time the click lands it is already parsed.
+            onPointerEnter={() => prefetchView(place.id)}
+            onFocus={() => prefetchView(place.id)}
           >
             <Icon name={place.icon} size={15} /> {place.label}
             {place.beta && <span className="beta">beta</span>}
@@ -216,7 +220,7 @@ export default function Sidebar() {
               key={c.id}
               conv={c}
               active={c.id === activeId && view === 'chat'}
-              onOpen={() => { setView('chat'); chat.selectConversation?.(c.id) }}
+              onOpen={leave(() => { setView('chat'); chat.selectConversation?.(c.id) })}
               onRename={() => setRenaming(c.id)}
               onDelete={() => deleteConversation(c.id)}
             />
@@ -227,7 +231,7 @@ export default function Sidebar() {
       <button
         type="button"
         className="rail-foot"
-        onClick={() => setOverlay('settings')}
+        onClick={leave(() => setOverlay('settings'))}
         title="Providers, permissions, working directory"
       >
         <span className="rail-avatar"><Icon name="cpu" size={14} /></span>

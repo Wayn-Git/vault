@@ -45,6 +45,13 @@ the scheduling tools; they resolve exactly against the system clock.
 information, not dead ends.
 - Some operations pause for the user's approval. That is normal; do not try to \
 work around it.
+- Connectors listed under <connectors> are already connected and signed in. \
+When a connector's tool and a builtin tool could both do the job, prefer the \
+MCP tool if the connector is ready: it reaches the live service and the account \
+that owns the answer, while the builtin only reaches this machine. Search the \
+web for a repository's issues only if no connector owns them.
+- A connector that is not listed under <connectors> is not available this turn. \
+Do not call its tools and do not tell the user to wait for it.
 - Skills listed under <skills> are advertised by name only: read the SKILL.md at \
 the given path with view_file before following one.
 - A skill inside an <active_skill> block is already loaded in full. Follow it \
@@ -96,6 +103,18 @@ def build_system_prompt(
     for skill in visible:
         if skill.name in pinned:
             parts.append(_inline_skill(skill))
+
+    # Which connectors the model may actually reach, named. Best-effort like
+    # every other block here: a connector that cannot be described is a hint
+    # lost, not a turn lost.
+    try:
+        from backend.mcp.guidance import ready_connectors_block
+
+        connectors = ready_connectors_block()
+        if connectors:
+            parts.append(connectors)
+    except Exception:
+        pass
 
     if memories:
         rendered = "\n".join(f"  - {m}" for m in memories)
@@ -231,7 +250,26 @@ def to_wire_messages(history: list[Message]) -> list[dict]:
 _MCP_MARKER = "__mcp__"
 
 
-def cap_tools(tools: list[Any], limit: int | None) -> tuple[list[Any], list[str]]:
+#: `mcp_tool_key` percent-escapes what a model may not put in a tool name, so
+#: "microsoft-todo" is carried as "microsoft_2dtodo". Undone here rather than
+#: matched against, so the caller can pass the connector names it actually has.
+_ESCAPED = re.compile(r"_([0-9a-f]{2})")
+
+
+def _server_of(tool: Any) -> str:
+    """Which connector a schema came from, or "" for a builtin.
+
+    Read back off the name because a `ToolSchema` carries no source -- which is
+    ADR-0005 working as intended: the model must not be able to tell, so the
+    schema does not say. `mcp_tool_key` is the only thing that encodes it.
+    """
+    _, _, server = getattr(tool, "name", "").partition(_MCP_MARKER)
+    return _ESCAPED.sub(lambda m: chr(int(m.group(1), 16)), server) if server else ""
+
+
+def cap_tools(
+    tools: list[Any], limit: int | None, *, priority_servers: set[str] | None = None
+) -> tuple[list[Any], list[str]]:
     """Fit the tool list into what the provider will accept.
 
     Groq refuses a request carrying more than 128 tool schemas -- `400 'tools' :
@@ -245,6 +283,10 @@ def cap_tools(tools: list[Any], limit: int | None) -> tuple[list[Any], list[str]
       files, shell, tasks, calendar, retrieval -- and a turn that has lost
       `list_files` is broken in a way a turn missing one of forty-four GitHub
       tools is not.
+    * **A ready connector's tools come next.** `priority_servers` names the
+      connectors that are connected and signed in right now. Their tools are the
+      ones that can actually answer, and losing them to the cap while the tools
+      of a connector nobody signed in to survive is the worst possible trade.
     * **The rest keep registry order,** which is `mcp.yaml`'s order, which is the
       order the user added their connectors in. Not a ranking anybody chose, but
       stable between turns: a model that saw a tool last turn and not this one
@@ -256,11 +298,62 @@ def cap_tools(tools: list[Any], limit: int | None) -> tuple[list[Any], list[str]
     """
     if not limit or len(tools) <= limit:
         return tools, []
+    ready = priority_servers or set()
     builtin = [t for t in tools if _MCP_MARKER not in getattr(t, "name", "")]
-    external = [t for t in tools if _MCP_MARKER in getattr(t, "name", "")]
-    kept = [*builtin, *external][:limit]
+    preferred = [t for t in tools if _server_of(t) in ready and _server_of(t)]
+    chosen = {id(t) for t in preferred}
+    rest = [
+        t
+        for t in tools
+        if _MCP_MARKER in getattr(t, "name", "") and id(t) not in chosen
+    ]
+    kept = [*builtin, *preferred, *rest][:limit]
     keep_names = {id(t) for t in kept}
     dropped = [getattr(t, "name", "?") for t in tools if id(t) not in keep_names]
+    return kept, dropped
+
+
+def fit_tools_to_budget(
+    tools: list[Any],
+    *,
+    system_prompt: str,
+    token_budget: int,
+    margin: float,
+    priority_servers: set[str] | None = None,
+) -> tuple[list[Any], list[str]]:
+    """Keep as many tool schemas as fit under a per-request token ceiling.
+
+    This is what lets a free tier with a tokens-per-minute cap actually answer.
+    Groq's free tier is 8,000 TPM, and this machine's 178 tool schemas are
+    ~29,000 tokens -- so every turn used to be *skipped* on groq and shunted to
+    a flakier provider. A small client like OpenCode "just works" on the same
+    tier because it sends a couple of tools; this makes PSOK send only as many
+    as fit, in the same priority order `cap_tools` uses -- builtins first (the
+    tools PSOK is built on), then a ready connector's tools, then the rest.
+
+    The budget mirrors the caller's own estimate: `(system + tools) * margin <=
+    ceiling`, so the tool allowance is `ceiling / margin - system`. Returns the
+    kept schemas and the names dropped, so the turn can say what it withheld.
+    """
+    if not tools:
+        return tools, []
+    ready = priority_servers or set()
+    builtin = [t for t in tools if _MCP_MARKER not in getattr(t, "name", "")]
+    preferred = [t for t in tools if _server_of(t) and _server_of(t) in ready]
+    chosen = {id(t) for t in preferred}
+    rest = [t for t in tools if _MCP_MARKER in getattr(t, "name", "") and id(t) not in chosen]
+    ordered = [*builtin, *preferred, *rest]
+
+    allowance = token_budget / margin - estimate_tokens(system_prompt)
+    kept: list[Any] = []
+    used = 0.0
+    for tool in ordered:
+        cost = tool_schema_tokens([tool])
+        if used + cost <= allowance:
+            kept.append(tool)
+            used += cost
+    kept_ids = {id(t) for t in kept}
+    dropped = [getattr(t, "name", "?") for t in tools if id(t) not in kept_ids]
     return kept, dropped
 
 

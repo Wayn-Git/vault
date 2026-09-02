@@ -306,6 +306,24 @@ def test_adopting_an_upstream_identity_clears_the_dirty_flag(db):
     assert row["dirty_at"] is None
 
 
+def test_creating_a_task_already_seen_from_upstream_adopts_it_instead_of_crashing(db):
+    """Graph has no idempotency key, so the same external_id can arrive twice --
+    two calls racing on the same title, or a retry after a request that actually
+    landed. The second `create` must hand back the existing row, the same
+    at-least-once story as the sync push's adopt-by-title, not a raised
+    IntegrityError that surfaces as a failed "add task" to whoever asked.
+    """
+    repo = TaskRepository()
+    first_id = repo.create("Sift project", external_source="microsoft-todo", external_id="dup-1")
+
+    second_id = repo.create(
+        "Sift project", external_source="microsoft-todo", external_id="dup-1"
+    )
+
+    assert second_id == first_id
+    assert len(repo.upcoming()) <= 1  # no phantom second row
+
+
 def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
     """Push-then-pull is what removes the need for a merge algorithm.
 

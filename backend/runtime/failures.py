@@ -17,9 +17,12 @@ Two decisions come off a failure and they are not the same decision:
   Not worth doing when the request itself is wrong, because the next provider
   will reject it too, only slower.
 
-That second case is why a 404 stops the chain: a model name that does not exist
-at provider A almost certainly does not exist at provider B either, and burning
-the fallback on it turns one fast failure into several slow ones.
+That second case is why a 404 *with a body* stops the chain: a model name that
+does not exist at provider A almost certainly does not exist at provider B
+either, and burning the fallback on it turns one fast failure into several slow
+ones. A *bodyless* 404 is the exception -- NVIDIA's NIM gateway returns one when
+the node has not loaded the model yet, which a retry against the same provider
+fixes -- so that one is retryable; see `classify_status`.
 """
 
 from __future__ import annotations
@@ -96,11 +99,30 @@ def classify_status(status: int, body: str | None = None) -> FailureKind:
             if looks_like_quota(body)
             else FailureKind.RATE_LIMITED
         )
-    if status == 402:
+    if status in (402, 413):
+        # 413 here is not "the request is malformed" -- it is Groq's shape for
+        # "this request alone exceeds the account's tokens-per-minute ceiling",
+        # which retrying the same provider cannot fix (the request does not get
+        # smaller) but a different provider very well might answer. This used to
+        # fall through to the generic `>= 400` branch below and only became
+        # fallback-worthy because Groq's error body happens to contain the word
+        # "billing" in a promotional URL -- explicit here so it does not silently
+        # become NON_RETRYABLE (no fallback at all) the day that copy changes.
         return FailureKind.NON_RETRYABLE_RATE_LIMIT
     if status >= 500:
         return FailureKind.UPSTREAM_UNHEALTHY
     if status in (408, 409, 425):
+        return FailureKind.RETRYABLE
+    if status == 404 and not (body and body.strip()):
+        # A *bodyless* 404. NVIDIA's NIM gateway returns this when the node a
+        # request landed on has not loaded the model yet -- transient and
+        # per-request, so retrying lands on a warm node and succeeds (measured
+        # ~50% bodyless-404 on nemotron, cleared by one retry). A genuine
+        # "model not found" is a different 404: it carries a JSON error body
+        # naming the model, matches the `>= 400` branch below, and stays fatal
+        # -- so this does not reopen the "burn the fallback on a bad model name"
+        # problem the module docstring describes. Only the empty-bodied,
+        # information-free 404 is treated as a blip.
         return FailureKind.RETRYABLE
     if status >= 400:
         # A 403 sometimes carries a quota message rather than a permissions one.
@@ -145,7 +167,16 @@ def classify_stream_error(error: object) -> FailureKind:
     text = error if isinstance(error, str) else str(error)
     if looks_like_quota(text):
         return FailureKind.NON_RETRYABLE_RATE_LIMIT
-    return FailureKind.NON_RETRYABLE
+    # An error frame arriving *inside* a 200 stream is a different animal from a
+    # 4xx at the door: the request already passed auth, routing and validation
+    # to open the stream, so a break part-way through is almost always the
+    # provider faltering mid-generation, not a malformed request. NVIDIA's NIM
+    # emits bare `Error in input stream` frames this way, ~intermittently, and
+    # the old default (NON_RETRYABLE) turned each into a dead turn with no
+    # retry. Treat an unrecognised mid-stream error as transient so the same
+    # provider is asked again -- the conservative reading costs a dead turn,
+    # this costs at worst one wasted retry.
+    return FailureKind.UPSTREAM_UNHEALTHY
 
 
 def should_retry(kind: FailureKind) -> bool:

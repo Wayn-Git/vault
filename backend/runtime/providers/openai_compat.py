@@ -111,6 +111,21 @@ def _to_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 log = logging.getLogger(__name__)
 
 
+def _as_text(value: object) -> str | None:
+    """Content coerced to a string, because not every provider sends one.
+
+    Cloudflare Workers AI serialises a purely numeric content token -- the "3"
+    in a reply that counts -- as a JSON number, so `delta.content` arrives as an
+    int and `"".join(parts)` raised `expected str instance, int found`, killing
+    the whole stream over one token. The spec says content is a string; this is
+    the shim for the providers that treat that as advisory. `None` and `""` stay
+    falsy so the role-only first chunk is still skipped.
+    """
+    if value is None or value == "":
+        return None
+    return value if isinstance(value, str) else str(value)
+
+
 def _describe_provider_error(error: object) -> str:
     """The provider's own words, however it chose to shape them.
 
@@ -233,7 +248,7 @@ class OpenAICompatClient:
         # in a sibling field. It is not the answer, so it must not become the answer.
         reasoning = _reasoning_of(message)
         return ModelResponse(
-            text=message.get("content"),
+            text=_as_text(message.get("content")),
             reasoning=reasoning,
             tool_calls=calls,
             stop_reason=choice.get("finish_reason"),
@@ -299,9 +314,9 @@ class OpenAICompatClient:
             finish_reason = choice.get("finish_reason") or finish_reason
             delta = choice.get("delta") or {}
 
-            if delta.get("content"):
-                text_parts.append(delta["content"])
-                yield StreamEvent(type="text", text=delta["content"])
+            if (piece := _as_text(delta.get("content"))) is not None:
+                text_parts.append(piece)
+                yield StreamEvent(type="text", text=piece)
 
             if thought := _reasoning_of(delta):
                 reasoning_parts.append(thought)
@@ -418,5 +433,6 @@ def initialize(
             reasoning=resolved_model.lower().startswith(_REASONING_MODELS),
             context_window=_context_window(resolved_model, config.context_window),
             max_tools=config.max_tools,
+            tokens_per_minute=config.tokens_per_minute,
         ),
     )

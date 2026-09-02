@@ -186,6 +186,109 @@ def test_enabled_name_helpers_agree_with_the_listing(db, psok_home):
     assert service.enabled_connector_names() == {"memory"}
 
 
+def test_saving_a_profile_snapshots_the_conversations_connector_state(db, psok_home):
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("github")
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.set_enabled(Kind.CONNECTOR, "github", True, conversation_id="c1")
+    service.set_enabled(Kind.CONNECTOR, "memory", False, conversation_id="c1")
+
+    service.save_profile("dev-only", conversation_id="c1")
+
+    profiles = service.profiles()
+    assert len(profiles) == 1
+    assert profiles[0]["name"] == "dev-only"
+    assert profiles[0]["on_count"] == 1
+    assert profiles[0]["total_count"] == 2
+
+
+def test_saving_a_profile_keeps_the_toggle_even_when_mcp_yaml_disables_it(db, psok_home):
+    """`save_profile` used to read `Capability.enabled` -- `config.enabled AND
+    is_enabled(...)` -- rather than the raw toggle. A connector switched on
+    for this conversation but administratively disabled in mcp.yaml
+    (`enabled: false`) was silently saved as off, which is not what "save
+    this conversation's connectors" was asked to remember."""
+    from backend.mcp.commands import add_from_catalogue
+    from backend.mcp.config import add_server, load_servers
+
+    add_from_catalogue("memory")
+    disabled = load_servers()["memory"]
+    disabled.enabled = False
+    add_server(disabled)
+
+    service = CapabilityService(db)
+    service.set_enabled(Kind.CONNECTOR, "memory", True, conversation_id="c1")
+    service.save_profile("p", conversation_id="c1")
+
+    assert service.profiles()[0]["on_count"] == 1
+
+
+def test_saving_the_same_name_twice_replaces_it_rather_than_erroring(db, psok_home):
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.set_enabled(Kind.CONNECTOR, "memory", True)
+    service.save_profile("mine")
+    service.set_enabled(Kind.CONNECTOR, "memory", False)
+    service.save_profile("mine")
+
+    assert len(service.profiles()) == 1
+    assert service.profiles()[0]["on_count"] == 0
+
+
+def test_applying_a_profile_turns_on_exactly_what_it_stored(db, psok_home):
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("github")
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.set_enabled(Kind.CONNECTOR, "github", True)
+    service.save_profile("search-only")
+    service.set_enabled(Kind.CONNECTOR, "github", False)
+    service.set_enabled(Kind.CONNECTOR, "memory", True)
+
+    on = service.apply_profile("search-only", "c1")
+
+    assert on == 1
+    assert service.is_enabled(Kind.CONNECTOR, "github", "c1") is True
+    assert service.is_enabled(Kind.CONNECTOR, "memory", "c1") is False
+
+
+def test_applying_a_profile_turns_off_a_connector_added_after_it_was_saved(db, psok_home):
+    """Authoritative, not additive -- see the schema comment on
+    capability_profiles. A connector the profile never saw defaults to off."""
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.save_profile("empty")
+
+    add_from_catalogue("github")
+    service.set_enabled(Kind.CONNECTOR, "github", True, conversation_id="c1")
+    service.apply_profile("empty", "c1")
+
+    assert service.is_enabled(Kind.CONNECTOR, "github", "c1") is False
+
+
+def test_applying_an_unknown_profile_raises(db):
+    with pytest.raises(ValueError, match="no profile"):
+        CapabilityService(db).apply_profile("never-saved", "c1")
+
+
+def test_deleting_a_profile(db, psok_home):
+    from backend.mcp.commands import add_from_catalogue
+
+    add_from_catalogue("memory")
+    service = CapabilityService(db)
+    service.save_profile("temp")
+    assert service.delete_profile("temp") is True
+    assert service.profiles() == []
+    assert service.delete_profile("temp") is False
+
+
 async def test_disabled_connectors_are_never_connected(db, psok_home):
     """The toggle has to stop the process being spawned, not just hide the tools."""
     from backend.mcp.commands import add_from_catalogue
@@ -374,3 +477,157 @@ async def test_director_pins_a_slash_invoked_skill(db, psok_home, monkeypatch):
     assert "<active_skill" in seen["system"], "the invoked skill must be inlined"
     assert "/psok-intro" not in seen["user"], "the routing marker must be stripped"
     assert "what can you do" in seen["user"]
+
+
+# ------------------------------------------- the model is told what is connected
+#
+# Nothing in the prompt named a connector, so the model had no way to know one
+# existed short of reading 44 tool names and inferring it. It reached for
+# `search_web` and `fetch_url` -- which work everywhere and answer worse --
+# while an authenticated connection sat unused beside them.
+
+
+def _ready(monkeypatch, names: dict[str, int]) -> None:
+    """Pretend these connectors are connected and signed in."""
+    from backend.mcp import guidance, live
+
+    monkeypatch.setattr(live, "ready_connectors", lambda: dict(names))
+    guidance.forget()
+
+
+def test_a_ready_connector_is_named_in_the_prompt(db, monkeypatch):
+    """A tool schema is a menu; this is the sentence saying which half is hot.
+
+    Mutation check: drop the `ready_connectors_block()` append from
+    `build_system_prompt`.
+    """
+    from backend.agent.prompt import build_system_prompt
+
+    _ready(monkeypatch, {"github": 44})
+    prompt = build_system_prompt()
+
+    assert "</connectors>" in prompt, "the live section, not just the instruction"
+    assert "github (44 tools)" in prompt
+    assert "prefer the MCP tool if the connector is ready" in prompt
+
+
+def test_nothing_ready_costs_no_tokens(db, monkeypatch):
+    """A heading over an empty list is furniture on every round trip.
+
+    Mutation check: return the block unconditionally.
+    """
+    from backend.agent.prompt import build_system_prompt
+
+    _ready(monkeypatch, {})
+    # The closing tag, because `BASE_PROMPT` names the section in the
+    # instruction that tells the model an unlisted connector is unavailable --
+    # which is exactly what it needs to read when the section is absent.
+    assert "</connectors>" not in build_system_prompt()
+
+
+def test_a_ready_connectors_tools_come_before_a_configured_ones(db):
+    """Position is read, and it decides which tools survive `cap_tools` on a
+    provider with a ceiling. Builtins still come first: a turn that has lost
+    `list_files` is broken in a way a turn missing one connector tool is not.
+
+    Mutation check: drop the `offered.sort` from `ToolRegistry.schemas`.
+    """
+    from backend.security.confirmation import ConfirmationService, auto_approve
+    from backend.tools.base import RiskLevel, Tool, ToolResult, ToolSource
+    from backend.tools.registry import ToolRegistry, mcp_tool_key
+
+    async def handler(args, ctx):
+        return ToolResult.ok("ok")
+
+    registry = ToolRegistry(ConfirmationService(auto_approve))
+    # Registered cold-connector first, so the order cannot come from insertion.
+    for server in ("cold", "hot"):
+        registry.register(
+            Tool(
+                name=mcp_tool_key("act", server),
+                description="d",
+                parameters={},
+                handler=handler,
+                risk=RiskLevel.LOW,
+                source=ToolSource.MCP,
+                server_name=server,
+            )
+        )
+    registry.register(
+        Tool(
+            name="list_files",
+            description="d",
+            parameters={},
+            handler=handler,
+            risk=RiskLevel.LOW,
+        )
+    )
+
+    ordered = [s.name for s in registry.schemas(priority_servers={"hot"})]
+    assert ordered[0] == "list_files", "builtins keep their guarantee"
+    assert ordered[1].endswith("hot") and ordered[2].endswith("cold")
+
+    # And nothing is withheld: the boost is order only, so the model still
+    # cannot tell a builtin from an MCP tool (ADR-0005).
+    assert len(ordered) == 3
+
+
+def test_the_tool_cap_keeps_a_ready_connectors_tools(db):
+    """Losing the tools that can actually answer, to a cap, while the tools of
+    a connector nobody signed in to survive, is the worst possible trade.
+
+    Mutation check: ignore `priority_servers` in `cap_tools`.
+    """
+    from backend.agent.prompt import cap_tools
+    from backend.runtime.types import ToolSchema
+
+    def schema(name):
+        return ToolSchema(name=name, description="d", parameters={})
+
+    tools = [
+        schema("view_file"),
+        *[schema(f"a{n}__mcp__cold") for n in range(4)],
+        schema("search__mcp__hot"),
+    ]
+    kept, dropped = cap_tools(tools, 3, priority_servers={"hot"})
+
+    assert [t.name for t in kept] == ["view_file", "search__mcp__hot", "a0__mcp__cold"]
+    assert len(dropped) == 3 and all("cold" in name for name in dropped)
+
+
+async def test_the_loop_hands_the_ready_set_to_the_schema_builder(db, monkeypatch):
+    """End to end: the ordering has to reach the request, not just the registry.
+
+    Mutation check: drop `priority_servers=ready_servers` from the `schemas` call.
+    """
+    import backend.agent.director as director_module
+    from backend.agent.director import Director
+    from backend.db.repositories import ConversationRepository
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
+
+    offered: list[list[str]] = []
+    systems: list[str] = []
+
+    class Client:
+        async def complete(self, messages, tools=None, params=None):
+            offered.append([t.name for t in tools or []])
+            systems.append(next(m["content"] for m in messages if m["role"] == "system"))
+            return ModelResponse(text="done")
+
+    monkeypatch.setattr(
+        director_module,
+        "resolve",
+        lambda *a, **k: ResolvedModel("f", "f", Client(), Capabilities(streaming=False)),
+    )
+    _ready(monkeypatch, {"memory": 1})
+
+    service = CapabilityService()
+    service.set_enabled(Kind.CONNECTOR, "memory", True)
+    cid = ConversationRepository().create("f", "f")
+
+    director = Director(_registry_with_one_connector(), retrieval=False, memory=False)
+    async for _ in director.run(cid, "hello"):
+        pass
+
+    assert offered and offered[0], "the connector's tool is offered"
+    assert "memory (1 tool)" in systems[0], "and the prompt says it is reachable"

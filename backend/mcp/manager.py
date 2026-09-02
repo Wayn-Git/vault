@@ -30,6 +30,20 @@ MAX_TOOLS_PER_SERVER = 128
 # hour rather than at the head of every turn.
 RETRY_BACKOFF_SECONDS = (60.0, 300.0, 1800.0)
 
+# Once a server's tools are in the registry it is *working*, and a later error
+# string is a claim about the future rather than a fact about the present. For
+# this long after registration, one is treated as transient and does not unsay
+# what the registry can still be asked directly. Long enough to cover a spawn
+# retry, a first-discovery hiccup and an OAuth refresh; short enough that a
+# server which really has died stops claiming otherwise within one coffee.
+READY_COOLDOWN_SECONDS = 300.0
+
+# How many consecutive hard failures it takes to withdraw "ready" from a server
+# whose tools are still registered. Three, not one: a single refused DNS lookup
+# or a single connect timeout at the head of a turn is exactly the transient
+# that used to leave a working connector reading "failed to start" forever.
+DEMOTE_AFTER_FAILURES = 3
+
 
 def normalize_result(result: Any) -> ToolResult:
     """MCP content blocks into PSOK's uniform envelope.
@@ -110,6 +124,11 @@ class MCPManager:
         # in a row it has failed -- see `_hold_off`.
         self.retry_after: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
+        # When this server last put tools into the registry, and how many hard
+        # failures it has had since. Together these are what let a working
+        # connector shrug off a transient error -- see `is_ready`.
+        self.ready_since: dict[str, float] = {}
+        self.hard_failures: dict[str, int] = {}
 
     def _hold_off(self, name: str) -> None:
         """Back a failed server off, rather than writing it off.
@@ -121,6 +140,7 @@ class MCPManager:
         making a bad minute permanent.
         """
         self.attempts[name] = self.attempts.get(name, 0) + 1
+        self.hard_failures[name] = self.hard_failures.get(name, 0) + 1
         delay = RETRY_BACKOFF_SECONDS[min(self.attempts[name] - 1, len(RETRY_BACKOFF_SECONDS) - 1)]
         self.retry_after[name] = time.monotonic() + delay
 
@@ -128,6 +148,65 @@ class MCPManager:
         self.errors.pop(name, None)
         self.retry_after.pop(name, None)
         self.attempts.pop(name, None)
+        self.hard_failures.pop(name, None)
+
+    # -------------------------------------------------------------- readiness
+
+    def registered_tool_count(self, name: str) -> int:
+        """How many of this server's tools the agent loop can actually call.
+
+        The registry, not the connection object, because the registry is what
+        dispatch reads. A connection holding a `tools` list it never managed to
+        register is not usable; a server whose tools are registered is, whatever
+        an old error string says about it.
+        """
+        return sum(1 for tool in self.registry.list() if tool.server_name == name)
+
+    def _tool_counts(self) -> dict[str, int]:
+        """Every server's registered tool count, in one pass over the registry.
+
+        `state()` and `status()` loop servers and used to ask
+        `registered_tool_count` (a full scan) twice per server -- once directly
+        and once inside `is_ready` -- which is quadratic in the number of
+        servers. One pass here, handed to `is_ready`, makes it linear.
+        """
+        counts: dict[str, int] = {}
+        for tool in self.registry.list():
+            if tool.server_name:
+                counts[tool.server_name] = counts.get(tool.server_name, 0) + 1
+        return counts
+
+    def is_ready(self, name: str, *, registered: int | None = None) -> bool:
+        """Whether this connector is working, judged by what it put in the registry.
+
+        The old answer was "no error is recorded", which inverts the burden of
+        proof: a transient spawn, discovery or OAuth failure wrote a string that
+        nothing cleared, and a connector serving 122 tools reported "failed to
+        start" beside them. Tools in the registry is a fact; an error from four
+        minutes ago is a memory.
+
+        So readiness is: tools are registered, fewer than
+        `DEMOTE_AFTER_FAILURES` hard failures have happened in a row since they
+        were, and either the session is still live or the registration is recent
+        enough to still vouch for it. A connector that is genuinely gone loses
+        its session *and* accumulates failures, so it demotes on the third pass.
+
+        `registered` lets a caller looping every server pass a count it has
+        already computed, rather than making this rescan the whole registry.
+        """
+        if registered is None:
+            registered = self.registered_tool_count(name)
+        if registered <= 0:
+            return False
+        if self.hard_failures.get(name, 0) >= DEMOTE_AFTER_FAILURES:
+            return False
+        connection = self.connections.get(name)
+        if connection is not None and connection.connected:
+            return True
+        registered_at = self.ready_since.get(name)
+        if registered_at is None:
+            return False
+        return time.monotonic() - registered_at < READY_COOLDOWN_SECONDS
 
     def forget_error(self, name: str) -> None:
         """Let the next reconcile retry this server immediately.
@@ -154,14 +233,38 @@ class MCPManager:
 
         return bool(config.oauth) and not has_stored_token(config.name)
 
-    async def connect_server(self, config: ServerConfig, *, interactive: bool = True) -> int:
+    async def connect_server(
+        self, config: ServerConfig, *, interactive: bool = True, force: bool = False
+    ) -> int:
         """Connect, discover, and register. Returns the number of tools added.
 
         `interactive=False` refuses to begin a sign-in rather than opening a
         browser. See `needs_sign_in`.
+
+        **Idempotent.** A server that is already connected with its tools in the
+        registry is already at `ready`, and asking again returns that count
+        rather than tearing the session down and building it back. It used to
+        reconnect unconditionally, so every reconcile -- one per turn -- gave a
+        working connector a fresh window in which to fail transiently, which is
+        half of why "failed to start" appeared next to tools that worked. A
+        person pressing Connect or Reconnect passes `force=True`, which is the
+        one context where rebuilding the session is the point.
         """
         if not config.enabled:
             return 0
+
+        live = self.connections.get(config.name)
+        if (
+            not force
+            and live is not None
+            and live.connected
+            and self.registered_tool_count(config.name) > 0
+        ):
+            # Already at `ready`. Deliberately *not* `is_ready`, which stays true
+            # for a while after a session dies: a dead session is exactly the
+            # case reconcile must be allowed to rebuild.
+            self._clear_failure(config.name)
+            return self.registered_tool_count(config.name)
 
         if not interactive and self.needs_sign_in(config):
             message = (
@@ -243,6 +346,13 @@ class MCPManager:
                 )
             )
             registered += 1
+
+        # Recorded on registry *presence*, not on `registered > 0`: a rebind
+        # that adds nothing because the tools are already there has still just
+        # confirmed this server is serving them.
+        if self.registered_tool_count(config.name) > 0:
+            self.ready_since[config.name] = time.monotonic()
+            self.hard_failures.pop(config.name, None)
         return registered
 
     def _describe(self, config: ServerConfig, description: str) -> str:
@@ -358,15 +468,33 @@ class MCPManager:
         An interface that reports the capability row alone is reporting an
         intention: the row says "on" whether the process started, died, or was
         never asked to start. This is the fact to render instead.
+
+        The tool count comes from the registry rather than from the connection,
+        and a recorded error is withheld while the server is ready. Both are the
+        same correction: the question a reader is asking is "can the agent use
+        this right now", and the registry answers it directly while an error
+        string only says something went wrong at some point. The string is still
+        in `self.errors` for the log and for `is_ready`'s own demotion count --
+        it is suppressed from the *report*, not forgotten.
         """
+        counts = self._tool_counts()
         out: dict[str, dict[str, Any]] = {}
         for name in set(load_servers()) | set(self.connections) | set(self.errors):
             connection = self.connections.get(name)
             connected = bool(connection and connection.connected)
+            registered = counts.get(name, 0)
+            ready = self.is_ready(name, registered=registered)
             out[name] = {
-                "connected": connected,
-                "tools": len(connection.tools) if connected and connection else 0,
-                "error": self.errors.get(name),
+                # Ready means the agent can call its tools, which is what every
+                # reader of this field actually wants to know.
+                "connected": connected or ready,
+                # The registry, with no fallback to `connection.tools`. A
+                # session that answered `initialize` but registered nothing is
+                # a connector the agent cannot call, and reporting its discovery
+                # list would be the same lie in the other direction.
+                "tools": registered,
+                "error": None if ready else self.errors.get(name),
+                "ready": ready,
             }
         return out
 
@@ -422,19 +550,26 @@ class MCPManager:
             await self.disconnect_server(name)
 
     def status(self) -> list[dict[str, Any]]:
+        counts = self._tool_counts()
         out = []
         for name, config in load_servers().items():
             connection = self.connections.get(name)
+            registered = counts.get(name, 0)
+            ready = self.is_ready(name, registered=registered)
             out.append(
                 {
                     "name": name,
                     "transport": str(config.transport),
                     "enabled": config.enabled,
-                    "connected": bool(connection and connection.connected),
-                    "tools": len(connection.tools) if connection else 0,
+                    "connected": bool(connection and connection.connected) or ready,
+                    "tools": registered,
                     "oauth": config.oauth,
                     "source": str(config.source),
-                    "error": self.errors.get(name),
+                    # Withheld while ready, exactly as in `state()` -- the CLI
+                    # and the interface must not reach different conclusions
+                    # from the same manager.
+                    "error": None if ready else self.errors.get(name),
+                    "ready": ready,
                 }
             )
         return out

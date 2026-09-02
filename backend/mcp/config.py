@@ -82,6 +82,12 @@ class ServerConfig:
     oauth_scopes: list[str] = field(default_factory=list)
     api_key_ref: str | None = None
     api_key_header: str = "Authorization"
+    # Some remote MCP servers (Tavily's, at least) take the key as a URL query
+    # parameter rather than a header -- documented as their primary path for
+    # clients without OAuth support. Named here rather than folded into
+    # `api_key_header` because a header name and a query parameter name are
+    # never interchangeable in the same code path.
+    api_key_query_param: str | None = None
     # behaviour
     enabled: bool = True
     startup: bool = False
@@ -111,12 +117,39 @@ class ServerConfig:
         from backend.secrets import get_secret
 
         out = {k: expand_vars(v) for k, v in self.headers.items()}
-        if self.api_key_ref:
+        # A query-param key and a header key are how two different kinds of
+        # server want the same secret; a server documenting one has nothing
+        # listening on the other, so sending both is not "extra safety", it's
+        # a stray Authorization header a query-param server never asked for.
+        if self.api_key_ref and not self.api_key_query_param:
             secret = get_secret(self.api_key_ref)
             if secret:
                 value = secret if self.api_key_header != "Authorization" else f"Bearer {secret}"
                 out[self.api_key_header] = value
         return out
+
+    def resolved_url(self) -> str | None:
+        """`url`, with a keychain-held key appended as a query parameter.
+
+        Separate from `resolved_headers()` because the two mechanisms are
+        mutually exclusive per server -- a server documents one or the other,
+        never both -- and folding this into the URL at rest in `mcp.yaml`
+        would put the key on disk in plain text, which `api_key_ref` exists to
+        avoid.
+        """
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+        from backend.secrets import get_secret
+
+        if not self.url or not self.api_key_query_param or not self.api_key_ref:
+            return self.url
+        secret = get_secret(self.api_key_ref)
+        if not secret:
+            return self.url
+        parts = urlparse(self.url)
+        query = dict(parse_qsl(parts.query))
+        query[self.api_key_query_param] = secret
+        return urlunparse(parts._replace(query=urlencode(query)))
 
     def resolved_env(self) -> dict[str, str]:
         """Environment for a stdio server, resolved at spawn time.
@@ -154,6 +187,7 @@ class ServerConfig:
             "oauth_client_id",
             "oauth_client_secret_ref",
             "api_key_ref",
+            "api_key_query_param",
             "catalogue_id",
             "description",
         ):
@@ -200,6 +234,7 @@ class ServerConfig:
             oauth_scopes=list(raw.get("oauth_scopes") or []),
             api_key_ref=raw.get("api_key_ref"),
             api_key_header=raw.get("api_key_header", "Authorization"),
+            api_key_query_param=raw.get("api_key_query_param"),
             enabled=bool(raw.get("enabled", True)),
             startup=bool(raw.get("startup", False)),
             timeout_seconds=float(raw.get("timeout_seconds", 60.0)),

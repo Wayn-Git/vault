@@ -3,6 +3,8 @@ import Icon from './Icon.jsx'
 import { api } from '../api.js'
 import { useApp } from '../store.jsx'
 import { MOD_LABEL } from '../keys.js'
+import { useDismiss } from '../hooks/useDismiss.js'
+import { connectorState } from './connectorState.js'
 
 /* Everything the agent can be given for the next message, one keystroke from
    the composer.
@@ -12,15 +14,6 @@ import { MOD_LABEL } from '../keys.js'
    process failed to start, died, or was never asked to. Switching a connector
    on starts it here and waits for the answer, so the row never claims a
    capability the agent does not have. */
-
-export function connectorState(cap, busy) {
-  const live = cap.live || {}
-  if (busy) return { tone: 'busy', label: 'starting', dot: 'amber' }
-  if (live.error) return { tone: 'error', label: 'failed', dot: 'bad', detail: live.error }
-  if (live.connected) return { tone: 'live', label: `${live.tools} tools`, dot: 'ok' }
-  if (cap.enabled) return { tone: 'idle', label: 'not running', dot: 'faint' }
-  return { tone: 'off', label: 'off', dot: 'faint' }
-}
 
 function Row({ icon, label, hint, tail, onClick, disabled, danger, submenu, active }) {
   return (
@@ -64,22 +57,13 @@ export default function PlusMenu({ conversationId, workspace, onWorkspace, onClo
     api.tools().then(setTools).catch(() => setTools([]))
   }, [scope, refreshCaps])
 
-  useEffect(() => {
-    const away = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
-    const key = (e) => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      if (tools_open) setToolsOpen(false)
-      else if (panel) setPanel(null)
-      else onClose()
-    }
-    document.addEventListener('mousedown', away)
-    document.addEventListener('keydown', key, true)
-    return () => {
-      document.removeEventListener('mousedown', away)
-      document.removeEventListener('keydown', key, true)
-    }
+  const escapeOneLevel = useCallback(() => {
+    if (tools_open) setToolsOpen(false)
+    else if (panel) setPanel(null)
+    else onClose()
   }, [onClose, panel, tools_open])
+
+  useDismiss(ref, true, { onAway: onClose, onEscape: escapeOneLevel })
 
   const toggleMemory = useCallback(async () => {
     setBusy('memory')

@@ -471,34 +471,48 @@ class TaskRepository:
         status: str | None = None,
         dirty_at: str | None = None,
     ) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
-            " priority, source, reminder_at, external_source, external_id, external_etag,"
-            " list_id, important, external_categories, completed_at, dirty_at,"
-            " status, last_synced_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
-            " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
-            (
-                title,
-                notes,
-                due_at,
-                scheduled_at,
-                duration_estimate_minutes,
-                priority,
-                source,
-                reminder_at,
-                external_source,
-                external_id,
-                external_etag,
-                list_id,
-                1 if important else 0,
-                external_categories,
-                completed_at,
-                dirty_at,
-                status,
-                external_id,
-            ),
-        )
+        try:
+            cur = self.conn.execute(
+                "INSERT INTO tasks (title, notes, due_at, scheduled_at, duration_estimate_minutes,"
+                " priority, source, reminder_at, external_source, external_id, external_etag,"
+                " list_id, important, external_categories, completed_at, dirty_at,"
+                " status, last_synced_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'todo'),"
+                " CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END)",
+                (
+                    title,
+                    notes,
+                    due_at,
+                    scheduled_at,
+                    duration_estimate_minutes,
+                    priority,
+                    source,
+                    reminder_at,
+                    external_source,
+                    external_id,
+                    external_etag,
+                    list_id,
+                    1 if important else 0,
+                    external_categories,
+                    completed_at,
+                    dirty_at,
+                    status,
+                    external_id,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # Graph has no idempotency key, so a caller that already created this
+            # task upstream (e.g. two calls racing on the same title, or a retry
+            # after an apparently-failed request that actually landed) hands back
+            # an external_id already sitting on a local row. Adopting it is the
+            # same at-least-once story as the sync push's adopt-by-title -- a
+            # second insert would only fail again, and the task is not lost, it
+            # is just already here.
+            if external_source and external_id:
+                existing = self.by_external(external_source, external_id)
+                if existing is not None:
+                    return existing["id"]
+            raise
         self.conn.commit()
         return cur.lastrowid
 

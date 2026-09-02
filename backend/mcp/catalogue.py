@@ -39,6 +39,12 @@ class CatalogueEntry:
     env: dict[str, str] = field(default_factory=dict)
     requires: str | None = None  # what the user must have installed
     setup_hint: str | None = None  # shown when auth is SETUP
+    # A server that wants one bare API key rather than an OAuth app's
+    # client id/secret pair or a credentials file -- `missing_credentials`
+    # asks for it directly rather than through those three mechanisms.
+    api_key_ref: str | None = None
+    api_key_header: str = "Authorization"
+    api_key_query_param: str | None = None
     homepage: str | None = None
     # Where a SETUP server's client credentials actually belong. PSOK's own
     # OAuth layer is consulted for remote transports only (see client.py's
@@ -118,6 +124,9 @@ class CatalogueEntry:
             env=dict(self.env),
             oauth=self.auth is AuthKind.OAUTH,
             oauth_scopes=list(self.oauth_scopes),
+            api_key_ref=self.api_key_ref,
+            api_key_header=self.api_key_header,
+            api_key_query_param=self.api_key_query_param,
             source=Source.BUNDLED,
             catalogue_id=self.id,
             description=self.description,
@@ -480,6 +489,57 @@ CATALOGUE: list[CatalogueEntry] = [
         account_key="accessToken",
         account_from_filename=False,
         auth_command_args=["-y", "-p", "@0xbarandiaran/spotify-mcp-server", "spotify-mcp-auth"],
+    ),
+    # ----------------------------------------------------------------- tavily
+    CatalogueEntry(
+        id="tavily",
+        title="Tavily",
+        description="General-purpose web search, tuned for feeding an LLM's answer.",
+        category="Web",
+        auth=AuthKind.SETUP,
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://mcp.tavily.com/mcp/",
+        setup_hint=(
+            "Needs a Tavily API key: app.tavily.com -> API Keys.\n"
+            "Tavily's remote server takes the key as a URL query parameter rather\n"
+            "than a header -- documented as its path for clients without their own\n"
+            "OAuth support, which is what PSOK's MCP client is."
+        ),
+        homepage="https://docs.tavily.com/documentation/mcp",
+        api_key_ref="psok-mcp/tavily.api_key",
+        api_key_query_param="tavilyApiKey",
+    ),
+    # -------------------------------------------------------------------- exa
+    CatalogueEntry(
+        id="exa",
+        title="Exa",
+        description="Semantic, discovery-oriented search -- finds pages by meaning, not keywords.",
+        category="Web",
+        auth=AuthKind.SETUP,
+        transport=Transport.STREAMABLE_HTTP,
+        url="https://mcp.exa.ai/mcp",
+        setup_hint="Needs an Exa API key: dashboard.exa.ai -> API Keys.",
+        homepage="https://docs.exa.ai/reference/exa-mcp",
+        api_key_ref="psok-mcp/exa.api_key",
+        api_key_header="x-api-key",
+    ),
+    # -------------------------------------------------------------- firecrawl
+    CatalogueEntry(
+        id="firecrawl",
+        title="Firecrawl",
+        description=(
+            "Extracts and crawls a webpage into clean markdown -- for reading one"
+            " page, not searching."
+        ),
+        category="Web",
+        auth=AuthKind.SETUP,
+        transport=Transport.STREAMABLE_HTTP,
+        # Not the /v2/mcp-oauth path: that one is for a browser sign-in flow.
+        # An API key authenticates against the plain /v2/mcp endpoint instead.
+        url="https://mcp.firecrawl.dev/v2/mcp",
+        setup_hint="Needs a Firecrawl API key: firecrawl.dev/app/api-keys.",
+        homepage="https://docs.firecrawl.dev/mcp-server",
+        api_key_ref="psok-mcp/firecrawl.api_key",
     ),
 ]
 

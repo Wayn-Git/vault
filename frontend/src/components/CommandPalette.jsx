@@ -3,7 +3,9 @@ import Icon from './Icon.jsx'
 import { useApp } from '../store.jsx'
 import { api } from '../api.js'
 import { pretty } from '../keys.js'
-import { connectorState } from './PlusMenu.jsx'
+import { connectorState } from './connectorState.js'
+import { forPalette } from '../nav.js'
+import { useFocusTrap } from '../hooks/useFocusTrap.js'
 
 /* One list for everything the interface can do.
 
@@ -12,15 +14,14 @@ import { connectorState } from './PlusMenu.jsx'
    is built from the same store the + menu reads, so a connector toggled from
    here and one toggled from there run the identical code path. */
 
-const VIEWS = [
-  { id: 'chat', label: 'Chat', icon: 'chat', binding: 'mod+1' },
-  { id: 'tasks', label: 'Tasks and calendar', icon: 'check', binding: 'mod+2' },
-  { id: 'mail', label: 'Mail', icon: 'mail', binding: 'mod+3' },
-  { id: 'capabilities', label: 'Skills and connectors', icon: 'grid', binding: 'mod+4' },
-  { id: 'automations', label: 'Automations (beta)', icon: 'clock', binding: 'mod+5' },
-  { id: 'memory', label: 'Memory', icon: 'spark', binding: 'mod+6' },
-  { id: 'logs', label: 'Activity', icon: 'logs', binding: 'mod+7' },
-  { id: 'dash', label: 'Status', icon: 'dash' },
+const VIEWS = forPalette()
+
+/* The same three choices Settings offers, phrased as commands. `sun` for
+   daylight, `cpu` for the console, `sliders` for "whatever the machine says". */
+const THEMES = [
+  { id: 'light', icon: 'sun', label: 'Switch to Paper', hint: 'the light palette' },
+  { id: 'dark', icon: 'cpu', label: 'Switch to Graphite', hint: 'the dark palette' },
+  { id: 'system', icon: 'sliders', label: 'Follow the system theme', hint: 'light or dark, as the machine is set' },
 ]
 
 /** Subsequence match: `gwt` finds `go with tools`. Returns a score, or -1. */
@@ -51,14 +52,17 @@ export default function CommandPalette() {
   const {
     overlay, setOverlay, setView, conversations, activeId, caps,
     setCapEnabled, busyCap, chat, toast, refreshHealth, refreshCaps,
-    setCapabilitiesTab,
+    setCapabilitiesTab, theme, setTheme,
   } = app
 
   const [query, setQuery] = useState('')
   const [index, setIndex] = useState(0)
   const [memory, setMemory] = useState(null)
   const listRef = useRef(null)
+  const panelRef = useRef(null)
   const open = overlay === 'palette'
+
+  useFocusTrap(panelRef, open)
 
   useEffect(() => {
     if (!open) return
@@ -108,7 +112,8 @@ export default function CommandPalette() {
         group: 'Go to',
         icon: view.icon,
         label: view.label,
-        binding: view.binding,
+        binding: view.digit ? `mod+${view.digit}` : undefined,
+        beta: view.beta,
         run: () => setView(view.id),
       })
     }
@@ -184,6 +189,22 @@ export default function CommandPalette() {
       })
     }
 
+    /* The palette is where this application does things, so the appearance
+       switch belongs here too rather than only three clicks into Settings.
+       The one currently in use is not offered — a command that does nothing
+       is worse than a command that is missing. */
+    for (const choice of THEMES) {
+      if (choice.id === theme) continue
+      out.push({
+        id: `theme:${choice.id}`,
+        group: 'Appearance',
+        icon: choice.icon,
+        label: choice.label,
+        hint: choice.hint,
+        run: () => setTheme(choice.id),
+      })
+    }
+
     out.push({
       id: 'settings',
       group: 'Help',
@@ -221,6 +242,7 @@ export default function CommandPalette() {
   }, [
     caps, conversations, activeId, memory, chat, setView, setCapEnabled,
     busyCap, setOverlay, toast, refreshHealth, refreshCaps, setCapabilitiesTab,
+    theme, setTheme,
   ])
 
   const results = useMemo(() => {
@@ -232,16 +254,14 @@ export default function CommandPalette() {
       .map((r) => r.c)
   }, [commands, query])
 
-  // Group headers are decided with the list, not while rendering it, so the
-  // header a row carries does not depend on the order React happens to render.
-  const rows = useMemo(() => {
-    let group = null
-    return results.map((command) => {
-      const header = command.group !== group ? command.group : null
-      group = command.group
-      return { command, header }
-    })
-  }, [results])
+  /* Group headers are decided with the list, not while rendering it, so the
+     header a row carries does not depend on the order React happens to render.
+     Read from the previous entry rather than carried in a variable reassigned
+     across the map -- same result, and nothing outside the row is mutated. */
+  const rows = useMemo(() => results.map((command, i) => ({
+    command,
+    header: command.group === results[i - 1]?.group ? null : command.group,
+  })), [results])
 
   useEffect(() => { setIndex(0) }, [query])
 
@@ -278,7 +298,7 @@ export default function CommandPalette() {
 
   return (
     <div className="modal-overlay palette-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}>
-      <div className="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div className="palette" ref={panelRef} role="dialog" aria-modal="true" aria-label="Command palette">
         <div className="palette-input">
           <Icon name="search" size={16} />
           <input
@@ -307,6 +327,7 @@ export default function CommandPalette() {
                   <Icon name={command.icon} size={15} />
                   <span className="palette-label">
                     {command.label}
+                    {command.beta && <span className="beta">beta</span>}
                     {command.hint && <span className="palette-hint">{command.hint}</span>}
                   </span>
                   {command.state && (

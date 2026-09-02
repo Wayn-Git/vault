@@ -14,6 +14,12 @@ without a browser.
     Adding -> Setting up -> Authenticating -> Syncing -> Ready
                                            \\-> Failed (with a reason and a Retry)
 
+Ready is reached by a server putting tools into the `ToolRegistry`, and is held
+for as long as they are there. It is not re-earned on every poll and it is not
+withdrawn by a single error: the manager demotes only after three consecutive
+hard failures, or once the tools are gone (`MCPManager.is_ready`). A connector
+answering the agent must never describe itself as failed while it does so.
+
 Each state carries `action`: the single thing that moves it forward, or None
 where the answer is "wait". A state with no next action and no explanation is
 what made the old screen unanswerable.
@@ -110,6 +116,18 @@ def state_of(
             action="sign_in",
         )
 
+    # Tools in the registry outrank a recorded error, and this ordering is the
+    # whole of the fix. `error` used to be checked first, so one transient spawn,
+    # discovery or OAuth failure -- a string nothing ever cleared -- reported
+    # "failed to start" beside a connector that was serving its tools to the
+    # agent that same second. A registered tool is a fact about now; an error is
+    # a memory of a moment. The manager only reports one once the server has
+    # genuinely stopped being usable (see `MCPManager.is_ready`: three
+    # consecutive hard failures, or the tools gone from the registry), so a
+    # failure that survives to here has already earned the word.
+    if live.get("ready") or (live.get("tools") or 0) > 0:
+        return _ready_state(name, row, live, synced)
+
     error = live.get("error")
     if error:
         return ConnectorState("failed", _readable(name, error), action="retry")
@@ -122,6 +140,18 @@ def state_of(
             return ConnectorState("starting", "Not started yet.", action="connect")
         return ConnectorState("failed", "Not running.", action="connect")
 
+    return _ready_state(name, row, live, synced)
+
+
+def _ready_state(
+    name: str, row: dict[str, Any], live: dict[str, Any], synced: bool
+) -> ConnectorState:
+    """A connector that is serving its tools, and whatever else is worth saying.
+
+    Reached from two places -- a live connection, and a registry that still holds
+    this server's tools despite a recent error -- so the wording, the warnings
+    and the first-sync check cannot drift between them.
+    """
     if name in FIRST_SYNC and not synced:
         return ConnectorState(
             "syncing",

@@ -19,7 +19,6 @@ import httpx
 from backend.runtime.failures import FailureKind, classify_status, should_retry
 
 MAX_RETRIES = 3
-RETRYABLE_STATUS = {408, 409, 425, 429}
 TRANSIENT_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
