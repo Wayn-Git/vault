@@ -378,6 +378,21 @@ async def thread(thread_id: str) -> dict[str, Any]:
     }
 
 
+async def unread_count(address: str | None = None) -> dict[str, int]:
+    """Unread messages and threads in the inbox, in one request.
+
+    `threads()` costs one list call plus one fetch per thread and cannot report
+    a total larger than the page it asked for. The INBOX label carries both
+    totals and costs a single call, which is what a count on a dashboard should
+    cost.
+    """
+    data = await _call("GET", "/labels/INBOX", address=address)
+    return {
+        "messages": int(data.get("messagesUnread") or 0),
+        "threads": int(data.get("threadsUnread") or 0),
+    }
+
+
 async def labels() -> list[dict[str, Any]]:
     data = await _call("GET", "/labels")
     return [

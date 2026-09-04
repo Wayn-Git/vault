@@ -8,11 +8,17 @@
 
 export const NAV = [
   { id: 'chat', path: '/chat', label: 'Chat', icon: 'chat', digit: 1 },
+  // Today comes second in the rail because that is where a day starts, but it
+  // carries digit 8 rather than 2: renumbering seven digits people already have
+  // in their fingers is a worse trade than one entry whose position and digit
+  // disagree.
+  { id: 'today', path: '/today', label: 'Today', icon: 'sun', digit: 8, rail: true, settings: true },
   { id: 'tasks', path: '/tasks', label: 'Tasks', icon: 'check', digit: 2, rail: true, settings: true },
   { id: 'mail', path: '/mail', label: 'Mail', icon: 'mail', digit: 3, rail: true, settings: true },
   { id: 'capabilities', path: '/capabilities', label: 'Skills & connectors', icon: 'grid', digit: 4, rail: true, settings: true },
   { id: 'automations', path: '/automations', label: 'Automations', icon: 'clock', digit: 5, rail: true, settings: true, beta: true },
   { id: 'memory', path: '/memory', label: 'Memory', icon: 'spark', digit: 6, rail: true, settings: true },
+  { id: 'library', path: '/library', label: 'Library', icon: 'book', digit: 9, rail: true, settings: true },
   { id: 'logs', path: '/logs', label: 'Activity', icon: 'logs', digit: 7, rail: true, settings: true },
   // No digit, no rail entry, no Settings link: reached only from the
   // degraded/offline banner or the command palette. That's an existing

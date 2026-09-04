@@ -22,11 +22,31 @@ class SearchHit:
     path: str
     heading_path: str | None
     score: float
+    # Defaulted so anything constructing a hit positionally still works.
+    source: str = "vault"
+    title: str | None = None
 
     @property
     def label(self) -> str:
-        name = Path(self.path).name
-        return f"{name} > {self.heading_path}" if self.heading_path else name
+        """How to name this hit to a person, or to a model reading a tool result.
+
+        A vault hit is named by its file: `notes.md` is how the user thinks of
+        it. Material with no filename the user chose -- a captured article,
+        stored under an id -- is named by its title instead. The source check is
+        load-bearing: `documents.title` is set to `path.stem` for vault files,
+        so preferring the title unconditionally would rename every existing hit
+        from `notes.md` to `notes`.
+        """
+        named = self.title if (self.source != "vault" and self.title) else Path(self.path).name
+        heading = self.heading_path or ""
+        # A captured page is written with its title as the top heading, so every
+        # chunk's heading path starts with the name we are already using. Left
+        # alone that reads "Deep Work > Deep Work", which says nothing twice.
+        if heading == named:
+            heading = ""
+        elif heading.startswith(f"{named} > "):
+            heading = heading[len(named) + 3 :]
+        return f"{named} > {heading}" if heading else named
 
 
 class SearchService:
@@ -53,6 +73,7 @@ class SearchService:
         *,
         limit: int = 8,
         path_glob: str | None = None,
+        source: str | None = None,
         semantic: bool = True,
     ) -> list[SearchHit]:
         """Vector and keyword search fused by reciprocal rank.
@@ -83,7 +104,7 @@ class SearchService:
             return []
 
         fused = store.reciprocal_rank_fusion(rankings)
-        return self._hydrate([cid for cid, _ in fused], dict(fused), limit, path_glob)
+        return self._hydrate([cid for cid, _ in fused], dict(fused), limit, path_glob, source)
 
     def _hydrate(
         self,
@@ -91,6 +112,7 @@ class SearchService:
         scores: dict[int, float],
         limit: int,
         path_glob: str | None,
+        source: str | None = None,
     ) -> list[SearchHit]:
         if not chunk_ids:
             return []
@@ -98,13 +120,17 @@ class SearchService:
         window = chunk_ids[: limit * 4]
         placeholders = ",".join("?" * len(window))
         sql = (
-            "SELECT c.id, c.content, c.heading_path, d.path FROM document_chunks c"
+            "SELECT c.id, c.content, c.heading_path, d.path, d.source, d.title"
+            " FROM document_chunks c"
             f" JOIN documents d ON d.id = c.document_id WHERE c.id IN ({placeholders})"
         )
         params: list = list(window)
         if path_glob:
             sql += " AND d.path GLOB ?"
             params.append(path_glob if "*" in path_glob else f"*{path_glob}*")
+        if source:
+            sql += " AND d.source = ?"
+            params.append(source)
 
         rows = self.conn.execute(sql, params).fetchall()
         hits = [
@@ -114,6 +140,8 @@ class SearchService:
                 path=row["path"],
                 heading_path=row["heading_path"],
                 score=scores.get(row["id"], 0.0),
+                source=row["source"] or "vault",
+                title=row["title"],
             )
             for row in rows
         ]

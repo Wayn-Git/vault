@@ -5,6 +5,7 @@ import { useApp } from '../store.jsx'
 import { forSettings } from '../nav.js'
 import { useConfirm } from './ui/ConfirmDialog.jsx'
 import Badge from './ui/Badge.jsx'
+import BrandKit from './BrandKit.jsx'
 import { useModalDismiss, onOverlayMouseDown } from '../hooks/useModalDismiss.js'
 import { useFocusTrap } from '../hooks/useFocusTrap.js'
 
@@ -24,6 +25,10 @@ import { useFocusTrap } from '../hooks/useFocusTrap.js'
 const SECTIONS = [
   { id: 'general', label: 'General', icon: 'sliders' },
   { id: 'models', label: 'Models', icon: 'cpu' },
+  // Not a rail page: this is edited twice a year, and it belongs beside the
+  // other things that change how a turn behaves rather than beside the pages
+  // you open every day.
+  { id: 'brand', label: 'Brand', icon: 'star' },
   { id: 'permissions', label: 'Permissions', icon: 'key' },
   { id: 'data', label: 'Data', icon: 'trash' },
 ]
@@ -108,6 +113,8 @@ function General() {
 
       <IterationLimit />
 
+      <DailyRhythm />
+
       <TurnNotifications />
 
     </div>
@@ -167,6 +174,126 @@ function TurnNotifications() {
  * short with "iteration limit reached"; too high lets a stuck loop run a while
  * before the time guard stops it. The last step always forces an answer, so
  * raising this buys more tool calls, not a longer dead end. */
+/* When the briefing and the reviews are filed.
+ *
+ * Five knobs the server publishes as one nested `journal` object, because they
+ * are read and saved together. Hours are local: seven means seven where you
+ * are, on the same clock the reminders use. */
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+function DailyRhythm() {
+  const { toast } = useApp()
+  const [state, setState] = useState(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    api.settings()
+      .then((s) => setState(s.journal))
+      .catch((err) => toast(err.message, 'bad'))
+  }, [toast])
+
+  const save = async (patch) => {
+    setSaving(true)
+    try {
+      const s = await api.updateSettings({ journal: patch })
+      setState(s.journal)  // reflect the server's clamp
+    } catch (err) { toast(err.message, 'bad') } finally { setSaving(false) }
+  }
+
+  if (!state) return null
+  const hours = Array.from({ length: 24 }, (_, h) => h)
+
+  return (
+    <>
+      <h3>Daily rhythm</h3>
+      <p className="set-note">
+        When the morning briefing and the evening check-in are filed. Both run while PSOK is
+        open, on this machine&rsquo;s own clock. A day PSOK was never open for is simply not filed —
+        you can write one at any time from Today.
+      </p>
+      <div className="set-rows">
+        <div className="set-row">
+          <span>
+            Morning briefing
+            <span className="set-sub">Written from your calendar, tasks, inbox and library</span>
+          </span>
+          <span className="set-row-tail">
+            <select
+              value={state.briefing_hour}
+              disabled={saving}
+              aria-label="Briefing hour"
+              onChange={(e) => save({ briefing_hour: Number(e.target.value) })}
+            >
+              {hours.map((h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+            </select>
+            <button
+              type="button"
+              className={`btn btn--small${state.briefing_enabled ? ' btn--primary' : ''}`}
+              aria-pressed={state.briefing_enabled}
+              disabled={saving}
+              onClick={() => save({ briefing_enabled: !state.briefing_enabled })}
+            >
+              {state.briefing_enabled ? 'On' : 'Off'}
+            </button>
+          </span>
+        </div>
+        <div className="set-row">
+          <span>
+            Evening check-in
+            <span className="set-sub">
+              Filed with the day&rsquo;s real figures. Nothing is written up until you answer it.
+            </span>
+          </span>
+          <span className="set-row-tail">
+            <select
+              value={state.review_hour}
+              disabled={saving}
+              aria-label="Review hour"
+              onChange={(e) => save({ review_hour: Number(e.target.value) })}
+            >
+              {hours.map((h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+            </select>
+            <button
+              type="button"
+              className={`btn btn--small${state.review_enabled ? ' btn--primary' : ''}`}
+              aria-pressed={state.review_enabled}
+              disabled={saving}
+              onClick={() => save({ review_enabled: !state.review_enabled })}
+            >
+              {state.review_enabled ? 'On' : 'Off'}
+            </button>
+          </span>
+        </div>
+        <div className="set-row">
+          <span>
+            Weekly review
+            <span className="set-sub">Rolls up that week&rsquo;s check-ins, at the review hour</span>
+          </span>
+          <span className="set-row-tail">
+            <select
+              value={state.weekly_weekday}
+              disabled={saving}
+              aria-label="Weekly review day"
+              onChange={(e) => save({ weekly_weekday: Number(e.target.value) })}
+            >
+              {WEEKDAYS.map((day, i) => <option key={day} value={i}>{day}</option>)}
+            </select>
+            <button
+              type="button"
+              className={`btn btn--small${state.weekly_enabled ? ' btn--primary' : ''}`}
+              aria-pressed={state.weekly_enabled}
+              disabled={saving}
+              onClick={() => save({ weekly_enabled: !state.weekly_enabled })}
+            >
+              {state.weekly_enabled ? 'On' : 'Off'}
+            </button>
+          </span>
+        </div>
+      </div>
+    </>
+  )
+}
+
 function IterationLimit() {
   const { toast } = useApp()
   const [value, setValue] = useState('')
@@ -848,6 +975,7 @@ function Data() {
 const PANELS = {
   general: General,
   models: Models,
+  brand: BrandKit,
   permissions: Permissions,
   data: Data,
 }

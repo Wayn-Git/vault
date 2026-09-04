@@ -143,8 +143,27 @@ class Indexer:
             report.removed = self._prune_missing(root, {str(p) for p in files}, report)
         return report
 
-    async def index_file(self, path: Path, report: IndexReport | None = None) -> int:
-        """Index one file. Returns the number of chunks embedded (0 if unchanged)."""
+    async def index_file(
+        self,
+        path: Path,
+        report: IndexReport | None = None,
+        *,
+        source: str = "vault",
+        title: str | None = None,
+        require_embeddings: bool = True,
+    ) -> int:
+        """Index one file. Returns the number of chunks embedded (0 if unchanged).
+
+        `source` and `title` are recorded on the `documents` row the first time a
+        path is seen, so material that is not a vault file -- a captured article,
+        say -- can be indexed by the same machinery and still be told apart at
+        search time.
+
+        `require_embeddings=False` indexes keyword-only when the embedder cannot
+        be reached, recording the reason in the report. The vault path keeps the
+        default: a broken embedder there affects every file and should fail once,
+        loudly, rather than quietly building half an index.
+        """
         report = report or IndexReport()
         path = Path(path).expanduser().resolve()
 
@@ -176,14 +195,15 @@ class Indexer:
         else:
             cursor = self.conn.execute(
                 "INSERT INTO documents (path, content_hash, file_type, size_bytes, mtime,"
-                " title, source, indexed_at) VALUES (?, ?, ?, ?, ?, ?, 'vault', datetime('now'))",
+                " title, source, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                 (
                     str(path),
                     digest,
                     path.suffix.lstrip("."),
                     stat.st_size,
                     stat.st_mtime,
-                    path.stem,
+                    title or path.stem,
+                    source,
                 ),
             )
             document_id = cursor.lastrowid
@@ -206,7 +226,20 @@ class Indexer:
 
         new_chunks = [chunk for h, chunk in incoming.items() if h not in stored]
         if new_chunks:
-            vectors = await self.embedder.embed([c.content for c in new_chunks])
+            # Before anything is written: keyword search must not depend on an
+            # embedder answering. See store.ensure_keyword_index.
+            store.ensure_keyword_index(self.conn)
+            try:
+                vectors = await self.embedder.embed([c.content for c in new_chunks])
+            except EmbeddingError as exc:
+                if require_embeddings:
+                    raise
+                # Findable by keyword now, and by meaning after a re-index once
+                # the embedder is back. Silently dropping the chunk instead
+                # would lose the document for the sake of half its index.
+                log.info("indexing %s without embeddings: %s", path.name, exc)
+                report.errors.append(f"embeddings unavailable: {exc}")
+                vectors = []
             if vectors and len(vectors) != len(new_chunks):
                 # Pairing by position is only valid if the counts match; a short
                 # response would silently attach each vector to the wrong chunk.

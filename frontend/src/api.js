@@ -340,6 +340,47 @@ export const api = {
   mcpReconcile: () => j('/mcp/reconcile', json('POST', {})),
   mcpConnect: (name) =>
     j(`/mcp/servers/${encodeURIComponent(name)}/connect`, json('POST', {})),
+
+  // One read for the whole Today page: the day's events, what is owed, what is
+  // unread, what was logged, and this morning's briefing. `degraded` names any
+  // section that could not be read, so the page says so instead of showing a
+  // zero nobody measured.
+  today: () => j('/today'),
+
+  journal: (kind) => j(`/journal${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+  journalEntry: (id) => j(`/journal/${id}`),
+  // `force` rewrites an entry that already exists — the Regenerate button.
+  generateJournal: (kind, { date = null, force = false } = {}) =>
+    j(`/journal/${encodeURIComponent(kind)}/generate?force=${force ? 'true' : 'false'}`
+      + (date ? `&entry_date=${encodeURIComponent(date)}` : ''), json('POST')),
+  // The check-in answers. Stored before the model runs, so a provider that
+  // fails costs the write-up and never what was typed.
+  answerJournal: (id, userNotes) => j(`/journal/${id}`, json('PATCH', { user_notes: userNotes })),
+  deleteJournal: (id) => j(`/journal/${id}`, json('DELETE')),
+
+  // With `q`, a hybrid search over captured text; without it, the most recent
+  // items. Both come back as items rather than passages.
+  library: ({ q = '', kind = '', limit = 50 } = {}) =>
+    j(`/library?limit=${limit}`
+      + (q ? `&q=${encodeURIComponent(q)}` : '')
+      + (kind ? `&kind=${encodeURIComponent(kind)}` : '')),
+  addLibraryItem: (body) => j('/library', json('POST', body)),
+  updateLibraryItem: (id, patch) => j(`/library/${id}`, json('PATCH', patch)),
+  deleteLibraryItem: (id) => j(`/library/${id}`, json('DELETE')),
+  // Clears the process-wide "that embedder refused" cache first, so starting
+  // Ollama and pressing this is enough — no restart.
+  reindexLibraryItem: (id) => j(`/library/${id}/reindex`, json('POST')),
+
+  // Voice, values, palette, fonts. The response carries `prompt_block`: the
+  // literal text the model will be handed, so the effect is visible.
+  brand: () => j('/brand'),
+  saveBrand: (body) => j('/brand', json('PUT', body)),
+
+  // Sharing is off until a token exists. The token comes back exactly once,
+  // from `rotateShareToken`, and nothing reads it out of the keychain again.
+  shareStatus: () => j('/share'),
+  rotateShareToken: () => j('/share/token', json('POST')),
+  revokeShareToken: () => j('/share/token', json('DELETE')),
 }
 
 /** Parse a timestamp the *server* wrote, which is UTC and does not say so.

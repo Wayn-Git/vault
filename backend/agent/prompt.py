@@ -116,6 +116,18 @@ def build_system_prompt(
     except Exception:
         pass
 
+    # How the user wants to be written *for*, when they ask for something in
+    # their own voice. Best-effort like the block above: an unreadable brand
+    # profile costs the voice, never the turn.
+    try:
+        from backend.brand import prompt_block
+
+        brand = prompt_block()
+        if brand:
+            parts.append(brand)
+    except Exception:
+        pass
+
     if memories:
         rendered = "\n".join(f"  - {m}" for m in memories)
         parts.append(f"<memories>\n{rendered}\n</memories>")

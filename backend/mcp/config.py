@@ -91,7 +91,14 @@ class ServerConfig:
     # behaviour
     enabled: bool = True
     startup: bool = False
-    timeout_seconds: float = 60.0
+    # 60s was too short for real tool work: a Playwright chain (navigate,
+    # wait for load, click, screenshot), a Firecrawl deep crawl, or a wide
+    # GitHub/LinkedIn search routinely takes longer, and the failure this
+    # produced -- "did not respond within 60s -- its tools are not reaching
+    # the agent" -- looked exactly like a dead connector while the server was
+    # simply still working. 180s matches the automation run ceiling: a slow
+    # tool is not a broken one.
+    timeout_seconds: float = 180.0
     # How long a *person* gets to finish an interactive sign-in, as against
     # `timeout_seconds`, which is how long a *server* gets to answer. Matched to
     # the loopback callback's own wait: a shorter one here abandons a sign-in
@@ -208,7 +215,7 @@ class ServerConfig:
             data["enabled"] = False
         if self.api_key_header != "Authorization":
             data["api_key_header"] = self.api_key_header
-        if self.timeout_seconds != 60.0:
+        if self.timeout_seconds != 180.0:
             data["timeout_seconds"] = self.timeout_seconds
         if self.auth_timeout_seconds != 300.0:
             data["auth_timeout_seconds"] = self.auth_timeout_seconds
@@ -237,7 +244,7 @@ class ServerConfig:
             api_key_query_param=raw.get("api_key_query_param"),
             enabled=bool(raw.get("enabled", True)),
             startup=bool(raw.get("startup", False)),
-            timeout_seconds=float(raw.get("timeout_seconds", 60.0)),
+            timeout_seconds=float(raw.get("timeout_seconds", 180.0)),
             auth_timeout_seconds=float(raw.get("auth_timeout_seconds", 300.0)),
             source=Source(raw.get("source", "configured")),
             catalogue_id=raw.get("catalogue_id"),

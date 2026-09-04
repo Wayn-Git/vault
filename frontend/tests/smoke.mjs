@@ -573,6 +573,56 @@ try {
     )) !== doomedId && consoleErrors.length === 0)
 
 
+  // --- Today and the Library ------------------------------------------------
+  //
+  // Both pages have to be true before anything is configured, which is the
+  // state a first run is actually in. The thing being asserted is not that a
+  // number appeared -- it is that no sentence on the page is prose nobody
+  // generated: a section that could not be read says so.
+
+  await page.goto(`${BASE}/today`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.today-grid', { timeout: 15000 })
+  check('today opens on its own URL', (await page.locator('.today-grid').count()) === 1)
+
+  const todayText = await page.locator('.view-inner').innerText()
+  const briefingCard = await page.locator('.brief, .empty-state').first().innerText()
+  check('the day is described rather than asserted',
+    /schedule|owed|inbox|logged/i.test(todayText))
+  // Either there is a briefing, or there is a sentence saying why there is not.
+  check('a missing briefing explains itself',
+    (await page.locator('.brief-body').count()) > 0 || briefingCard.trim().length > 20,
+    briefingCard.split('\n')[0]?.slice(0, 70))
+
+  const signals = await (await fetch(`${BASE}/api/today`)).json()
+  for (const [source, reason] of Object.entries(signals.degraded || {})) {
+    check(`${source} says why it is unavailable rather than showing a zero`,
+      todayText.includes(reason.slice(0, 24)), reason.slice(0, 60))
+  }
+
+  await page.goto(`${BASE}/library`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.lib-capture', { timeout: 15000 })
+  check('the library opens on its own URL', (await page.locator('.lib-capture').count()) === 1)
+
+  // The bookmarklet's whole mechanism: a navigation carrying ?url=, which the
+  // page reads into the field and then takes back out of the address bar.
+  await page.goto(`${BASE}/library?url=${encodeURIComponent('https://example.com/from-bookmarklet')}`,
+    { waitUntil: 'networkidle' })
+  await page.waitForSelector('.lib-capture-row input', { timeout: 15000 })
+  await page.waitForTimeout(300)
+  check('a shared link arrives prefilled',
+    (await page.locator('.lib-capture-row input').inputValue()).includes('from-bookmarklet'))
+  check('and is taken back out of the address bar', !page.url().includes('url='))
+
+  // Digit 9 only works if App.jsx's regex and keys.js were both widened.
+  await page.keyboard.press('Control+8')
+  await page.waitForTimeout(400)
+  check('mod+8 reaches Today', page.url().endsWith('/today'), page.url())
+  await page.keyboard.press('Control+9')
+  await page.waitForTimeout(400)
+  check('mod+9 reaches the Library', page.url().endsWith('/library'), page.url())
+
+  await page.goto(BASE, { waitUntil: 'networkidle' })
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '))
 } finally {
   await browser.close()

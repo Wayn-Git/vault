@@ -4709,6 +4709,151 @@ a.md-image:hover { color: var(--text); border-color: var(--hairline-strong); }
 .task-rail-new input:focus { border-color: var(--hairline-strong); }
 .task-rail-new .btn { flex: none; }
 
+/* ================================================ polish pass — additive
+   Targeted refinements to elevate the existing design. Every rule here is
+   either tightening an existing hover, adding depth to an interaction that
+   felt flat, or smoothing an entrance that was instant.
+
+   Nothing here changes the layout, the colours, or the class names. */
+
+/* ---- card lift on hover ------------------------------------------------ */
+/* The existing stat/module hover was `translate3d(0, -2px, 0)` — this adds a
+   subtle shadow shift so it reads as physically lifting, not sliding. */
+@media (hover: hover) and (pointer: fine) {
+  .stat:hover {
+    border-color: var(--hairline-strong);
+    transform: translate3d(0, -2px, 0);
+    box-shadow: 0 8px 24px -12px rgb(var(--shade) / 0.5);
+    transition: transform var(--menu) var(--ease-out),
+                border-color var(--menu) var(--ease-out),
+                box-shadow var(--menu) var(--ease-out);
+  }
+}
+
+.stat {
+  transition: transform var(--menu) var(--ease-out),
+              border-color var(--menu) var(--ease-out),
+              box-shadow var(--menu) var(--ease-out);
+}
+
+/* ---- chat messages: smoother entry ------------------------------------ */
+/* Only newly-arriving messages get this. Historical items are left alone so
+   switching conversations doesn't replay forty animations at once. The
+   `.stream-item:last-child` selector targets only the most recent item. */
+.stream-item:last-child {
+  animation: msg-enter 0.4s var(--ease-out) both;
+}
+
+@keyframes msg-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+}
+
+/* ---- sidebar rail: subtle active indicator ----------------------------- */
+/* The existing `.rail-place.active` uses a background tint. This adds a left
+   accent so the active page is visible in peripheral vision. */
+.rail-place.active {
+  border-left: 2px solid var(--text);
+  padding-left: 10px;
+}
+
+/* ---- composer glow on focus -------------------------------------------- */
+/* The existing focus state adds a stronger hairline. This adds a subtle glow
+   from the accent colour so the composer feels like it wakes up. */
+.composer:focus-within {
+  box-shadow: 0 1px 0 rgb(var(--tint) / 0.05) inset,
+              0 14px 34px -24px rgb(var(--shade) / 0.95),
+              0 0 0 1px rgb(var(--tint) / 0.06);
+}
+
+/* ---- hero: more dramatic entrance ------------------------------------- */
+/* The existing `rise` keyframe is 420ms — this stacks a scale so the
+   headline enters with mass rather than just sliding up. */
+.hero h1 {
+  animation: hero-headline 0.56s var(--ease-out) forwards;
+  opacity: 0;
+}
+
+@keyframes hero-headline {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+/* ---- rail conversation rows: reveal detail on hover ------------------- */
+/* The timestamp and more-button already fade in — this adds a subtle
+   background transition so the row reads as a single interactive region. */
+.rail-conv {
+  transition: background var(--press) var(--ease-out),
+              color var(--press) var(--ease-out),
+              transform var(--press) var(--ease-out);
+}
+
+/* ---- module rows: directional hint ------------------------------------ */
+/* The existing `translate3d(2px, 0, 0)` on hover was a start — this ensures
+   the chevron icon in module rows also shifts to reinforce direction. */
+@media (hover: hover) and (pointer: fine) {
+  .module-row:hover .module-meta {
+    transform: translate3d(3px, 0, 0);
+    transition: transform var(--menu) var(--ease-out);
+  }
+}
+
+.module-meta {
+  transition: transform var(--menu) var(--ease-out);
+}
+
+/* ---- toast entrance: slide + fade ------------------------------------- */
+/* `@starting-style` handles modern browsers; this adds a fallback keyframe
+   for wider support. */
+.toast {
+  animation: toast-in var(--menu) var(--ease-out) both;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.98);
+  }
+}
+
+/* ---- boot screen: softer pulse ---------------------------------------- */
+/* The boot bar's slider was a hard shuttle. This adds an ease that makes
+   the indeterminate bar feel organic rather than mechanical. */
+.boot-bar > span {
+  animation: boot-slide 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* ---- card focus: keyboard-accessible lift ------------------------------ */
+.card:focus-within {
+  border-color: var(--hairline-strong);
+  transition: border-color var(--pop) var(--ease-out);
+}
+
+/* ---- view swap: slightly more presence -------------------------------- */
+/* The existing swap is 220ms slide-up. Adding a scale creates a sense of
+   depth — the old view recedes as the new one arrives. */
+@keyframes swap {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0) scale(0.995);
+  }
+}
+
+/* ---- GSAP entrance support -------------------------------------------- */
+/* GSAP uses autoAlpha (visibility+opacity). These ensure data-enter elements
+   start hidden for GSAP to animate in, replacing the CSS-only .enter class. */
+[data-enter] {
+  visibility: visible;
+}
+
 /* ------------------------------------------------------- touch targets
 
    Last in the file on purpose. These override sizes chosen for a cursor, and
@@ -4753,4 +4898,342 @@ a.md-image:hover { color: var(--text); border-color: var(--hairline-strong); }
     bottom: calc(10px + env(safe-area-inset-bottom));
     max-width: none;
   }
+}
+
+/* ---- today, library, brand ----
+ *
+ * Three pages added together, sharing the panel shape the rest of the app
+ * already has: a `.card` with a mono micro-caps title and rows under it. Every
+ * colour here is a token and every highlight is `rgb(var(--tint) / a)`, so both
+ * themes follow from the two mixing channels rather than from a second palette.
+ *
+ * The one rule specific to these pages: a figure the server could not measure
+ * is never drawn as a zero. `.today-empty--why` is the treatment for "this is
+ * missing, and here is the reason", and it reads as text rather than as an
+ * error, because a Gmail account nobody has signed into is not a fault. */
+
+.today-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  /* Each card is as tall as what it has to say. Stretching them to match left
+     "Nothing scheduled." floating in a panel the height of a six-item list,
+     which reads as something failing to load rather than a free morning. */
+  align-items: start;
+  gap: var(--space-lg);
+  margin-top: var(--space-lg);
+}
+
+@media (max-width: 860px) { .today-grid { grid-template-columns: 1fr; } }
+
+.today-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.today-panel-head .card-title { margin: 0; }
+
+.today-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+
+.today-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  padding: var(--space-sm) 0;
+  border-top: 1px solid var(--hairline);
+  font-size: var(--text-sm);
+}
+
+.today-row:first-child { border-top: 0; }
+
+.today-when {
+  flex: none;
+  min-width: 46px;
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.today-what { min-width: 0; color: var(--text); }
+.today-row--flat .today-what { padding-left: 0; }
+.today-sub { display: block; margin-top: 2px; font-size: var(--text-2xs); color: var(--text-faint); }
+
+.today-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.today-counts b {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  color: var(--text);
+  margin-right: 5px;
+}
+
+/* Overdue and a connector that is not answering are the same signal: something
+   here wants attention. It gets the one colour that means that. */
+.today-counts .is-late, .today-counts .is-late b { color: var(--confirm); }
+
+.today-empty { margin: 0; font-size: var(--text-sm); color: var(--text-faint); }
+
+.today-empty--why {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  line-height: var(--leading-normal);
+}
+
+.today-empty--why svg { flex: none; margin-top: 2px; }
+
+.brief { margin-top: var(--space-lg); }
+
+.brief-body { display: grid; gap: var(--space-md); }
+
+.brief-body p {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--text);
+}
+
+.brief-by {
+  margin-top: var(--space-md);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.review-card { margin-top: var(--space-lg); }
+
+.review-questions { display: grid; gap: var(--space-md); }
+
+.review-q { display: grid; gap: var(--space-2xs); }
+
+.review-q > span { font-size: var(--text-sm); color: var(--text-dim); }
+
+.review-q textarea {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--pop) var(--ease-out);
+}
+
+.review-q textarea:focus { border-color: var(--hairline-strong); }
+
+.review-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+/* -- library -- */
+
+.lib-capture { margin-bottom: var(--space-lg); }
+
+.lib-capture-row { display: flex; gap: var(--space-sm); flex-wrap: wrap; }
+.lib-capture-row .lib-input { flex: 1; min-width: 220px; }
+
+.lib-input, .lib-select {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  outline: none;
+  transition: border-color var(--pop) var(--ease-out);
+}
+
+.lib-input:focus, .lib-select:focus { border-color: var(--hairline-strong); }
+textarea.lib-input { width: 100%; margin-top: var(--space-sm); resize: vertical; }
+
+.lib-manual { margin-top: var(--space-md); }
+
+.lib-manual summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  list-style: none;
+}
+
+.lib-manual summary::-webkit-details-marker { display: none; }
+.lib-manual summary::before { content: '+ '; }
+.lib-manual[open] summary::before { content: '– '; }
+.lib-manual summary:hover { color: var(--text-dim); }
+
+.lib-manual-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+@media (max-width: 640px) { .lib-manual-grid { grid-template-columns: 1fr; } }
+
+.lib-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.lib-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex: 1;
+  min-width: 200px;
+  padding-left: var(--space-md);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text-faint);
+}
+
+.lib-search .lib-input { flex: 1; border: 0; background: transparent; padding-left: 0; }
+.lib-search:focus-within { border-color: var(--hairline-strong); }
+
+.lib-total { font-size: var(--text-2xs); color: var(--text-faint); }
+
+.lib-rows { display: grid; gap: var(--space-sm); }
+
+.lib-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+}
+
+.lib-row-icon { flex: none; color: var(--text-faint); padding-top: 2px; }
+.lib-row-body { flex: 1; min-width: 0; }
+
+.lib-row-title { font-size: var(--text-md); color: var(--text); line-height: var(--leading-tight); }
+.lib-row-title a { color: inherit; text-decoration: none; }
+.lib-row-title a:hover { text-decoration: underline; }
+
+.lib-row-meta {
+  margin-top: var(--space-2xs);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.lib-row-excerpt {
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-dim);
+}
+
+.lib-row-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.lib-row-actions { flex: none; display: flex; gap: var(--space-2xs); }
+
+.lib-share { margin-bottom: var(--space-lg); }
+
+.lib-token {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin: var(--space-md) 0;
+  padding: var(--space-md);
+  border: 1px solid var(--confirm-line);
+  border-radius: var(--r-sm);
+  background: var(--confirm-soft);
+}
+
+.lib-token code {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+}
+
+/* -- brand -- */
+
+/* BrandKit labels its fields with a <span>, because the whole control is
+   already wrapped in a <label>. Its own class rather than `.field`: adding a
+   margin to `.field` would move every form in Settings and in the connector
+   panels, none of which asked for one. */
+.brand-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-md); }
+
+.brand-field > span:first-child {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.brand-field input, .brand-field select, .brand-field textarea {
+  padding: 8px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--canvas-deep);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  outline: none;
+  transition: border-color var(--pop) var(--ease-out);
+}
+
+.brand-field input:focus,
+.brand-field select:focus,
+.brand-field textarea:focus { border-color: var(--hairline-strong); }
+
+.brand-field .field-note { line-height: var(--leading-normal); }
+
+.brand-pairs { display: grid; gap: var(--space-sm); }
+
+.brand-pair { display: flex; align-items: center; gap: var(--space-sm); }
+.brand-pair input { flex: 1; min-width: 0; }
+
+.brand-swatch {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--hairline-strong);
+}
+
+.brand-preview {
+  margin: 0;
+  padding: var(--space-lg);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--canvas-deep);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-normal);
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-x: auto;
 }

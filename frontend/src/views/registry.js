@@ -13,11 +13,13 @@ import Chat from './Chat.jsx'
  * is what keeps fast refresh working on it. */
 
 const LOADERS = {
+  today: () => import('./Today.jsx'),
   tasks: () => import('./Tasks.jsx'),
   mail: () => import('./Mail.jsx'),
   capabilities: () => import('./Capabilities.jsx'),
   automations: () => import('./Automations.jsx'),
   memory: () => import('./Memory.jsx'),
+  library: () => import('./Library.jsx'),
   logs: () => import('./Logs.jsx'),
   dash: () => import('./Dashboard.jsx'),
 }

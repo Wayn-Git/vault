@@ -49,8 +49,19 @@ class Paths:
     def sandbox_yaml(self) -> Path:
         return self.config_dir / "sandbox.yaml"
 
+    @property
+    def library_dir(self) -> Path:
+        """Where captured text lives, as real files (ADR-0004).
+
+        The library row records what a thing was and when it was read; the text
+        itself is a file here, indexed by the same indexer that reads the vault.
+        That is what lets `search_documents` find a saved article without
+        knowing the library exists.
+        """
+        return self.home / "library"
+
     def ensure(self) -> None:
-        for d in (self.home, self.config_dir, self.skills_dir, self.logs_dir):
+        for d in (self.home, self.config_dir, self.skills_dir, self.logs_dir, self.library_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -460,3 +471,111 @@ def remove_provider(name: str, path: Path | None = None) -> bool:
         return False
     save_providers(kept, path)
     return True
+
+
+#: When the day's briefing and review are filed. Local hours on the machine's
+#: own clock, because "seven in the morning" means seven where the user is --
+#: the same reason `backend/reminders.py` compares against `datetime.now()`.
+#:
+#: Five knobs, one setting: they are read together, saved together, and shown as
+#: one block in the interface, so they are published as a nested object rather
+#: than as five flat keys with five sets of bounds.
+DEFAULT_BRIEFING_HOUR = 7
+DEFAULT_REVIEW_HOUR = 21
+#: Sunday, in Python's Monday=0 numbering. The last day of the week it reviews.
+DEFAULT_WEEKLY_WEEKDAY = 6
+
+_JOURNAL_SETTINGS = {
+    "briefing_enabled": ("journal.briefing_enabled", True),
+    "briefing_hour": ("journal.briefing_hour", DEFAULT_BRIEFING_HOUR),
+    "review_enabled": ("journal.review_enabled", True),
+    "review_hour": ("journal.review_hour", DEFAULT_REVIEW_HOUR),
+    "weekly_enabled": ("journal.weekly_enabled", True),
+    "weekly_weekday": ("journal.weekly_weekday", DEFAULT_WEEKLY_WEEKDAY),
+}
+
+
+@dataclass(frozen=True)
+class JournalSchedule:
+    briefing_enabled: bool = True
+    briefing_hour: int = DEFAULT_BRIEFING_HOUR
+    review_enabled: bool = True
+    review_hour: int = DEFAULT_REVIEW_HOUR
+    weekly_enabled: bool = True
+    weekly_weekday: int = DEFAULT_WEEKLY_WEEKDAY
+
+    def as_dict(self) -> dict:
+        return {
+            "briefing_enabled": self.briefing_enabled,
+            "briefing_hour": self.briefing_hour,
+            "review_enabled": self.review_enabled,
+            "review_hour": self.review_hour,
+            "weekly_enabled": self.weekly_enabled,
+            "weekly_weekday": self.weekly_weekday,
+        }
+
+
+def _clamp_hour(value: object, default: int) -> int:
+    try:
+        return min(23, max(0, int(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def load_journal_schedule() -> JournalSchedule:
+    """When the journal fires. Never raises -- a bad row falls back to the default."""
+    values: dict[str, object] = {}
+    try:
+        from backend.db.connection import get_connection
+
+        keys = [key for key, _ in _JOURNAL_SETTINGS.values()]
+        placeholders = ",".join("?" * len(keys))
+        rows = get_connection().execute(
+            f"SELECT key, value FROM app_settings WHERE key IN ({placeholders})", keys
+        ).fetchall()
+        stored = {row["key"]: row["value"] for row in rows}
+    except Exception:
+        return JournalSchedule()
+
+    for field_name, (key, default) in _JOURNAL_SETTINGS.items():
+        raw = stored.get(key)
+        if raw is None:
+            values[field_name] = default
+        elif isinstance(default, bool):
+            values[field_name] = raw == "1"
+        elif field_name == "weekly_weekday":
+            try:
+                values[field_name] = min(6, max(0, int(raw)))
+            except (TypeError, ValueError):
+                values[field_name] = default
+        else:
+            values[field_name] = _clamp_hour(raw, default)
+    return JournalSchedule(**values)  # type: ignore[arg-type]
+
+
+def save_journal_schedule(patch: dict) -> JournalSchedule:
+    """Persist only the fields given, clamped. Returns the whole schedule."""
+    from backend.db.connection import get_connection
+
+    conn = get_connection()
+    for field_name, (key, default) in _JOURNAL_SETTINGS.items():
+        if field_name not in patch or patch[field_name] is None:
+            continue
+        raw = patch[field_name]
+        if isinstance(default, bool):
+            value = "1" if raw else "0"
+        elif field_name == "weekly_weekday":
+            try:
+                value = str(min(6, max(0, int(raw))))
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = str(_clamp_hour(raw, default))
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = datetime('now')",
+            (key, value),
+        )
+    conn.commit()
+    return load_journal_schedule()

@@ -12,6 +12,7 @@ from backend.mail.gmail import (
     reply,
     thread,
     threads,
+    unread_count,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "reply",
     "thread",
     "threads",
+    "unread_count",
 ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from backend.config import ProviderConfig, load_providers, load_tiers
+from backend.config import ProviderConfig, configured_providers, load_providers, load_tiers
 from backend.runtime.http import MAX_RETRIES
 from backend.runtime.providers import anthropic, google, ollama, openai_compat
 from backend.runtime.types import ResolvedModel
@@ -68,6 +68,48 @@ def resolve_tier(
         # was never named.
         log.warning("tier '%s' names %s, which cannot be resolved", tier, entry.provider)
         return None
+
+
+def default_chain(*, tier: str = "fast", limit: int | None = None) -> list:
+    """Who to ask for background work that has no conversation behind it.
+
+    A turn gets its provider from the conversation and its fallbacks from
+    `build_chain`. A briefing has no conversation, so this picks the head the
+    same way the rest of the system would -- the named tier if there is one,
+    otherwise the first configured provider that declares a model -- and then
+    hands it to `build_chain` for the alternatives.
+
+    Walking a chain matters more here than it does in a turn. Nobody is watching
+    at seven in the morning, and providers.yaml commonly lists a local endpoint
+    first: without the chain, "Ollama is not running" was the entire briefing on
+    a machine with two working cloud providers configured behind it.
+
+    An empty list means nothing on this machine can answer, which the caller
+    must say out loud. An entry with no prose and a stated reason is honest; an
+    entry with invented prose is not.
+    """
+    from backend.runtime.chain import MAX_FALLBACK_LINKS, Link, _usable, build_chain
+
+    configured = configured_providers()
+    head: Link | None = None
+
+    entry = load_tiers().get(tier)
+    if entry is not None and entry.provider in configured:
+        head = Link(provider=entry.provider, model=entry.model)
+    else:
+        for name, config in configured.items():
+            if _usable(name, config):
+                head = Link(provider=name, model=config.default_model or "")
+                break
+
+    if head is None:
+        return []
+    return build_chain(
+        head.provider,
+        head.model,
+        configs=configured,
+        limit=MAX_FALLBACK_LINKS if limit is None else limit,
+    )
 
 
 def resolve(

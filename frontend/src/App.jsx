@@ -67,7 +67,7 @@ function useGlobalKeys() {
       if (combo === 'mod+p') { e.preventDefault(); setView('chat'); chat.togglePin?.(); return }
       if (combo === 'f2' && activeId) { e.preventDefault(); setView('chat'); chat.beginRename?.(activeId); return }
 
-      const digit = /^mod\+([1-7])$/.exec(combo)
+      const digit = /^mod\+([1-9])$/.exec(combo)
       if (digit) {
         e.preventDefault()
         const target = byDigit(Number(digit[1]))

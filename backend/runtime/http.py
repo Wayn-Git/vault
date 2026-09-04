@@ -85,12 +85,30 @@ def backoff(attempt: int) -> float:
 _CLIENTS: dict[object, httpx.AsyncClient] = {}
 
 
+#: The longest a connect may take. A dead endpoint should fail fast; it is the
+#: *read* -- time to first byte, and time between stream chunks -- that wants to
+#: be generous, because a slow model is not a broken one. OpenCode allows 300s
+#: for the first byte for exactly this reason; PSOK's flat 120s was killing slow
+#: reasoning models mid-answer.
+CONNECT_TIMEOUT = 10.0
+
+
+def _as_timeout(timeout: float) -> httpx.Timeout:
+    """A float budget as a structured httpx timeout: fast connect, generous rest.
+
+    httpx read-timeout on a stream is the gap *between* chunks, not the whole
+    response, so a large value does not let a truly dead stream hang -- the
+    per-chunk clock still trips. It only stops a slow-but-alive generation from
+    being cut off."""
+    return httpx.Timeout(timeout, connect=min(CONNECT_TIMEOUT, timeout))
+
+
 def _client(timeout: float) -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     client = _CLIENTS.get(loop)
     if client is None or client.is_closed:
         client = httpx.AsyncClient(
-            timeout=timeout,
+            timeout=_as_timeout(timeout),
             limits=httpx.Limits(max_keepalive_connections=16, keepalive_expiry=300.0),
         )
         _CLIENTS[loop] = client
@@ -144,7 +162,7 @@ async def post_json(
     for attempt in range(max_retries + 1):
         try:
             response = await _client(timeout).post(
-                url, headers=headers, json=payload, params=params, timeout=timeout
+                url, headers=headers, json=payload, params=params, timeout=_as_timeout(timeout)
             )
         except TRANSIENT_EXCEPTIONS as exc:
             last_error = f"{type(exc).__name__}: {exc}"
@@ -212,7 +230,12 @@ async def stream_sse(
         started = False
         try:
             async with _client(timeout).stream(
-                "POST", url, headers=headers, json=payload, params=params, timeout=timeout
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                params=params,
+                timeout=_as_timeout(timeout),
             ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode(errors="replace")[:1000]

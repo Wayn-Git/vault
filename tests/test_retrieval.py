@@ -476,3 +476,86 @@ async def test_an_empty_index_costs_the_turn_no_retrieval_work(db, monkeypatch):
         pass
 
     assert "<retrieved_context>" not in client.system_prompts[0]
+
+
+# -- indexing without an embedder, and telling sources apart ------------------
+
+
+class _Dead:
+    """An embedding server that is not running, which is the common case."""
+
+    provider, model = "ollama", "nomic-embed-text"
+
+    async def embed(self, texts):
+        from backend.retrieval.embeddings import EmbeddingError
+
+        raise EmbeddingError("could not reach Ollama at http://localhost:11434")
+
+
+class _Fake:
+    provider, model = "ollama", "nomic-embed-text"
+
+    async def embed(self, texts):
+        return [[float(len(t) % 5), 1.0, 0.25] for t in texts]
+
+    async def embed_one(self, text):
+        return (await self.embed([text]))[0]
+
+
+async def test_the_keyword_index_does_not_depend_on_an_embedder(db, workspace):
+    """`chunks_fts` used to be created only inside `ensure_indexes`, which the
+    indexer only called once vectors had come back -- so the half of search that
+    is supposed to survive a missing embedder had no table to write into.
+
+    Mutation check: make `ensure_keyword_index` conditional on `vectors`.
+    """
+    from backend.retrieval.indexer import Indexer
+    from backend.retrieval.search import SearchService
+
+    note = workspace / "note.md"
+    note.write_text("# Note\n\nAttention residue is the cost of switching.\n")
+
+    await Indexer(embedder=_Dead()).index_file(note, require_embeddings=False)
+
+    hits = await SearchService(embedder=_Dead()).search("attention residue")
+    assert [h.label for h in hits] == ["note.md > Note"]
+
+
+async def test_a_vault_index_still_fails_loudly_without_an_embedder(db, workspace):
+    """The tolerant path is opt-in. A broken embedder affects every file in a
+    vault, so indexing one should fail once, loudly, rather than quietly build
+    half an index nobody knows is half.
+
+    Mutation check: default `require_embeddings` to False.
+    """
+    from backend.retrieval.embeddings import EmbeddingError
+    from backend.retrieval.indexer import Indexer
+
+    (workspace / "note.md").write_text("# Note\n\nSomething worth indexing.\n")
+
+    with pytest.raises(EmbeddingError):
+        await Indexer(embedder=_Dead()).index_vault(workspace)
+
+
+async def test_search_can_be_narrowed_to_one_source(db, workspace):
+    """Vault notes and captured pages share one index. "What have I read about
+    X" is a different question from "what is in my notes about X"."""
+    from backend.retrieval.indexer import Indexer
+    from backend.retrieval.search import SearchService
+
+    note = workspace / "note.md"
+    note.write_text("# Note\n\nAttention residue is the cost of switching.\n")
+    saved = workspace / "saved.md"
+    saved.write_text("# Deep Work\n\nAttention residue is the cost of switching.\n")
+
+    indexer = Indexer(embedder=_Fake())
+    await indexer.index_file(note)
+    await indexer.index_file(saved, source="library", title="Deep Work")
+
+    everything = await SearchService(embedder=_Fake()).search("attention residue")
+    assert len(everything) == 2
+
+    library_only = await SearchService(embedder=_Fake()).search(
+        "attention residue", source="library"
+    )
+    assert [h.label for h in library_only] == ["Deep Work"]

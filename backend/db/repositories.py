@@ -731,6 +731,28 @@ class TaskRepository:
             out[f"list:{row['list_id']}"] = row["n"]
         return out
 
+    def completed_between(self, start: str, end: str) -> list[sqlite3.Row]:
+        """Tasks marked done inside a window, oldest first.
+
+        `completed_at` is written by `_now()` -- local naive, space separator --
+        so the bounds must be too. SQLite compares these as plain strings, so a
+        bound in the wrong shape silently returns nothing rather than failing.
+        """
+        return self.conn.execute(
+            "SELECT * FROM tasks WHERE completed_at IS NOT NULL"
+            " AND completed_at >= ? AND completed_at <= ?"
+            " ORDER BY completed_at",
+            (start, end),
+        ).fetchall()
+
+    def open_with_due_before(self, cutoff: str, limit: int = 200) -> list[sqlite3.Row]:
+        """Still open, and already past its deadline. Same clock as above."""
+        return self.conn.execute(
+            f"SELECT * FROM tasks WHERE {self.OPEN} AND due_at IS NOT NULL AND due_at < ?"
+            " ORDER BY due_at LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+
     def dirty(self, source: str, limit: int = 200) -> list[sqlite3.Row]:
         """Rows changed locally since they last reached the connector."""
         return self.conn.execute(

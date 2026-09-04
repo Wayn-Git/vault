@@ -21,12 +21,11 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
 
-from backend.mcp.ssrf import UnsafeURL, check_url
+from backend.mcp.ssrf import UnsafeURL
 from backend.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+from backend.web.reader import USER_AGENT, FetchError, fetch_readable
 
 SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
-USER_AGENT = "Mozilla/5.0 (compatible; PSOK/0.1; +https://github.com/)"
-MAX_PAGE_BYTES = 2_000_000
 
 _RESULT = re.compile(
     r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>'
@@ -96,41 +95,17 @@ async def fetch_url(args: dict[str, Any], _: ToolContext) -> ToolResult:
     if not url:
         return ToolResult.error("fetch_url needs a url")
     try:
-        # The same guard the MCP transports use: a URL that resolves to a
-        # private address is not fetched just because a model asked for it.
-        check_url(url)
+        # The same guard the MCP transports use, applied at every redirect hop
+        # rather than only to the address the model handed over.
+        page = await fetch_readable(url)
     except UnsafeURL as exc:
         return ToolResult.error(str(exc))
+    except FetchError as exc:
+        return ToolResult.error(str(exc))
 
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=25.0) as client:
-            response = await client.get(url, headers={"User-Agent": USER_AGENT})
-    except httpx.HTTPError as exc:
-        return ToolResult.error(f"could not fetch {url}: {exc}")
-
-    if response.status_code >= 400:
-        return ToolResult.error(f"{url} returned HTTP {response.status_code}")
-
-    body = response.text[:MAX_PAGE_BYTES]
-    kind = response.headers.get("content-type", "")
-    if "html" in kind:
-        body = _readable(body)
-    return ToolResult.ok(body)
-
-
-_SCRIPTS = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_BLOCK_END = re.compile(r"</(p|div|section|article|li|h[1-6]|tr)>", re.IGNORECASE)
-
-
-def _readable(page: str) -> str:
-    """Strip a page down to its text, keeping line structure."""
-    text = _SCRIPTS.sub(" ", page)
-    text = _BLOCK_END.sub("\n", text)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = _TAGS.sub("", text)
-    text = html.unescape(text)
-    lines = [line.strip() for line in text.splitlines()]
-    return "\n".join(line for line in lines if line)
+    if page.note:
+        return ToolResult.ok(f"{page.text}\n\n[{page.note}]" if page.text else f"[{page.note}]")
+    return ToolResult.ok(page.text)
 
 
 def tools() -> list[Tool]:

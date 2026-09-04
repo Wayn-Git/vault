@@ -96,7 +96,36 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         print(f"           ! {err.path}: {err.error}")
 
     print(f"sandbox:   {platform_backend() or unavailable_reason()}")
+
+    from backend import share
+    from backend.config import load_journal_schedule
+    from backend.library.store import LibraryStore
+
+    schedule = load_journal_schedule()
+    print(
+        f"journal:   briefing {_at(schedule.briefing_enabled, schedule.briefing_hour)},"
+        f" review {_at(schedule.review_enabled, schedule.review_hour)}"
+    )
+    counts = LibraryStore().counts()
+    total = sum(counts.values())
+    print(f"library:   {total} item{'' if total == 1 else 's'} logged")
+
+    # Sharing is the one thing here that can be reached from another machine, so
+    # it is reported whether it is on or off -- a token somebody created months
+    # ago and forgot is exactly the thing a status command exists to surface.
+    if share.enabled():
+        print("share:     a capture token is set -- POST /api/share/capture accepts it")
+        print("           revoke it with: psok share-token --revoke")
+        print("           every OTHER endpoint here is unauthenticated by design.")
+        print("           If this instance is reachable from the internet, put a proxy")
+        print("           in front that publishes only /api/share/capture.")
+    else:
+        print("share:     off (no capture token)")
     return 0
+
+
+def _at(enabled: bool, hour: int) -> str:
+    return f"{hour:02d}:00" if enabled else "off"
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
@@ -754,6 +783,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from backend.api.main import _DIST
 
     url = f"http://{args.host}:{args.port}"
+    # PSOK has no authentication, by design (ADR-0001): the security model is
+    # that it is only reachable from this machine. Binding elsewhere changes
+    # that silently, and the person doing it usually means "let my phone reach
+    # the share endpoint" rather than "publish my shell".
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"! Binding to {args.host}, which is not loopback.")
+        print("! This API has no authentication. Anything that can reach this port")
+        print("! can read your files, run shell commands and read your mail.")
+        print("! Put a reverse proxy in front of it -- see docs/deployment.md.")
     if (_DIST / "index.html").is_file():
         print(f"PSOK is at {url}")
     else:
@@ -771,6 +809,39 @@ def cmd_serve(args: argparse.Namespace) -> int:
         reload=args.reload,
         log_level=args.log_level,
     )
+    return 0
+
+
+def cmd_share_token(args: argparse.Namespace) -> int:
+    """Create, show the state of, or revoke the capture token.
+
+    The token is a bearer credential for exactly one operation: logging a URL
+    into the library. It cannot read, list, or run anything.
+    """
+    from backend import share
+    from backend.secrets import CredentialError
+
+    try:
+        if args.revoke:
+            share.revoke()
+            print("Revoked. /api/share/capture no longer exists.")
+            return 0
+        if args.new:
+            token = share.rotate()
+            print(token)
+            print()
+            print("Shown once. Use it as:  Authorization: Bearer <token>")
+            print("against:  POST /api/share/capture   {\"url\": \"https://...\"}")
+            print()
+            print("This token does not make the rest of this API safe to expose.")
+            print("See docs/deployment.md before putting PSOK on a public address.")
+            return 0
+    except CredentialError as exc:
+        print(f"could not store the token: {exc}")
+        return 1
+
+    print("set" if share.enabled() else "not set")
+    print("create one with: psok share-token --new")
     return 0
 
 
@@ -914,6 +985,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="report configuration and component status").set_defaults(
         func=cmd_doctor
     )
+
+    token = sub.add_parser(
+        "share-token", help="the capture token a phone can post a link with"
+    )
+    token.add_argument("--new", action="store_true", help="generate one, replacing any existing")
+    token.add_argument("--revoke", action="store_true", help="delete it; the endpoint disappears")
+    token.set_defaults(func=cmd_share_token)
 
     chat = sub.add_parser("chat", help="talk to PSOK")
     chat.add_argument("message", nargs="?", help="single message; omit for an interactive session")

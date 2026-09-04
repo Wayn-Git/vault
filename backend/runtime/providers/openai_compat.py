@@ -151,7 +151,10 @@ class OpenAICompatClient:
         base_url: str,
         api_key: str | None,
         model: str,
-        timeout: float = 120.0,
+        # 300s, matching OpenCode's header timeout: a slow reasoning model that
+        # takes two minutes to its first token is slow, not broken, and a flat
+        # 120s was cutting those off. Connect stays fast (see http._as_timeout).
+        timeout: float = 300.0,
         max_retries: int = MAX_RETRIES,
     ):
         self.base_url = base_url.rstrip("/")

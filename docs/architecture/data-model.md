@@ -170,12 +170,43 @@ If the filesystem is the source of truth for documents, the index can drift — 
 
 Three triggers keep them aligned: a **filesystem watcher** on the vault for external edits, an **explicit re-scan** on demand and at startup, and **direct invalidation** from PSOK's own file-mutating tools, which mark the affected document stale immediately rather than waiting for the watcher. Because re-indexing is content-hash incremental, all three are cheap.
 
+## Three tables added for the journal, the library and the brand kit
+
+**`journal_entries`** — briefings and reviews, one row per `(kind, entry_date)`
+behind a unique index. `entry_date` is the **local** calendar date, for the
+reason `_now()` gives in `repositories.py`: SQLite's `date('now')` is UTC, and a
+review filed under yesterday west of Greenwich is one nobody can find.
+`created_at`/`updated_at` stay UTC like every other pair here, and the two are
+never compared. `signals` is the JSON the entry was written from — stored rather
+than recomputed, so a review read in a month still shows the day it was actually
+about and the prose can be checked against what it was given. See
+[journal.md](journal.md).
+
+**`library_items`** — what was read, watched or listened to. The row is the
+record; the *text* is a real file under `~/.psok/library` with an ordinary
+`documents` row pointing at it, so the filesystem stays the source of truth
+(ADR-0004) and the existing hybrid index does all the searching.
+`document_id IS NULL` is a normal state — a paywall, a video with no transcript
+— and `capture_note` says which. `url` is indexed but **not** unique: re-reading
+something a year later is a real event. See [library.md](library.md).
+
+**`brand_profile`** — one row, pinned by `CHECK (id = 1)`, because a person has
+one voice here. A table rather than a JSON blob in `app_settings`: these are
+fields with types, and `_add_missing_columns` can add a tenth to a database that
+already exists.
+
+`kind` on the first two tables deliberately carries **no CHECK**. SQLite cannot
+alter a CHECK in place — that is why `memory_state` is a separate table — and
+both lists will grow. The services validate and name the accepted values in the
+400.
+
 ## Data location summary
 
 ```
 ~/.psok/
   psok.db                 SQLite: everything relational + vectors + FTS
   psok.db-wal
+  library/                captured text, one markdown file per library item
   config/
     providers.yaml        model providers (keychain refs, no secrets)
     mcp.yaml              MCP server definitions

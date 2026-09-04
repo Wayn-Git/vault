@@ -321,3 +321,110 @@ CREATE TABLE IF NOT EXISTS memory_state (
     enabled    INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Briefings and reviews: the day, written down.
+--
+-- One table for three kinds because they are the same shape -- an entry for a
+-- date, built from signals, carrying prose and the user's own words. A briefing
+-- looks forward at the morning, a daily review looks back at the evening, a
+-- weekly rolls up the dailies; splitting them into three tables would duplicate
+-- the claim, the signals column and every read.
+--
+-- `entry_date` is the LOCAL calendar date, the same rule `_now()` in
+-- repositories.py states and for the same reason: SQLite's date('now') is UTC,
+-- and a review filed under yesterday west of Greenwich is one nobody can find.
+-- `created_at`/`updated_at` stay UTC like every other pair in this schema, and
+-- the interface parses them with serverTime(). The two are never compared.
+--
+-- `signals` is the JSON the entry was written from -- the real counts, events
+-- and items as they stood. Stored rather than recomputed so a review read in a
+-- month still shows the day it was actually about, and so the prose can always
+-- be checked against what it was given.
+--
+-- `kind` deliberately carries no CHECK. `memory_state` exists as a table of its
+-- own only because capability_state's CHECK predates memory and SQLite cannot
+-- alter one in place; a monthly rollup should not cost a table rebuild. The
+-- service validates it and names the accepted values in the error.
+--
+-- Any column added here later carries a DEFAULT or is nullable:
+-- `_add_missing_columns` refuses a NOT NULL column with no default and logs
+-- rather than failing, which is a silently absent column.
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind           TEXT NOT NULL,          -- briefing | daily | weekly
+    entry_date     TEXT NOT NULL,          -- local YYYY-MM-DD
+    signals        TEXT NOT NULL,          -- JSON, always present
+    summary        TEXT,                   -- the model's prose; NULL when none ran
+    user_notes     TEXT,                   -- the user's own answers
+    status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'complete')),
+    -- Why there is no summary, when there is none. A briefing with no prose and
+    -- no stated reason is indistinguishable from a broken one.
+    model_error    TEXT,
+    model_provider TEXT,
+    model_name     TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- The claim, owned by the database rather than by the runner looking first:
+-- two overlapping ticks, or a restart mid-tick, must not produce two briefings.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_day ON journal_entries(kind, entry_date);
+CREATE INDEX IF NOT EXISTS idx_journal_recent ON journal_entries(entry_date DESC, id DESC);
+
+-- Everything read, watched or listened to, logged as it is consumed.
+--
+-- The record is here; the text is a real file under ~/.psok/library, indexed by
+-- the ordinary document indexer. So a library item is searchable by exactly the
+-- machinery a vault note is, `search_documents` finds it without knowing it
+-- exists, and the filesystem stays the source of truth for the text (ADR-0004)
+-- rather than this table growing a second copy of it.
+--
+-- `document_id` NULL means no text was captured -- a paywall, a video with no
+-- transcript, a fetch that failed. That is a normal state and not an error: the
+-- item is still logged, still listed, still yours, and `capture_note` says why.
+CREATE TABLE IF NOT EXISTS library_items (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,     -- book|article|newsletter|video|podcast|paper|note|other
+    title        TEXT NOT NULL,
+    url          TEXT,
+    author       TEXT,
+    site         TEXT,
+    published_on TEXT,              -- from the page's own metadata only, never guessed
+    consumed_on  TEXT NOT NULL,     -- local YYYY-MM-DD
+    notes        TEXT,
+    rating       INTEGER,           -- 1-5, the user's own; NULL until they say
+    document_id  INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+    text_path    TEXT,
+    capture_note TEXT,              -- why the text is thin or absent, when it is
+    word_count   INTEGER,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Not unique: re-reading something a year later is a real event worth logging
+-- twice. Capture looks here first and offers what it finds rather than refusing.
+CREATE INDEX IF NOT EXISTS idx_library_url ON library_items(url) WHERE url IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_library_consumed ON library_items(consumed_on DESC, id DESC);
+
+-- How PSOK writes when it writes *for* the user rather than *to* them.
+--
+-- Exactly one row, pinned by the CHECK, because a person has one voice here. A
+-- table rather than a JSON blob in app_settings: these are fields with types,
+-- `_add_missing_columns` can add a tenth to a database that already exists, and
+-- a blob can do neither.
+--
+-- Every field is optional and an empty profile injects nothing at all -- a
+-- <brand> block of blank headings costs context on every turn and tells the
+-- model the user has no voice, which is worse than saying nothing.
+CREATE TABLE IF NOT EXISTS brand_profile (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    name        TEXT,
+    mission     TEXT,
+    audience    TEXT,
+    voice       TEXT,
+    values_list TEXT,   -- JSON array of strings; `values` is a reserved word
+    do_list     TEXT,   -- JSON array of strings
+    dont_list   TEXT,   -- JSON array of strings
+    palette     TEXT,   -- JSON array of {name, hex}
+    fonts       TEXT,   -- JSON array of {role, family}
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);

@@ -78,14 +78,22 @@ def test_a_quota_429_is_not_retried_but_is_worth_another_provider():
     assert should_fall_back(quota), "another provider is exactly what a billing failure needs"
 
 
-def test_a_bad_request_stops_the_chain_rather_than_walking_it():
-    """A model name that does not exist at one provider does not exist at the
-    next either, so falling back turns one fast failure into several slow ones.
+def test_a_dead_model_or_bad_key_still_falls_back():
+    """A 404 for a model name, or a 401 for a revoked key, is a fact about ONE
+    (provider, model) pair -- and `build_chain` never asks the next provider
+    about that pair. Every fallback link is built with that provider's *own*
+    configured `default_model`, so a model retired at provider A, or a key
+    revoked at A, says nothing about B: B is never asked to use A's model or A's
+    key. Measured live: NVIDIA retired `openai/gpt-oss-120b` mid-session
+    (`410 Gone ... reached its end of life`), a `NON_RETRYABLE` 4xx exactly like
+    these, and the old policy let it kill the whole turn while two healthy
+    providers sat unused in the same chain.
 
-    Mutation check: add `NON_RETRYABLE` to `FALLBACK_KINDS`.
+    Mutation check: remove `NON_RETRYABLE` from `FALLBACK_KINDS`.
     """
-    assert not should_fall_back(classify_status(404, "no such model"))
-    assert not should_fall_back(classify_status(401, "invalid api key"))
+    assert should_fall_back(classify_status(404, "no such model"))
+    assert should_fall_back(classify_status(401, "invalid api key"))
+    assert should_fall_back(classify_status(410, "reached its end of life"))
 
 
 def test_stream_error_frames_are_classified_from_their_own_names():
@@ -452,26 +460,30 @@ async def test_a_dead_provider_is_answered_by_the_next_one(db, monkeypatch):
     assert up.calls == 1
 
 
-async def test_a_404_fails_immediately_without_trying_the_fallback(db, monkeypatch):
-    """A model name that is wrong at one provider is wrong at the next, so the
-    fallback would cost a second round trip to learn the same thing.
+async def test_a_dead_model_falls_through_to_a_provider_that_still_works(db, monkeypatch):
+    """The scenario that motivated the fix, reproduced exactly: the chosen
+    provider's configured model has been retired (a 404/410, `NON_RETRYABLE`),
+    and a healthy provider sits right behind it in the chain with its own
+    working default. The turn must reach that provider and answer -- this is
+    the whole point of `build_chain` giving every link its own model.
 
-    Mutation check: replace `should_fall_back(kind)` with `True`.
+    Mutation check: remove `NON_RETRYABLE` from `FALLBACK_KINDS`.
     """
-    down = _Boom(FailureKind.NON_RETRYABLE, "404 page not found")
-    never = _Answers()
+    down = _Boom(FailureKind.NON_RETRYABLE, "410 Gone: model reached its end of life")
+    up = _Answers()
     _patch_chain(
         monkeypatch,
         ["nvidia", "groq"],
-        {"nvidia": _model("nvidia", down), "groq": _model("groq", never)},
+        {"nvidia": _model("nvidia", down), "groq": _model("groq", up)},
     )
 
     cid = ConversationRepository().create("nvidia", "nvidia-1")
     events = [e async for e in Director(_registry(), stream=False, memory=False).run(cid, "hi")]
 
-    assert events[-1].type == "error"
-    assert never.calls == 0, "the fallback must not be burned on a bad request"
-    assert not [e for e in events if e.type == "warning"]
+    assert events[-1].type == "done", "a dead model at the first provider must not end the turn"
+    assert up.calls == 1, "the healthy provider was actually asked"
+    warnings = [e.data["message"] for e in events if e.type == "warning"]
+    assert warnings and "groq/groq-1" in warnings[0]
 
 
 async def test_a_request_too_big_for_the_provider_skips_straight_to_fallback(db, monkeypatch):
@@ -1348,3 +1360,21 @@ def test_a_generous_budget_keeps_every_tool():
         tools, system_prompt="short", token_budget=1_000_000, margin=1.5
     )
     assert kept == tools and dropped == []
+
+
+def test_the_http_timeout_keeps_connect_fast_but_read_generous():
+    """A dead endpoint should fail fast; a slow model should not be cut off.
+    A flat 120s did both jobs badly -- long enough to wait on a dead host,
+    short enough to kill a slow reasoning model mid-answer. OpenCode allows 300s
+    for the first byte; this mirrors that while keeping connect quick.
+
+    Mutation check: return `httpx.Timeout(timeout)` (flat) from `_as_timeout`.
+    """
+    from backend.runtime.http import CONNECT_TIMEOUT, _as_timeout
+
+    generous = _as_timeout(300.0)
+    assert generous.connect == CONNECT_TIMEOUT, "connect stays fast on a big budget"
+    assert generous.read == 300.0, "read tolerates a slow-but-alive generation"
+
+    tiny = _as_timeout(3.0)
+    assert tiny.connect == 3.0, "connect never exceeds the budget itself"

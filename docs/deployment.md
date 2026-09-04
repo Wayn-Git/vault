@@ -124,6 +124,61 @@ curl -si -X OPTIONS https://psok-api.onrender.com/api/ping \
   -H 'Access-Control-Request-Method: GET' | grep -i access-control
 ```
 
+## Reaching PSOK from a phone, without publishing your shell
+
+**PSOK has no authentication. That is a decision, not an omission** (ADR-0001):
+the security model is that it is only reachable from the machine it runs on.
+Every `/api` route assumes that — a public URL hands anyone who finds it your
+filesystem, your shell and your mail.
+
+There is exactly one endpoint built to be reached from elsewhere:
+
+```
+POST /api/share/capture     Authorization: Bearer <token>     {"url": "..."}
+```
+
+It can log a URL into the library and nothing else — no reads, no lists, no
+tools. It does not exist until you make a token:
+
+```bash
+psok share-token --new        # shown once; stored in the OS keychain
+psok share-token --revoke     # the endpoint returns 404 again
+```
+
+**A token is not a substitute for a proxy.** It protects one route; the other
+fifty are untouched. If PSOK is reachable from the internet, publish that path
+and nothing else:
+
+```caddy
+share.example.com {
+    @capture path /api/share/capture
+    handle @capture {
+        reverse_proxy 127.0.0.1:8000
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+The nginx equivalent is a `location = /api/share/capture` block with
+`proxy_pass`, and a `location /` returning 404. Keep `psok serve` bound to
+`127.0.0.1` so the proxy is the only way in — `psok serve --host 0.0.0.0` prints
+a warning saying exactly this, and `psok doctor` reports whether a token exists.
+
+On the phone, an iOS Shortcut or an Android sharing app posting JSON is enough:
+
+```
+URL     https://share.example.com/api/share/capture
+Method  POST
+Headers Authorization: Bearer <token>
+Body    {"url": "<the shared link>"}
+```
+
+On the machine PSOK runs on you need none of this — the Library page's
+bookmarklet opens `/library?url=…` with the link filled in, which is a
+navigation rather than a cross-origin request, so nothing has to be switched on.
+
 ## What does not survive the split
 
 Honest list, because finding these one at a time is worse.
@@ -151,7 +206,9 @@ Honest list, because finding these one at a time is worse.
 
   Automations are the half that does survive, because their output is a
   conversation you can open and read rather than a notification you have to be
-  present for.
+  present for. The journal is the same shape: a briefing and a review are rows
+  you open, not notifications you have to be present for, so they survive the
+  split as long as the service is up when their hour comes round.
 
 - **Both loops run only while the service is up.** A free service that has
   spun down is not running either of them. An automation due during a quiet

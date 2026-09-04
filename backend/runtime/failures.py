@@ -12,17 +12,26 @@ Two decisions come off a failure and they are not the same decision:
 * **Retry** -- ask the *same* provider again. Worth doing when the failure is
   about this moment (a dropped connection, a 503, a rate limit that clears).
 * **Fall back** -- ask a *different* provider. Worth doing whenever this
-  provider cannot answer right now, including when it is out of credit: a
-  billing problem is permanent for this provider and irrelevant to the next one.
-  Not worth doing when the request itself is wrong, because the next provider
-  will reject it too, only slower.
+  provider cannot answer right now.
 
-That second case is why a 404 *with a body* stops the chain: a model name that
-does not exist at provider A almost certainly does not exist at provider B
-either, and burning the fallback on it turns one fast failure into several slow
-ones. A *bodyless* 404 is the exception -- NVIDIA's NIM gateway returns one when
-the node has not loaded the model yet, which a retry against the same provider
-fixes -- so that one is retryable; see `classify_status`.
+**Nearly everything falls back**, including a 404, a bad key, and a malformed
+request. This was not always true here: an earlier version of this module kept
+a plain "the request is wrong" 4xx (`NON_RETRYABLE`) out of `FALLBACK_KINDS`,
+reasoning that "a model name that does not exist at provider A almost certainly
+does not exist at provider B either." That reasoning does not hold against what
+`backend.runtime.chain.build_chain` actually does: every fallback link carries
+*that provider's own configured `default_model`*, never the model string that
+just failed. So a dead model id, a revoked key, or a malformed field on
+provider A says nothing about provider B, because B is never asked about A's
+model, A's key, or A's field -- it is asked about its own. Measured live: NVIDIA
+retired a model id mid-session (`410 Gone ... reached its end of life`), which
+is exactly a 4xx that has nothing to do with any other provider, and the old
+policy let it kill the whole turn while two perfectly healthy providers sat
+unused in the same chain.
+
+The one thing that still does not repeat across providers is a *bodyless* 404 --
+NVIDIA's NIM gateway returns one when the node has not loaded the model yet,
+which a retry against the *same* provider fixes; see `classify_status`.
 """
 
 from __future__ import annotations
@@ -78,9 +87,18 @@ RETRY_KINDS = frozenset(
     }
 )
 
-#: Failures worth asking a different provider. Everything except "the request
-#: itself is wrong" -- see the module docstring for why 404 stops here.
-FALLBACK_KINDS = RETRY_KINDS | {FailureKind.NON_RETRYABLE_RATE_LIMIT}
+#: Failures worth asking a different provider. Every kind, including
+#: NON_RETRYABLE -- see the module docstring for why a dead model id or a bad
+#: key at provider A says nothing about provider B once `build_chain` is read
+#: correctly: a fallback link is never asked to retry A's model or A's key, it
+#: is asked about its own. The remaining bound on cost is `AttemptBudget` and
+#: `MAX_FALLBACK_LINKS` (backend/runtime/chain.py), not this set -- a request
+#: that really is wrong everywhere still only costs two extra fast round trips
+#: before the turn gives up, not an unbounded retry storm.
+FALLBACK_KINDS = RETRY_KINDS | {
+    FailureKind.NON_RETRYABLE_RATE_LIMIT,
+    FailureKind.NON_RETRYABLE,
+}
 
 
 def looks_like_quota(body: str | None) -> bool:

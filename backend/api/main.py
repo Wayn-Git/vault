@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -37,6 +37,7 @@ from backend.db.repositories import (
     ExecutionLogRepository,
     MessageRepository,
 )
+from backend.journal.runner import JournalRunner
 from backend.mcp import live
 from backend.mcp.manager import MCPManager
 from backend.reminders import ReminderRunner
@@ -235,6 +236,12 @@ async def _task_sync_manager():
 
 _reminders = ReminderRunner(_task_sync_manager)
 
+# The journal's clock. A third runner rather than a job on either of the others:
+# a briefing is a wall-clock time (automations are intervals that drift), and it
+# makes a model call that can take a minute (a reminder queued behind one is not
+# a reminder). See backend/journal/runner.py.
+_journal = JournalRunner()
+
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
@@ -250,7 +257,12 @@ async def _lifespan(_: FastAPI):
     # serializes model turns that can take five minutes, and a reminder queued
     # behind one of those is not a reminder.
     _reminders.start()
+    # Third and last: files the morning briefing and the evening review at the
+    # hours the user set. Sleeps before its first check, so starting the process
+    # never files an entry in the same breath.
+    _journal.start()
     yield
+    await _journal.stop()
     await _reminders.stop()
     await _runner.stop()
     if _mcp["manager"] is not None:
@@ -2792,10 +2804,24 @@ def list_memories(conversation_id: str | None = None, limit: int = 200) -> dict[
     }
 
 
+class JournalSchedulePatch(BaseModel):
+    """When the briefing and the reviews are filed. Every field optional."""
+
+    briefing_enabled: bool | None = None
+    briefing_hour: int | None = None
+    review_enabled: bool | None = None
+    review_hour: int | None = None
+    weekly_enabled: bool | None = None
+    weekly_weekday: int | None = None
+
+
 class Settings(BaseModel):
     #: The agent loop's iteration ceiling. Optional so a PATCH can carry only
     #: the fields it changes.
     max_iterations: int | None = None
+    #: Nested rather than six flat keys: these are read together, saved
+    #: together, and shown as one block, so they are one setting.
+    journal: JournalSchedulePatch | None = None
 
 
 @app.get("/api/settings")
@@ -2805,6 +2831,7 @@ def get_settings() -> dict[str, Any]:
         DEFAULT_MAX_ITERATIONS,
         MAX_MAX_ITERATIONS,
         MIN_MAX_ITERATIONS,
+        load_journal_schedule,
         load_max_iterations,
     )
 
@@ -2815,16 +2842,19 @@ def get_settings() -> dict[str, Any]:
         "max_iterations_default": DEFAULT_MAX_ITERATIONS,
         "max_iterations_min": MIN_MAX_ITERATIONS,
         "max_iterations_max": MAX_MAX_ITERATIONS,
+        "journal": load_journal_schedule().as_dict(),
     }
 
 
 @app.patch("/api/settings")
 def update_settings(body: Settings) -> dict[str, Any]:
     """Change a knob. Only the fields present are touched; the value is clamped."""
-    from backend.config import save_max_iterations
+    from backend.config import save_journal_schedule, save_max_iterations
 
     if body.max_iterations is not None:
         save_max_iterations(body.max_iterations)
+    if body.journal is not None:
+        save_journal_schedule(body.journal.model_dump(exclude_none=True))
     return get_settings()
 
 
@@ -2862,6 +2892,344 @@ def forget_memory(memory_id: int) -> dict[str, Any]:
     if not MemoryStore().supersede([memory_id]):
         raise HTTPException(404, f"no live memory with id {memory_id}")
     return {"status": "superseded", "id": memory_id}
+
+
+# ----------------------------------------------------------------- brand
+#
+# Voice, values, palette, fonts. The point of storing them is that they change
+# what the model writes, so the response carries `prompt_block` -- the literal
+# text the system prompt will be handed -- rather than leaving the interface to
+# guess at the effect from the fields.
+
+
+class BrandBody(BaseModel):
+    enabled: bool = True
+    name: str | None = None
+    mission: str | None = None
+    audience: str | None = None
+    voice: str | None = None
+    values: list[str] | str | None = None
+    do: list[str] | str | None = None
+    dont: list[str] | str | None = None
+    palette: list[dict[str, str]] | None = None
+    fonts: list[dict[str, str]] | None = None
+
+
+def _brand_payload(brand) -> dict[str, Any]:
+    from backend.brand import prompt_block
+
+    return {**brand.as_dict(), "prompt_block": prompt_block(brand)}
+
+
+@app.get("/api/brand")
+def get_brand() -> dict[str, Any]:
+    from backend.brand import load
+
+    return _brand_payload(load())
+
+
+@app.put("/api/brand")
+def put_brand(body: BrandBody) -> dict[str, Any]:
+    from backend.brand import from_payload, save
+
+    return _brand_payload(save(from_payload(body.model_dump())))
+
+
+# --------------------------------------------------------------- library
+#
+# What the user has read, watched and listened to. The text of a captured page
+# is a real file under ~/.psok/library indexed by the ordinary document
+# indexer, so `search_documents` finds it too -- these routes are the record
+# and the capture path, not a second search stack.
+
+
+class LibraryBody(BaseModel):
+    url: str | None = None
+    title: str | None = None
+    kind: str | None = None
+    author: str | None = None
+    notes: str | None = None
+    text: str | None = None
+    consumed_on: str | None = None
+    rating: int | None = None
+
+
+class LibraryPatch(BaseModel):
+    title: str | None = None
+    kind: str | None = None
+    author: str | None = None
+    notes: str | None = None
+    consumed_on: str | None = None
+    rating: int | None = None
+
+
+@app.get("/api/library")
+async def list_library(
+    q: str | None = None, kind: str | None = None, limit: int = 50, offset: int = 0
+) -> dict[str, Any]:
+    from backend.library.service import LibraryService
+
+    service = LibraryService()
+    limit = max(1, min(limit, 200))
+    if q and q.strip():
+        items = await service.search(q, limit=limit)
+    else:
+        items = service.recent(kind=kind, limit=limit, offset=offset)
+    return {"items": items, "counts": service.counts(), "query": q or ""}
+
+
+@app.post("/api/library", status_code=201)
+async def add_library_item(body: LibraryBody) -> dict[str, Any]:
+    from backend.library.service import LibraryError, LibraryService
+
+    service = LibraryService()
+    try:
+        if body.url and body.url.strip():
+            captured = await service.capture_url(
+                body.url,
+                kind=body.kind,
+                consumed_on=body.consumed_on,
+                notes=body.notes,
+                title=body.title,
+            )
+        else:
+            captured = await service.log_manual(
+                title=body.title or "",
+                kind=body.kind or "note",
+                text=body.text,
+                author=body.author,
+                notes=body.notes,
+                consumed_on=body.consumed_on,
+                rating=body.rating,
+            )
+    except LibraryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {**captured.item, "already_logged": captured.already_logged}
+
+
+@app.get("/api/library/{item_id}")
+def get_library_item(item_id: int) -> dict[str, Any]:
+    from backend.library.service import as_dict
+    from backend.library.store import LibraryStore
+
+    row = LibraryStore().get(item_id)
+    if row is None:
+        raise HTTPException(404, f"no library item {item_id}")
+    return as_dict(row)
+
+
+@app.patch("/api/library/{item_id}")
+def update_library_item(item_id: int, body: LibraryPatch) -> dict[str, Any]:
+    from backend.library.service import as_dict
+    from backend.library.store import KINDS, LibraryStore
+
+    store = LibraryStore()
+    if store.get(item_id) is None:
+        raise HTTPException(404, f"no library item {item_id}")
+    fields = body.model_dump(exclude_none=True)
+    if "kind" in fields and fields["kind"] not in KINDS:
+        raise HTTPException(400, f"unknown kind. One of: {', '.join(KINDS)}")
+    store.update(item_id, **fields)
+    return as_dict(store.get(item_id))
+
+
+@app.delete("/api/library/{item_id}")
+def delete_library_item(item_id: int) -> dict[str, Any]:
+    from backend.library.service import LibraryService
+
+    if not LibraryService().remove(item_id):
+        raise HTTPException(404, f"no library item {item_id}")
+    return {"status": "deleted", "id": item_id}
+
+
+@app.post("/api/library/{item_id}/reindex")
+async def reindex_library_item(item_id: int) -> dict[str, Any]:
+    """Index an item's text again, first forgetting a refused embedder.
+
+    This is how someone who started Ollama after PSOK gets semantic search
+    without restarting: the unreachable-endpoint cache is per process, and this
+    is the one thing that clears it.
+    """
+    from backend.library.service import LibraryError, LibraryService
+
+    try:
+        return await LibraryService().reindex(item_id)
+    except LibraryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"the text could not be indexed: {exc}") from exc
+
+
+# ----------------------------------------------------------------- share
+#
+# One capture-only endpoint so a phone can send PSOK a link. See backend/share.py
+# for why it is shaped the way it is, and docs/deployment.md for what has to be
+# true before this is reachable from anywhere but this machine.
+
+
+class ShareBody(BaseModel):
+    url: str
+    kind: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/share")
+def share_status() -> dict[str, Any]:
+    """Whether sharing is switched on. Never returns the token itself."""
+    from backend import share
+
+    return {"enabled": share.enabled()}
+
+
+@app.post("/api/share/token")
+def rotate_share_token() -> dict[str, Any]:
+    """Generate a token, replacing any existing one.
+
+    Returned once, here, and never again: after this it lives in the keychain
+    and nothing reads it back out to a browser.
+    """
+    from backend import share
+
+    try:
+        return {"token": share.rotate(), "enabled": True}
+    except Exception as exc:
+        raise HTTPException(503, f"the token could not be stored: {exc}") from exc
+
+
+@app.delete("/api/share/token")
+def revoke_share_token() -> dict[str, Any]:
+    from backend import share
+
+    share.revoke()
+    return {"enabled": False}
+
+
+@app.post("/api/share/capture", status_code=201)
+async def share_capture(body: ShareBody, request: Request) -> dict[str, Any]:
+    """Log a URL. The only thing a share token can do."""
+    from backend import share
+    from backend.library.service import LibraryError, LibraryService
+
+    if not share.enabled():
+        # Not a 401: an endpoint that answers differently when it is switched
+        # off is an endpoint worth probing for.
+        raise HTTPException(404, "no such endpoint: /api/share/capture")
+    if not share.check(share.bearer(request.headers.get("authorization"))):
+        raise HTTPException(401, "that token is not the one this instance holds")
+
+    try:
+        captured = await LibraryService().capture_url(
+            body.url, kind=body.kind, notes=body.note
+        )
+    except LibraryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "id": captured.item["id"],
+        "title": captured.item["title"],
+        "already_logged": captured.already_logged,
+    }
+
+
+# --------------------------------------------------------------- journal
+#
+# The morning briefing and the daily and weekly reviews. Signals are gathered in
+# Python and the model only writes prose over them (backend/journal/service.py),
+# so an entry always exists with real figures even when nothing can write it up.
+
+
+class JournalAnswer(BaseModel):
+    user_notes: str
+
+
+@app.get("/api/journal")
+def list_journal(kind: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+    from backend.journal.service import JournalError, JournalService
+
+    try:
+        return JournalService().recent(kind=kind, limit=max(1, min(limit, 200)))
+    except JournalError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/journal/{entry_id}")
+def get_journal_entry(entry_id: int) -> dict[str, Any]:
+    from backend.journal.service import entry_as_dict
+    from backend.journal.store import JournalStore
+
+    row = JournalStore().get(entry_id)
+    if row is None:
+        raise HTTPException(404, f"no journal entry {entry_id}")
+    return entry_as_dict(row)
+
+
+@app.post("/api/journal/{kind}/generate")
+async def generate_journal_entry(
+    kind: str, entry_date: str | None = None, force: bool = False
+) -> dict[str, Any]:
+    from datetime import date as _date
+
+    from backend.journal.service import JournalError, JournalService
+
+    try:
+        day = _date.fromisoformat(entry_date) if entry_date else _date.today()
+    except ValueError as exc:
+        raise HTTPException(400, "entry_date must be YYYY-MM-DD") from exc
+    try:
+        return await JournalService().generate(kind, day, force=force)
+    except JournalError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/journal/{entry_id}")
+async def answer_journal_entry(entry_id: int, body: JournalAnswer) -> dict[str, Any]:
+    """Store the check-in answers, then write the review from them."""
+    from backend.journal.service import JournalError, JournalService
+
+    try:
+        return await JournalService().answer(entry_id, body.user_notes)
+    except JournalError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/journal/{entry_id}")
+def delete_journal_entry(entry_id: int) -> dict[str, Any]:
+    from backend.journal.store import JournalStore
+
+    if not JournalStore().delete(entry_id):
+        raise HTTPException(404, f"no journal entry {entry_id}")
+    return {"status": "deleted", "id": entry_id}
+
+
+# ------------------------------------------------------------------ today
+#
+# One read for the whole page: the day's events, what is owed, what is unread,
+# what has been logged, and this morning's briefing.
+#
+# Deliberately does not touch /api/health or availability.survey(): the store
+# already polls health every eight seconds and every view has it, and probing
+# every provider over the network is not what opening a dashboard should cost.
+
+
+@app.get("/api/today")
+async def today() -> dict[str, Any]:
+    from datetime import date as _date
+
+    from backend.journal.service import JournalService
+    from backend.journal.signals import gather
+
+    signals = await gather(_date.today())
+    journal = JournalService().today()
+    return {
+        "date": signals.entry_date,
+        "signals": signals.to_json(),
+        "briefing": journal["briefing"],
+        "review": journal["review"],
+        "weekly": journal["weekly"],
+        "questions": journal["questions"],
+        # Which sections could not be read, and why. The interface says so
+        # rather than showing a zero it did not measure.
+        "degraded": signals.degraded,
+    }
 
 
 # ------------------------------------------------------------------- the app

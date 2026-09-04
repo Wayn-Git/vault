@@ -62,12 +62,25 @@ def vector_available(conn: sqlite3.Connection) -> bool:
     return load_extension(conn)
 
 
-def ensure_indexes(conn: sqlite3.Connection, dimensions: int) -> None:
-    """Create the FTS5 and vec0 tables. Dimensions are fixed at creation time."""
+def ensure_keyword_index(conn: sqlite3.Connection) -> None:
+    """Create the FTS5 table. Independent of any embedder, because keyword search is.
+
+    Split out of `ensure_indexes` because the only caller used to reach it
+    through `if vectors:` in the indexer -- so on a machine with no embedder the
+    keyword half, the half that is supposed to survive exactly that, had no
+    table to write into and `index_chunk` failed on "no such table: chunks_fts".
+    Losing semantic search degrades results; losing the FTS index loses the
+    document, so this one is created whether or not anything can embed.
+    """
     conn.execute(
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5("
         " content, heading_path, content_rowid UNINDEXED, tokenize='porter unicode61')"
     )
+
+
+def ensure_indexes(conn: sqlite3.Connection, dimensions: int) -> None:
+    """Create the FTS5 and vec0 tables. Dimensions are fixed at creation time."""
+    ensure_keyword_index(conn)
     if not load_extension(conn):
         return
 
@@ -150,8 +163,18 @@ def remove_chunks(conn: sqlite3.Connection, chunk_ids: list[int]) -> None:
         return
     placeholders = ",".join("?" * len(chunk_ids))
     conn.execute(f"DELETE FROM chunks_fts WHERE content_rowid IN ({placeholders})", chunk_ids)
-    if load_extension(conn):
+    if not load_extension(conn):
+        return
+    try:
         conn.execute(f"DELETE FROM chunk_vectors WHERE chunk_id IN ({placeholders})", chunk_ids)
+    except sqlite3.OperationalError as exc:
+        # The extension being loadable is not the same as the table existing:
+        # `chunk_vectors` is created the first time something is embedded, so a
+        # machine that has only ever keyword-indexed has no table to delete
+        # from. `search_vectors` has always tolerated that; this did not, and
+        # deleting a document took the whole request down with a bare
+        # "no such table: chunk_vectors".
+        log.debug("no vector rows to remove: %s", exc)
 
 
 def search_vectors(
