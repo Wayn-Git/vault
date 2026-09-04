@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from psok.agent.director import Director, Guards
-from psok.agent.prompt import budget_history, build_system_prompt
-from psok.config import ProviderConfig
-from psok.db.repositories import ConversationRepository, MessageRepository
-from psok.runtime.providers.google import sanitize_schema
-from psok.runtime.providers.openai_compat import OpenAICompatClient
-from psok.runtime.registry import PROVIDER_REGISTRY, ProviderNotConfigured, resolve
-from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import RiskLevel, Tool, ToolResult
-from psok.tools.registry import ToolRegistry
+from backend.agent.director import Director, Guards
+from backend.agent.prompt import budget_history, build_system_prompt
+from backend.config import ProviderConfig
+from backend.db.repositories import ConversationRepository, MessageRepository
+from backend.runtime.providers.google import sanitize_schema
+from backend.runtime.providers.openai_compat import OpenAICompatClient
+from backend.runtime.registry import PROVIDER_REGISTRY, ProviderNotConfigured, resolve
+from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, ToolCall
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import RiskLevel, Tool, ToolResult
+from backend.tools.registry import ToolRegistry
 
 # --------------------------------------------------------------------------
 # provider abstraction
@@ -21,7 +21,7 @@ from psok.tools.registry import ToolRegistry
 
 def test_unknown_provider_falls_through_to_openai_compatible(psok_home, monkeypatch):
     """The fallback is what gives PSOK an open-ended provider set (ADR-0001)."""
-    from psok import config
+    from backend import config
 
     yaml_path = psok_home / "config" / "providers.yaml"
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,7 @@ def test_unconfigured_unknown_provider_is_reported(psok_home):
 
 def test_openai_payload_drops_reasoning_when_tools_present():
     """A provider quirk, absorbed in the adapter and invisible to the loop."""
-    from psok.runtime.types import ModelParameters, ToolSchema
+    from backend.runtime.types import ModelParameters, ToolSchema
 
     client = OpenAICompatClient(base_url="http://x/v1", api_key=None, model="gpt-5")
     tool = ToolSchema(name="t", description="", parameters={"type": "object"})
@@ -77,7 +77,7 @@ def test_gemini_schema_sanitization():
 
 
 def test_anthropic_maps_tool_results_to_content_blocks():
-    from psok.runtime.providers.anthropic import _to_anthropic_messages
+    from backend.runtime.providers.anthropic import _to_anthropic_messages
 
     system, messages = _to_anthropic_messages(
         [
@@ -96,7 +96,7 @@ def test_anthropic_maps_tool_results_to_content_blocks():
 
 
 def test_system_prompt_includes_environment_and_skills(psok_home):
-    from psok.skills.loader import seed_builtin_skills
+    from backend.skills.loader import seed_builtin_skills
 
     seed_builtin_skills()
     prompt = build_system_prompt(workspace_root="/tmp/ws")
@@ -151,7 +151,7 @@ def scripted_model(responses) -> ResolvedModel:
 def patched_resolve(monkeypatch):
     def install(responses):
         model = scripted_model(responses)
-        monkeypatch.setattr("psok.agent.director.resolve", lambda *a, **k: model)
+        monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
         return model
 
     return install
@@ -236,17 +236,24 @@ async def test_repeated_identical_calls_are_broken_out_of(db, patched_resolve):
     assert nudges, "the loop should tell the model to stop repeating itself"
 
 
-async def test_model_error_is_reported_not_raised(db, monkeypatch):
+async def test_model_error_is_reported_not_raised(db, monkeypatch, caplog):
+    """The user-facing message is a clean sentence, not the raw exception --
+    a provider's own error body (a paragraph of JSON, on some) is exactly
+    what "the model isn't responding" looked like from outside before this
+    was fixed. The raw detail still reaches the log, for whoever debugs it."""
     class Failing:
         async def complete(self, *a, **k):
             raise ConnectionError("provider unreachable")
 
     model = ResolvedModel("fake", "fake-1", Failing(), Capabilities())
-    monkeypatch.setattr("psok.agent.director.resolve", lambda *a, **k: model)
+    monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
 
     cid = ConversationRepository().create("fake", "fake-1")
-    events = await collect(Director(echo_registry()), cid, "hi")
-    assert events[-1].type == "error" and "unreachable" in events[-1].data["message"]
+    with caplog.at_level("WARNING"):
+        events = await collect(Director(echo_registry()), cid, "hi")
+    assert events[-1].type == "error"
+    assert events[-1].data["message"] == "fake failed."
+    assert "provider unreachable" in caplog.text, "the raw detail must still reach the log"
 
 
 async def test_denied_tool_result_reaches_the_model(db, patched_resolve):
@@ -289,7 +296,7 @@ async def test_denied_tool_result_reaches_the_model(db, patched_resolve):
 
 
 def test_redaction_covers_keys_and_value_patterns():
-    from psok.secrets import redact
+    from backend.secrets import redact
 
     cleaned = redact(
         {
@@ -306,7 +313,7 @@ def test_redaction_covers_keys_and_value_patterns():
 
 
 def test_audit_log_stores_redacted_arguments(db):
-    from psok.db.repositories import ExecutionLogRepository
+    from backend.db.repositories import ExecutionLogRepository
 
     repo = ExecutionLogRepository()
     repo.record(
@@ -368,8 +375,8 @@ def _patch_transport(monkeypatch, flaky):
 
 
 async def test_transient_500_is_retried(monkeypatch):
-    from psok.runtime import http as runtime_http
-    from psok.runtime.providers import openai_compat
+    from backend.runtime import http as runtime_http
+    from backend.runtime.providers import openai_compat
 
     monkeypatch.setattr(runtime_http, "backoff", lambda attempt: 0.0)
     flaky = _FlakyTransport([500, 500])
@@ -382,8 +389,8 @@ async def test_transient_500_is_retried(monkeypatch):
 
 
 async def test_rate_limit_is_retried(monkeypatch):
-    from psok.runtime import http as runtime_http
-    from psok.runtime.providers import openai_compat
+    from backend.runtime import http as runtime_http
+    from backend.runtime.providers import openai_compat
 
     monkeypatch.setattr(runtime_http, "backoff", lambda attempt: 0.0)
     flaky = _FlakyTransport([429])
@@ -394,8 +401,8 @@ async def test_rate_limit_is_retried(monkeypatch):
 
 
 async def test_client_errors_are_not_retried_and_surface_the_body(monkeypatch):
-    from psok.runtime import http as runtime_http
-    from psok.runtime.providers import openai_compat
+    from backend.runtime import http as runtime_http
+    from backend.runtime.providers import openai_compat
 
     monkeypatch.setattr(runtime_http, "backoff", lambda attempt: 0.0)
     flaky = _FlakyTransport([400])
@@ -409,8 +416,8 @@ async def test_client_errors_are_not_retried_and_surface_the_body(monkeypatch):
 
 
 async def test_persistent_failure_eventually_gives_up(monkeypatch):
-    from psok.runtime import http as runtime_http
-    from psok.runtime.providers import openai_compat
+    from backend.runtime import http as runtime_http
+    from backend.runtime.providers import openai_compat
 
     monkeypatch.setattr(runtime_http, "backoff", lambda attempt: 0.0)
     flaky = _FlakyTransport([503] * 10)
@@ -430,7 +437,7 @@ async def test_reasoning_content_is_kept_out_of_the_answer(monkeypatch):
     """
     import httpx
 
-    from psok.runtime.providers import openai_compat
+    from backend.runtime.providers import openai_compat
 
     async def handler(request):
         return httpx.Response(
@@ -490,7 +497,7 @@ def _patch_stream(monkeypatch, payload: bytes, status: int = 200):
 
 
 async def test_streaming_yields_text_deltas_then_a_final_response(monkeypatch):
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     _patch_stream(
         monkeypatch,
@@ -514,7 +521,7 @@ async def test_streaming_yields_text_deltas_then_a_final_response(monkeypatch):
 
 async def test_streamed_tool_calls_are_reassembled_from_fragments(monkeypatch):
     """Arguments arrive a few characters at a time and are useless until complete."""
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     _patch_stream(
         monkeypatch,
@@ -571,7 +578,7 @@ async def test_streamed_tool_calls_are_reassembled_from_fragments(monkeypatch):
 
 
 async def test_streamed_reasoning_stays_separate_from_the_answer(monkeypatch):
-    from psok.runtime.providers.openai_compat import OpenAICompatClient
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
 
     _patch_stream(
         monkeypatch,
@@ -594,7 +601,7 @@ async def test_streamed_reasoning_stays_separate_from_the_answer(monkeypatch):
 
 
 async def test_anthropic_streaming_assembles_content_blocks(monkeypatch):
-    from psok.runtime.providers.anthropic import AnthropicClient
+    from backend.runtime.providers.anthropic import AnthropicClient
 
     _patch_stream(
         monkeypatch,
@@ -634,8 +641,8 @@ async def test_anthropic_streaming_assembles_content_blocks(monkeypatch):
 
 async def test_director_emits_deltas_when_streaming(db, monkeypatch):
     """The loop must surface increments without losing the assembled response."""
-    from psok.agent.director import Director
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
+    from backend.agent.director import Director
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel, StreamEvent
 
     class StreamingClient:
         async def complete(self, *a, **k):
@@ -647,7 +654,7 @@ async def test_director_emits_deltas_when_streaming(db, monkeypatch):
             yield StreamEvent(type="done", response=ModelResponse(text="partial"))
 
     model = ResolvedModel("fake", "fake-1", StreamingClient(), Capabilities(streaming=True))
-    monkeypatch.setattr("psok.agent.director.resolve", lambda *a, **k: model)
+    monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
 
     cid = ConversationRepository().create("fake", "fake-1")
     events = [e async for e in Director(echo_registry(), stream=True).run(cid, "hi")]
@@ -658,15 +665,15 @@ async def test_director_emits_deltas_when_streaming(db, monkeypatch):
 
 
 async def test_director_falls_back_when_the_provider_cannot_stream(db, monkeypatch):
-    from psok.agent.director import Director
-    from psok.runtime.types import Capabilities, ModelResponse, ResolvedModel
+    from backend.agent.director import Director
+    from backend.runtime.types import Capabilities, ModelResponse, ResolvedModel
 
     class NonStreamingClient:
         async def complete(self, messages, tools=None, params=None):
             return ModelResponse(text="whole answer")
 
     model = ResolvedModel("fake", "fake-1", NonStreamingClient(), Capabilities(streaming=False))
-    monkeypatch.setattr("psok.agent.director.resolve", lambda *a, **k: model)
+    monkeypatch.setattr("backend.agent.director.resolve", lambda *a, **k: model)
 
     cid = ConversationRepository().create("fake", "fake-1")
     events = [e async for e in Director(echo_registry(), stream=True).run(cid, "hi")]
@@ -677,8 +684,8 @@ async def test_director_falls_back_when_the_provider_cannot_stream(db, monkeypat
 
 def test_google_declares_no_streaming_because_it_has_none():
     """A capability flag that lies is worse than one that admits a gap."""
-    from psok.config import ProviderConfig
-    from psok.runtime.providers import google
+    from backend.config import ProviderConfig
+    from backend.runtime.providers import google
 
     resolved = google.initialize(ProviderConfig(name="google", default_model="gemini-2.0-flash"))
     assert resolved.capabilities.streaming is False

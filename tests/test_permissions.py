@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from psok.security.confirmation import ConfirmationService, is_sensitive_path
-from psok.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
+from backend.security.confirmation import ConfirmationService, is_sensitive_path
+from backend.tools.base import RiskLevel, Tool, ToolContext, ToolResult, ToolSource
 
 
 async def _noop(args, ctx):
@@ -136,7 +136,7 @@ def test_ordinary_paths_not_flagged(path):
 
 
 async def test_dispatch_denial_returns_an_error_result_not_an_exception(db):
-    from psok.tools.registry import ToolRegistry
+    from backend.tools.registry import ToolRegistry
 
     registry = ToolRegistry(ConfirmationService(lambda _: _false()))
     registry.register(make_tool("delete_file", RiskLevel.HIGH))
@@ -149,7 +149,7 @@ async def test_a_sandbox_preference_does_not_cover_an_unsandboxed_machine(db, mo
     Keying it as ':sandbox' anyway meant "always allow sandboxed commands",
     granted on a machine with bubblewrap, silenced the gate on one without --
     full shell access with no prompt."""
-    from psok.tools.builtin import shell
+    from backend.tools.builtin import shell
 
     tool = shell.tools()[0]
     contained = {"command": "ls", "execution_mode": "sandbox"}
@@ -169,7 +169,7 @@ async def test_a_sandbox_preference_does_not_cover_an_unsandboxed_machine(db, mo
 
 async def test_the_model_still_describes_its_own_operation_where_a_sandbox_exists(db, monkeypatch):
     """The documented key stays what security.md says it is."""
-    from psok.tools.builtin import shell
+    from backend.tools.builtin import shell
 
     monkeypatch.setattr(shell, "platform_backend", lambda: "seatbelt")
     key = shell.tools()[0].operation_key(

@@ -4,13 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0b0b0c" />
+    <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="PSOK — your personal operating system. One agent over your files, shell, tasks, calendar and connected services." />
     <title>PSOK · personal operating system</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- The API's own preconnect is added from api.js rather than written here.
+         An env placeholder that no build defined stays in the markup verbatim
+         as a broken href, and the same-origin build has no second host to
+         connect to at all. (The placeholder's own name is deliberately not
+         written in this comment: Vite scans the file as text, warns that the
+         variable is undefined, and the warning is right about the syntax and
+         wrong about there being a problem.) -->
+
     <link
-      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400..600&family=Geist+Mono:wght@400..500&display=swap"
       rel="stylesheet"
     />
   </head>

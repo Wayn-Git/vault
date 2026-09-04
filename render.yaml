@@ -1,0 +1,77 @@
+# PSOK's backend on Render.
+#
+# One web service and one disk. The disk is not optional: PSOK_HOME holds the
+# SQLite database, providers.yaml, mcp.yaml and the skills directory, and a
+# Render container's own filesystem is thrown away on every deploy. Without a
+# disk mounted there, every conversation, task and connector the user set up
+# disappears the next time the service restarts -- which on the free plan is
+# every time it has been idle for a quarter of an hour.
+#
+# The frontend is not here. It goes to Vercel (see vercel.json), and the two are
+# joined by two settings that have to agree:
+#
+#   here    PSOK_CORS_ORIGINS = https://<your-app>.vercel.app
+#   Vercel  VITE_API_BASE     = https://<this-service>.onrender.com
+#
+# Neither has a default that could work, because neither host's name exists
+# until it is deployed. A mismatch shows up as every request failing CORS, which
+# the interface reports as "Could not reach ...".
+
+services:
+  - type: web
+    name: psok-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: master
+
+    buildCommand: pip install --upgrade pip && pip install -e ".[providers]"
+
+    # `--host 0.0.0.0` because a container is reached from outside itself; the
+    # CLI's default is loopback, which is right on a laptop and unreachable
+    # here. `$PORT` is assigned by Render and is not a fixed number.
+    #
+    # One worker on purpose. PSOK holds MCP subprocesses, the reminder loop and
+    # the automation runner in process state, and a second worker would start a
+    # second copy of all three against the same SQLite file.
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT --workers 1
+
+    healthCheckPath: /api/ping
+
+    disk:
+      name: psok-home
+      mountPath: /var/psok
+      sizeGB: 1
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+
+      # Everything PSOK keeps, on the disk above.
+      - key: PSOK_HOME
+        value: /var/psok
+
+      # A container has no OS keychain, so `keyring` cannot store a provider key
+      # and the interface's "add a key" would fail with a 503. This moves key
+      # storage to a file on the private disk, 0600. It is deliberate and
+      # narrow: see the module docstring in backend/secrets.py for what it is and
+      # is not worth.
+      - key: PSOK_SECRETS_FILE
+        value: /var/psok/secrets.json
+
+      # The Vercel origin, exactly -- scheme and host, no trailing slash, no
+      # path. Comma-separate to allow preview deployments as well. There is no
+      # wildcard on purpose: this API can read files and run shell commands, so
+      # "any page the user visits" is not an acceptable set of callers.
+      - key: PSOK_CORS_ORIGINS
+        sync: false
+
+      # Provider keys. Set whichever you use in the Render dashboard; PSOK reads
+      # them through the `api_key_env` field in providers.yaml, so a key given
+      # this way needs no keychain and no file.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false

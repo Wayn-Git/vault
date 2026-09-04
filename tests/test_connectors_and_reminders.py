@@ -14,10 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from psok.db.repositories import ConversationRepository, TaskRepository
-from psok.mcp import commands as mcp_commands
-from psok.mcp.config import load_servers
-from psok.memory import MemoryStore
+from backend.db.repositories import ConversationRepository, TaskRepository
+from backend.mcp import commands as mcp_commands
+from backend.mcp.config import load_servers
+from backend.memory import MemoryStore
 
 # --- sign-in: a slow human is not a dead server -----------------------------
 
@@ -34,8 +34,8 @@ async def test_connect_waits_out_an_interactive_sign_in():
     Mutation check: make `_await_ready` re-raise instead of switching to
     `auth_timeout_seconds`, and this times out.
     """
-    from psok.mcp.client import MCPConnection
-    from psok.mcp.config import ServerConfig, Transport
+    from backend.mcp.client import MCPConnection
+    from backend.mcp.config import ServerConfig, Transport
 
     config = ServerConfig(
         name="slow-human",
@@ -65,8 +65,8 @@ async def test_a_silent_server_still_times_out_at_the_short_deadline():
     Without this the fix would be "wait five minutes for everything", which is
     a worse failure than the one it replaced.
     """
-    from psok.mcp.client import MCPConnection
-    from psok.mcp.config import ServerConfig, Transport
+    from backend.mcp.client import MCPConnection
+    from backend.mcp.config import ServerConfig, Transport
 
     config = ServerConfig(
         name="silent",
@@ -89,7 +89,7 @@ def test_an_authorization_timeout_does_not_trip_the_breaker():
     `record_failure` on that path is what left GitHub in a 60s cooldown after a
     sign-in the user completed.
     """
-    from psok.mcp.client import CircuitBreaker, _AuthorizationTimeout
+    from backend.mcp.client import CircuitBreaker, _AuthorizationTimeout
 
     assert issubclass(_AuthorizationTimeout, TimeoutError)
     breaker = CircuitBreaker()
@@ -108,8 +108,8 @@ def test_a_failed_connector_is_retried_after_its_backoff():
     """
     import time
 
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     manager = MCPManager(ToolRegistry())
     manager.errors["flaky"] = "boom"
@@ -125,8 +125,8 @@ def test_a_failed_connector_is_retried_after_its_backoff():
 
 
 def test_backoff_lengthens_and_then_stops_lengthening():
-    from psok.mcp.manager import RETRY_BACKOFF_SECONDS, MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.manager import RETRY_BACKOFF_SECONDS, MCPManager
+    from backend.tools.registry import ToolRegistry
 
     manager = MCPManager(ToolRegistry())
     delays = []
@@ -150,8 +150,8 @@ def test_a_finished_authorization_reports_its_outcome():
     Mutation check: drop `finish` from `_finish` and the status stays `waiting`,
     which the interface renders as a sign-in still in progress forever.
     """
-    from psok.mcp import commands
-    from psok.mcp.oauth import PENDING
+    from backend.mcp import commands
+    from backend.mcp.oauth import PENDING
 
     PENDING.clear()
     commands.report_login_failure("acme", "no client id")
@@ -162,7 +162,7 @@ def test_a_finished_authorization_reports_its_outcome():
 
 
 def test_finished_authorizations_are_pruned_but_waiting_ones_are_not():
-    from psok.mcp.oauth import PENDING, PendingAuthorization, prune_finished
+    from backend.mcp.oauth import PENDING, PendingAuthorization, prune_finished
 
     PENDING.clear()
     live = PendingAuthorization(server_name="live", authorization_url="https://x/")
@@ -184,7 +184,7 @@ def test_catalogue_env_reaches_a_server_added_before_it_existed():
     who had not yet added Google. Mutation check: delete `_fill_catalogue_env`'s
     body and the key is absent.
     """
-    from psok.mcp.config import ServerConfig, Source, Transport, add_server, load_servers
+    from backend.mcp.config import ServerConfig, Source, Transport, add_server, load_servers
 
     add_server(
         ServerConfig(
@@ -251,7 +251,7 @@ async def test_firing_marks_before_it_notifies(db, monkeypatch):
     Marking after notifying means a machine with no notification daemon repeats
     the same reminder every thirty seconds, forever.
     """
-    from psok import reminders
+    from backend import reminders
 
     sent: list[tuple[str, str]] = []
 
@@ -271,8 +271,8 @@ def test_retiming_a_task_makes_it_announceable_again(db):
     """Pushing a task to tomorrow must not mean never hearing about it again."""
     import asyncio as _asyncio
 
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.tasks import update_task
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.tasks import update_task
 
     repo = TaskRepository()
     task_id = repo.create("Call the bank", due_at=_at(-1))
@@ -294,7 +294,7 @@ def test_the_pull_is_idempotent(db):
     Mutation check: drop `idx_tasks_external` and key the upsert on title, and
     the second pull creates a duplicate.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     report = SyncReport()
@@ -321,8 +321,13 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
     it from there on create, and holding it back meant a note edited on the
     phone never reached PSOK again -- a bug that read as an invariant because
     it sat beside a real one.
+
+    `my_day_on` left this set on 2026-08-28, when My Day started travelling as a
+    category. It is now two-way like everything else, and its own protection --
+    a pull must not clear it off a row whose push has not landed -- is tested in
+    test_task_lists_and_buckets.py.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     item = {"id": "AAMk-2", "title": "Book flights", "status": "notStarted"}
@@ -333,7 +338,6 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
         row["id"],
         scheduled_at="2026-09-02 14:00:00",
         duration_estimate_minutes=45,
-        my_day_on="2026-09-02",
     )
 
     _apply(repo, SyncReport(), None, {**item, "title": "Book flights (return)"})
@@ -341,12 +345,11 @@ def test_the_pull_never_overwrites_a_psok_only_field(db):
     assert after["title"] == "Book flights (return)"
     assert after["scheduled_at"] == "2026-09-02 14:00:00"
     assert after["duration_estimate_minutes"] == 45
-    assert after["my_day_on"] == "2026-09-02"
 
 
 def test_a_body_edited_in_to_do_reaches_psok(db):
     """The other half of the field split above, and the reason it changed."""
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     item = {"id": "AAMk-9", "title": "Pack", "status": "notStarted"}
@@ -357,7 +360,7 @@ def test_a_body_edited_in_to_do_reaches_psok(db):
 
 
 def test_a_task_gone_from_to_do_is_cancelled_not_deleted(db):
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply, _retire_missing
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply, _retire_missing
 
     repo = TaskRepository()
     _apply(repo, SyncReport(), None, {"id": "A", "title": "Gone", "status": "notStarted"})
@@ -377,7 +380,7 @@ def test_an_outage_cannot_cancel_everything(db):
     An empty response and an emptied account are indistinguishable, and only one
     of them is recoverable.
     """
-    from psok.sync.microsoft_todo import SyncUnavailable, sync
+    from backend.sync.microsoft_todo import SyncUnavailable, sync
 
     class _Dead:
         connections: dict = {}
@@ -388,7 +391,7 @@ def test_an_outage_cannot_cancel_everything(db):
 
 def test_graph_timestamps_become_comparable_local_time(db):
     """A reminder held as UTC fires at the wrong hour, silently."""
-    from psok.sync.microsoft_todo import _timestamp
+    from backend.sync.microsoft_todo import _timestamp
 
     assert _timestamp(None) is None
     assert _timestamp({"dateTime": "", "timeZone": "UTC"}) is None
@@ -458,14 +461,14 @@ def test_forgetting_everything_twice_is_harmless(db):
 def client(psok_home):
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     with TestClient(app) as c:
         yield c
 
 
 def test_bulk_clear_endpoints(client):
-    from psok.api.main import _active_turns
+    from backend.api.main import _active_turns
 
     made = [
         client.post("/api/conversations", json={"provider": "ollama", "model": "m"}).json()["id"]
@@ -506,7 +509,7 @@ def test_a_tool_call_is_counted_against_the_context_budget():
     Mutation check: budget on `estimate_tokens(m.get("content"))` again and the
     two costs come out equal.
     """
-    from psok.agent.prompt import message_tokens
+    from backend.agent.prompt import message_tokens
 
     plain = {"role": "assistant", "content": None}
     with_call = {
@@ -520,7 +523,7 @@ def test_a_tool_call_is_counted_against_the_context_budget():
 
 
 def test_history_with_large_tool_calls_is_actually_trimmed():
-    from psok.agent.prompt import budget_history, message_tokens
+    from backend.agent.prompt import budget_history, message_tokens
 
     messages = [
         {
@@ -547,8 +550,8 @@ def test_a_provider_error_inside_the_stream_is_raised_not_swallowed():
     """
     import asyncio as _asyncio
 
-    from psok.runtime.providers import openai_compat
-    from psok.runtime.providers.openai_compat import OpenAICompatClient, ProviderStreamError
+    from backend.runtime.providers import openai_compat
+    from backend.runtime.providers.openai_compat import OpenAICompatClient, ProviderStreamError
 
     async def fake_stream(*a, **k):
         yield '{"choices":[{"delta":{"content":"partial"}}]}'
@@ -580,7 +583,7 @@ def test_a_provider_error_inside_the_stream_is_raised_not_swallowed():
     ],
 )
 def test_a_provider_error_is_reported_in_its_own_words(payload, expected):
-    from psok.runtime.providers.openai_compat import _describe_provider_error
+    from backend.runtime.providers.openai_compat import _describe_provider_error
 
     assert _describe_provider_error(payload) == expected
 
@@ -606,7 +609,7 @@ def test_the_device_code_is_found_without_inventing_one(text, expected):
     anchored on the word "code" rather than hunting for anything code-shaped,
     because showing the wrong string to type is worse than showing none.
     """
-    from psok.mcp.commands import _device_code_in
+    from backend.mcp.commands import _device_code_in
 
     assert _device_code_in(text) == expected
 
@@ -620,7 +623,7 @@ def test_a_transport_failure_is_told_apart_from_a_tool_failure():
     Conflating them is why three tool calls in a row came back
     "[microsoft-todo] ... failed: Connection closed" and nothing reconnected.
     """
-    from psok.mcp.manager import _is_transport_failure
+    from backend.mcp.manager import _is_transport_failure
 
     assert _is_transport_failure(RuntimeError("Connection closed")) is True
     assert _is_transport_failure(RuntimeError("Broken pipe")) is True
@@ -638,16 +641,16 @@ async def test_a_dropped_connection_is_reconnected_and_the_call_retried(monkeypa
 
     Mutation check: drop the reconnect branch and the call returns an error.
     """
-    from psok.mcp.manager import MCPManager
-    from psok.tools.base import ToolContext
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.manager import MCPManager
+    from backend.tools.base import ToolContext
+    from backend.tools.registry import ToolRegistry
 
     class DeadConnection:
         connected = True
         tools: list = []
 
         def __init__(self):
-            from psok.mcp.client import CircuitBreaker
+            from backend.mcp.client import CircuitBreaker
 
             self.breaker = CircuitBreaker()
 
@@ -667,7 +670,7 @@ async def test_a_dropped_connection_is_reconnected_and_the_call_retried(monkeypa
 
     monkeypatch.setattr(manager, "connect_server", fake_connect)
     monkeypatch.setattr(
-        "psok.mcp.manager.load_servers",
+        "backend.mcp.manager.load_servers",
         lambda: {"microsoft-todo": type("C", (), {"name": "microsoft-todo"})()},
     )
 
@@ -681,17 +684,17 @@ async def test_a_dropped_connection_is_reconnected_and_the_call_retried(monkeypa
 @pytest.mark.asyncio
 async def test_a_server_that_cannot_come_back_says_so_once(monkeypatch):
     """Not a third attempt: a connect timeout per tool call would be worse."""
-    from psok.mcp.client import MCPConnectionError
-    from psok.mcp.manager import MCPManager
-    from psok.tools.base import ToolContext
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.client import MCPConnectionError
+    from backend.mcp.manager import MCPManager
+    from backend.tools.base import ToolContext
+    from backend.tools.registry import ToolRegistry
 
     class DeadConnection:
         connected = True
         tools: list = []
 
         def __init__(self):
-            from psok.mcp.client import CircuitBreaker
+            from backend.mcp.client import CircuitBreaker
 
             self.breaker = CircuitBreaker()
 
@@ -708,13 +711,19 @@ async def test_a_server_that_cannot_come_back_says_so_once(monkeypatch):
 
     monkeypatch.setattr(manager, "connect_server", refuse)
     monkeypatch.setattr(
-        "psok.mcp.manager.load_servers", lambda: {"x": type("C", (), {"name": "x"})()}
+        "backend.mcp.manager.load_servers", lambda: {"x": type("C", (), {"name": "x"})()}
     )
 
     result = await manager._make_handler("x", "t")({}, ToolContext())
     assert result.is_error
-    assert "could not be re-established" in result.content
     assert len(attempts) == 1, "exactly one reconnect, not a loop"
+
+    # The message is an instruction, not an exception string: it names the
+    # connector, the screen and the button, and tells the model to stop. A raw
+    # `Connection closed` is what the model turned into an invented outage.
+    assert "'x'" in result.content
+    assert "Connectors" in result.content and "Reconnect" in result.content
+    assert "Do not retry" in result.content
 
 
 # --- tasks go where the user keeps their tasks ------------------------------
@@ -727,9 +736,9 @@ async def test_a_task_goes_to_the_connected_list_not_a_second_one(db, monkeypatc
     It does not reach the phone, does not appear in My Day, and drifts from the
     list the user actually opens.
     """
-    from psok.mcp import live
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.tasks import create_task
+    from backend.mcp import live
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.tasks import create_task
 
     calls = []
 
@@ -761,9 +770,9 @@ async def test_a_task_goes_to_the_connected_list_not_a_second_one(db, monkeypatc
 @pytest.mark.asyncio
 async def test_with_no_connector_the_task_is_still_created(db, monkeypatch):
     """The common case on a machine that has added nothing. Not an error."""
-    from psok.mcp import live
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.tasks import create_task
+    from backend.mcp import live
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.tasks import create_task
 
     monkeypatch.setattr(live, "connection", lambda name: None)
     result = await create_task({"title": "Local only"}, ToolContext())
@@ -776,9 +785,9 @@ async def test_with_no_connector_the_task_is_still_created(db, monkeypatch):
 async def test_an_unreachable_list_never_loses_the_task(db, monkeypatch):
     """Losing what the user asked for because a service blinked is the worst
     outcome available here."""
-    from psok.mcp import live
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.tasks import create_task
+    from backend.mcp import live
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.tasks import create_task
 
     class Broken:
         connected = True
@@ -809,9 +818,9 @@ def test_rebinding_keeps_live_connections_and_re_registers_their_tools(psok_home
     Mutation check: make `rebind` call `disconnect_server` and the connection
     identity assertion fails.
     """
-    from psok.mcp.client import DiscoveredTool
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.client import DiscoveredTool
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     mcp_commands.add_from_catalogue("memory")
 
@@ -841,7 +850,7 @@ async def test_changing_the_workspace_does_not_shut_the_manager_down(psok_home, 
     Those two roots alternate all session, so a rebuild on every change is a
     teardown on every change.
     """
-    from psok.api import main
+    from backend.api import main
 
     class FakeManager:
         def __init__(self):

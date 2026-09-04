@@ -29,12 +29,20 @@ abstraction. Three separate things were wrong around it:
 
 ## The catalogue
 
-`psok/provider_catalogue.py` holds thirteen presets — slug, label, base URL,
+`backend/provider_catalogue.py` holds thirteen presets — slug, label, base URL,
 default model, context window where it is known, key page, docs page. Each is
 the set of facts needed to write one `providers.yaml` entry.
 
 The starter file is **generated from the catalogue** (`render_default_providers`)
-rather than hand-written. The hand-written one had drifted: Groq sat commented
+and lists twelve of them, so the file itself is the menu -- base URL, model and
+keychain ref already written, making "add a provider" one `psok secrets set`
+rather than research. Listing costs nothing: `configured_providers` filters out
+any entry whose key is missing, so a listed provider is not an offered one.
+`psok doctor` summarises the keyless ones on one line rather than warning per
+provider, which would train the reader to skip the section that also reports
+real faults.
+
+The file is generated rather than hand-written. The hand-written one had drifted: Groq sat commented
 out while the docs claimed it was configured, and Cerebras existed in neither.
 `psok doctor` had grown a check to report the drift, which is a good sign the
 two should not have been separate lists.
@@ -53,11 +61,33 @@ exist:
   model (OpenRouter, Together, Fireworks, NVIDIA) leave it unset.
 
 Writing is `config.save_providers` / `add_provider` / `remove_provider`,
-modelled on `psok/mcp/config.py`, which has done the same for `mcp.yaml` since
+modelled on `backend/mcp/config.py`, which has done the same for `mcp.yaml` since
 connectors shipped. `yaml.safe_dump` cannot preserve comments, so the header is
 re-emitted on every write and hand-written per-entry comments are lost on the
 first programmatic edit — the honest trade for being able to edit the file at
 all. Other top-level keys, `memory:` in particular, are left alone.
+
+## Cloudflare Workers AI, and a content shim it needed
+
+Cloudflare rides the OpenAI-compatible adapter like every other non-native
+provider — its `/ai/v1/chat/completions` endpoint speaks standard
+chat-completions, so the whole integration is one catalogue preset. The one
+quirk: the account id lives in the base URL
+(`.../accounts/<id>/ai/v1`), so the preset ships an `ACCOUNT_ID` placeholder
+that must be filled in, and a wrong one 404s visibly rather than failing as a
+mystery. Verified live 2026-08-28: `complete`, streaming and tool calls all work
+through the runtime on `@cf/meta/llama-3.3-70b-instruct-fp8-fast` (the preset
+default — fast, tool-capable, no reasoning overhead; `@cf/openai/gpt-oss-120b`
+also works but spends a few hundred tokens thinking before it answers, which
+starves a small `max_tokens`).
+
+It also surfaced a real robustness bug in the shared adapter. Cloudflare
+serialises a purely **numeric** content token — the "3" in a reply that counts —
+as a JSON number, so `delta.content` arrived as an int and `"".join(text_parts)`
+raised `expected str instance, int found`, killing the whole stream over one
+token. The spec says content is a string; `_as_text` is the shim for the
+providers that treat that as advisory, applied on both the streaming and
+non-streaming paths. Locked down by two mutation-checked tests.
 
 ## Declared context windows
 
@@ -82,7 +112,7 @@ schemas *before* budgeting rather than after.
 
 ## The failure taxonomy
 
-`psok/runtime/failures.py`. `ProviderError` (and its subclasses
+`backend/runtime/failures.py`. `ProviderError` (and its subclasses
 `ProviderHTTPError` and `ProviderStreamError`, now both defined in
 `runtime/http.py`) carries `kind`, `status` and `body` alongside the message.
 
@@ -115,7 +145,7 @@ request, which is the conservative reading: it stops rather than retries.
 
 ## Availability
 
-`psok/runtime/availability.py`, fed from two sources kept deliberately apart:
+`backend/runtime/availability.py`, fed from two sources kept deliberately apart:
 
 - **A probe**, for endpoints whose credential tells us nothing — one `GET
   {base}/models` with a 3-second timeout. *Any* HTTP answer counts as reachable:
@@ -136,11 +166,13 @@ how "start Ollama and it still says unavailable" happens.
 
 `GET /api/health` reports `providers_unavailable` as a `{name: reason}` map
 beside `providers`. Unavailable providers stay **listed**: the user configured
-them on purpose, so they get a reason rather than vanishing.
+them on purpose, so they get a reason rather than vanishing. Both pickers read
+it -- the composer's `ModelMenu` dims the row and says "not answering", and
+Settings shows the reason in full.
 
 ## The chain
 
-`psok/runtime/chain.py`. The chosen provider first, then up to two others.
+`backend/runtime/chain.py`. The chosen provider first, then up to two others.
 
 - **Order** is `providers.yaml`'s own order — the closest thing to a stated
   preference that exists without inventing a setting. A top-level `fallback:`
@@ -224,7 +256,7 @@ YAML for the user to copy.
 
 ## Verified
 
-- 39 tests in `tests/test_providers_and_fallback.py`; 457 in the suite; `ruff`
+- 45 tests in `tests/test_providers_and_fallback.py`; 503 in the suite; `ruff`
   clean; `npm run lint` and `build` clean.
 - End to end against real HTTP, no mocked transport — a live `http.server` on
   one port and a dead port for the other entry:
@@ -241,10 +273,9 @@ YAML for the user to copy.
 
 ## Not built, on purpose
 
-- **Per-conversation fallback order.** The order is global
-  (`providers.yaml`'s `fallback:` key). A per-conversation one needs a column,
-  a PATCH field and a control to set it; none of those exists, and a column
-  nothing writes is a reserved slot.
+- **A control in the interface for the per-conversation chain.** The column and
+  the PATCH field are there and tested; nothing in the UI sets them yet, so it
+  is an API-level setting today.
 - **Probing cloud providers on a schedule.** Costs latency on every health poll
   to learn what the next turn learns for free.
 - **A generic client with per-provider auth flags.** See the catalogue section.

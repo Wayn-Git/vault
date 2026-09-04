@@ -10,9 +10,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from psok.api.main import app
-from psok.skills.install import SkillInstallError, install_text, remove, to_raw_url
-from psok.skills.loader import scan
+from backend.api.main import app
+from backend.skills.install import SkillInstallError, install_text, remove, to_raw_url
+from backend.skills.loader import scan
 
 pytestmark = pytest.mark.usefixtures("psok_home")
 
@@ -132,7 +132,7 @@ def test_an_upload_cannot_escape_the_attachments_directory(client, psok_home):
 
 
 def test_an_oversized_upload_is_rejected_and_not_kept(client, psok_home, monkeypatch):
-    monkeypatch.setattr("psok.api.main.MAX_ATTACHMENT_BYTES", 16)
+    monkeypatch.setattr("backend.api.main.MAX_ATTACHMENT_BYTES", 16)
     response = client.post(
         "/api/attachments",
         files={"file": ("big.bin", b"x" * 1024, "application/octet-stream")},
@@ -156,8 +156,8 @@ async def test_search_results_are_parsed_out_of_the_result_page(monkeypatch):
     and it has to fail loudly rather than returning an empty list."""
     import httpx
 
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.web import search_web
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.web import search_web
 
     page = """
     <div class="result">
@@ -178,7 +178,7 @@ async def test_search_results_are_parsed_out_of_the_result_page(monkeypatch):
         async def get(self, url, headers=None):
             return httpx.Response(200, text=page, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("psok.tools.builtin.web.httpx.AsyncClient", lambda **kw: FakeClient())
+    monkeypatch.setattr("backend.tools.builtin.web.httpx.AsyncClient", lambda **kw: FakeClient())
 
     result = await search_web({"query": "anything"}, ToolContext())
     assert not result.is_error
@@ -188,8 +188,8 @@ async def test_search_results_are_parsed_out_of_the_result_page(monkeypatch):
 
 
 async def test_fetching_a_private_address_is_refused():
-    from psok.tools.base import ToolContext
-    from psok.tools.builtin.web import fetch_url
+    from backend.tools.base import ToolContext
+    from backend.tools.builtin.web import fetch_url
 
     result = await fetch_url({"url": "http://169.254.169.254/latest/meta-data/"}, ToolContext())
     assert result.is_error
@@ -199,7 +199,7 @@ async def test_fetching_a_private_address_is_refused():
 
 
 def test_tasks_created_by_the_agent_are_readable_without_a_model_call(client, db):
-    from psok.db.repositories import TaskRepository
+    from backend.db.repositories import TaskRepository
 
     TaskRepository().create("Study system design in LLMs", priority="medium")
     rows = client.get("/api/tasks").json()
@@ -214,7 +214,7 @@ async def test_the_catalogue_reads_names_and_descriptions_from_the_real_files(mo
     hand-written title, which would drift the moment the source changed."""
     import httpx
 
-    from psok.skills import catalogue as cat
+    from backend.skills import catalogue as cat
 
     tree = {"tree": [{"path": "skills/note-taker/SKILL.md"}, {"path": "README.md"}]}
 
@@ -244,7 +244,7 @@ async def test_the_catalogue_reads_names_and_descriptions_from_the_real_files(mo
 async def test_a_source_that_cannot_be_read_says_so_rather_than_inventing_one(monkeypatch):
     import httpx
 
-    from psok.skills import catalogue as cat
+    from backend.skills import catalogue as cat
 
     class Broken:
         async def __aenter__(self):
@@ -265,7 +265,7 @@ async def test_a_source_that_cannot_be_read_says_so_rather_than_inventing_one(mo
 
 
 def test_the_catalogue_endpoint_marks_what_is_already_installed(client, monkeypatch):
-    from psok.skills import catalogue as cat
+    from backend.skills import catalogue as cat
 
     entry = cat.CatalogueSkill(
         id="anthropic/note-taker",
@@ -280,7 +280,7 @@ def test_the_catalogue_endpoint_marks_what_is_already_installed(client, monkeypa
     async def fake_fetch(*, force=False):
         return cat.Catalogue(skills=[entry])
 
-    monkeypatch.setattr("psok.skills.catalogue.fetch", fake_fetch)
+    monkeypatch.setattr("backend.skills.catalogue.fetch", fake_fetch)
 
     assert client.get("/api/skills/catalogue").json()["skills"][0]["installed"] is False
     install_text(SKILL)

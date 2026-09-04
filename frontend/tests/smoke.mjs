@@ -121,8 +121,8 @@ try {
   await page.evaluate(() => localStorage.clear())
   await page.reload({ waitUntil: 'networkidle' })
 
-  check('the app renders', await page.locator('.rail-brand').isVisible())
-  const status = await page.locator('.rail-foot-sub').innerText()
+  check('the app renders', await page.locator('.wb-brand').isVisible())
+  const status = await page.locator('.wb-foot-sub').innerText()
   check('health reaches the rail', /tools|offline/.test(status), status.trim())
 
   // ------------------------------------------------------------- keyboard
@@ -139,10 +139,10 @@ try {
   check('? lists the shortcuts', (await page.locator('.shortcut-row').count()) > 8)
   await page.keyboard.press('Escape')
 
-  const sideBefore = await page.locator('.rail').count()
+  const sideBefore = await page.locator('.wb-list').isVisible()
   await page.keyboard.press('Control+b')
   await page.waitForTimeout(200)
-  check('the rail toggles', (await page.locator('.rail').count()) !== sideBefore)
+  check('the rail toggles', (await page.locator('.wb-list').isVisible()) !== sideBefore)
   await page.keyboard.press('Control+b')
   await page.waitForTimeout(150)
 
@@ -166,17 +166,21 @@ try {
   await page.waitForSelector('.cap-tabs', { timeout: 6000 })
   check('the settings nav goes to the one capabilities page',
     (await page.locator('.settings').count()) === 0
-      && (await page.locator('.rail-place.active').innerText()).trim() === 'Skills & connectors')
+      && (await page.locator('.wb-place.active').innerText()).trim() === 'Skills & connectors')
 
   // Skills and connectors are one page with two tabs, and each tab carries both
   // what is added and what could be. The directory overlay is gone.
-  await page.keyboard.press('Control+3')
+  await page.keyboard.press('Control+4')
   await page.waitForSelector('.cap-tabs', { timeout: 6000 })
   await page.locator('.cap-tab', { hasText: 'Connectors' }).click()
-  await page.waitForSelector('.conn-table', { timeout: 8000 })
+  // The connectors page is a list of rows now, not a table -- one row opens
+  // into its own detail panel. These selectors tracked the table and so failed
+  // on markup rather than on behaviour, which is the least useful way for a
+  // browser test to fail.
+  await page.waitForSelector('.conn-list', { timeout: 8000 })
   await page.waitForTimeout(700)
   check('the connectors tab lists what is configured',
-    (await page.locator('.conn-table tbody tr').count()) > 0)
+    (await page.locator('.conn-list .conn-row').count()) > 0)
 
   // A connector that has never once worked must not sit among the ones serving
   // tools right now under a heading saying they are the same thing.
@@ -186,7 +190,7 @@ try {
     heads.map((h) => h.split('\n')[0]).join(' | '))
   check('a connected row reports live tools, not just a switch',
     !heads.some((h) => /^connected/i.test(h))
-      || /tools? live/.test(await page.locator('.conn-table').first().innerText()))
+      || /tools?\b/.test(await page.locator('.conn-list').first().innerText()))
 
   // Adding happens on this page: the catalogue opens underneath.
   await page.locator('.cap-head .btn').click()
@@ -198,12 +202,15 @@ try {
   await page.locator('.cap-head .btn').click()
   await page.waitForTimeout(200)
 
-  await page.locator('.conn-actions-inner .icon-btn').first().click()
-  await page.waitForTimeout(400)
-  check('a connector opens its credentials in place',
-    (await page.locator('.conn-setup').count()) === 1)
-  await page.locator('.conn-actions-inner .icon-btn').first().click()
-  await page.waitForTimeout(200)
+  // Opening a connector goes into its own panel, with a way back to the list.
+  await page.locator('.conn-list .conn-row').first().click()
+  await page.waitForSelector('.conn-detail', { timeout: 6000 })
+  check('a connector opens its own panel',
+    (await page.locator('.conn-detail-section').count()) > 0)
+  await page.locator('.conn-back').click()
+  await page.waitForSelector('.conn-list', { timeout: 6000 })
+  check('and there is a way back to the list',
+    (await page.locator('.conn-detail').count()) === 0)
   await page.keyboard.press('Control+1')
   await page.waitForTimeout(300)
 
@@ -342,11 +349,24 @@ try {
     `${await page.locator('.msg-assistant').count()} bubbles`,
   )
 
-  if (await page.locator('.md-copy').count()) {
-    await page.locator('.md-copy').first().click()
+  // The copy control is the second button in a block's header; the first is
+  // the wrap toggle. Addressed by label rather than by position, so adding a
+  // third control does not silently start testing the wrong one.
+  const copyBlock = page.locator('.md-pre-wrap button[aria-label="Copy this block"]')
+  if (await copyBlock.count()) {
+    await copyBlock.first().click()
     await page.waitForTimeout(150)
     const clip = await page.evaluate(() => navigator.clipboard.readText())
     check('a code block copies', clip.length > 0, JSON.stringify(clip.slice(0, 28)))
+  }
+
+  // Highlighting is fetched per language after the block closes, so it is a
+  // real asynchronous step rather than a styling detail.
+  const fenced = await page.locator('.msg-assistant .md-pre code').count()
+  if (fenced) {
+    await page.waitForTimeout(1200)
+    const tokens = await page.locator('.msg-assistant .md-pre .token').count()
+    check('fenced code is highlighted', tokens > 0, `${tokens} tokens`)
   }
   await shot('chat')
 
@@ -382,27 +402,27 @@ try {
   }
 
   await page.keyboard.press('F2')
-  const rename = page.locator('.rail-rename')
+  const rename = page.locator('.wb-rename')
   if (await rename.count()) {
     await rename.fill('smoke test')
     await page.keyboard.press('Enter')
     await page.waitForTimeout(400)
     check(
       'F2 renames the conversation',
-      (await page.locator('.rail-conv-title').first().innerText()).includes('smoke test'),
+      (await page.locator('.wb-conv-title').first().innerText()).includes('smoke test'),
     )
   } else {
     check('F2 renames the conversation', false, 'no rename field appeared')
   }
 
   for (const [combo, label] of [
-    ['Control+2', 'Tasks'], ['Control+3', 'Skills & connectors'],
-    ['Control+4', 'Automations'], ['Control+6', 'Activity'],
+    ['Control+2', 'Tasks'], ['Control+4', 'Skills & connectors'],
+    ['Control+5', 'Automations'], ['Control+7', 'Activity'],
   ]) {
     await page.keyboard.press(combo)
     await page.waitForTimeout(300)
     // A rail row can carry a badge on a second line ("Automations" / "beta").
-    const active = (await page.locator('.rail-place.active').innerText()).split('\n')[0].trim()
+    const active = (await page.locator('.wb-place.active').innerText()).split('\n')[0].trim()
     check(`${combo} switches view`, active === label, active)
   }
   await page.keyboard.press('Control+1')
@@ -457,7 +477,7 @@ try {
     check('its result is visible when expanded',
       (await page.locator('.tool-card').first().innerText()).includes('psok-smoke-ok'))
 
-    await page.keyboard.press('Control+6')
+    await page.keyboard.press('Control+7')
     await page.waitForTimeout(1200)
     const activity = await page.locator('body').innerText()
     check('the audit trail shows it', /run_shell_command/.test(activity))
@@ -480,10 +500,10 @@ try {
   //
   // Created and deleted, not run: a scheduled turn costs a real model call, and
   // the gate it runs behind is covered by the unit tests.
-  await page.keyboard.press('Control+4')
+  await page.keyboard.press('Control+5')
   await page.waitForSelector('.cap-head', { timeout: 6000 })
   check('automations are marked beta where they appear',
-    (await page.locator('.rail-place .beta').count()) > 0
+    (await page.locator('.wb-place .wb-place-beta').count()) > 0
       && (await page.locator('.cap-head .beta').count()) > 0)
   // Chat stays mounted behind every view, so `.view` alone matches two.
   const autoText = await page.locator('.view:not(.view--flush)').innerText()
@@ -531,15 +551,15 @@ try {
     () => JSON.parse(localStorage.getItem('psok.ui.v1') || '{}').activeId,
   )
   if (!doomedId) throw new Error('no conversation is open to delete')
-  const doomed = page.locator('.rail-conv.active').first()
-  const doomedTitle = await doomed.locator('.rail-conv-title').innerText()
-  await doomed.locator('.rail-conv-more').click({ force: true })
-  await page.waitForSelector('.rail-conv-menu', { timeout: 3000 })
-  await page.locator('.rail-conv-menu .danger').click()
+  const doomed = page.locator('.wb-conv.active').first()
+  const doomedTitle = await doomed.locator('.wb-conv-title').innerText()
+  await doomed.locator('.wb-conv-more').click({ force: true })
+  await page.waitForSelector('.wb-conv-menu', { timeout: 3000 })
+  await page.locator('.wb-conv-menu .danger').click()
   await page.waitForTimeout(200)
   check('deleting asks for a second click first',
     (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 200)
-  await page.locator('.rail-conv-menu .danger').click()
+  await page.locator('.wb-conv-menu .danger').click()
   await page.waitForTimeout(900)
   check('a conversation can be deleted from the rail',
     (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 404,
@@ -552,6 +572,56 @@ try {
       () => JSON.parse(localStorage.getItem('psok.ui.v1') || '{}').activeId,
     )) !== doomedId && consoleErrors.length === 0)
 
+
+  // --- Today and the Library ------------------------------------------------
+  //
+  // Both pages have to be true before anything is configured, which is the
+  // state a first run is actually in. The thing being asserted is not that a
+  // number appeared -- it is that no sentence on the page is prose nobody
+  // generated: a section that could not be read says so.
+
+  await page.goto(`${BASE}/today`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.today-grid', { timeout: 15000 })
+  check('today opens on its own URL', (await page.locator('.today-grid').count()) === 1)
+
+  const todayText = await page.locator('.view-inner').innerText()
+  const briefingCard = await page.locator('.brief, .empty-state').first().innerText()
+  check('the day is described rather than asserted',
+    /schedule|owed|inbox|logged/i.test(todayText))
+  // Either there is a briefing, or there is a sentence saying why there is not.
+  check('a missing briefing explains itself',
+    (await page.locator('.brief-body').count()) > 0 || briefingCard.trim().length > 20,
+    briefingCard.split('\n')[0]?.slice(0, 70))
+
+  const signals = await (await fetch(`${BASE}/api/today`)).json()
+  for (const [source, reason] of Object.entries(signals.degraded || {})) {
+    check(`${source} says why it is unavailable rather than showing a zero`,
+      todayText.includes(reason.slice(0, 24)), reason.slice(0, 60))
+  }
+
+  await page.goto(`${BASE}/library`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('.lib-capture', { timeout: 15000 })
+  check('the library opens on its own URL', (await page.locator('.lib-capture').count()) === 1)
+
+  // The bookmarklet's whole mechanism: a navigation carrying ?url=, which the
+  // page reads into the field and then takes back out of the address bar.
+  await page.goto(`${BASE}/library?url=${encodeURIComponent('https://example.com/from-bookmarklet')}`,
+    { waitUntil: 'networkidle' })
+  await page.waitForSelector('.lib-capture-row input', { timeout: 15000 })
+  await page.waitForTimeout(300)
+  check('a shared link arrives prefilled',
+    (await page.locator('.lib-capture-row input').inputValue()).includes('from-bookmarklet'))
+  check('and is taken back out of the address bar', !page.url().includes('url='))
+
+  // Digit 9 only works if App.jsx's regex and keys.js were both widened.
+  await page.keyboard.press('Control+8')
+  await page.waitForTimeout(400)
+  check('mod+8 reaches Today', page.url().endsWith('/today'), page.url())
+  await page.keyboard.press('Control+9')
+  await page.waitForTimeout(400)
+  check('mod+9 reaches the Library', page.url().endsWith('/library'), page.url())
+
+  await page.goto(BASE, { waitUntil: 'networkidle' })
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '))
 } finally {

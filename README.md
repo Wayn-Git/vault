@@ -74,7 +74,7 @@ Each of these was exercised end to end, not just wired up.
 
 **Multi-provider runtime.** One initialize-function contract per provider, a registry, and a fallback where any unrecognised provider name resolves to a generic OpenAI-compatible adapter driven by config. Provider quirks stay inside their adapter.
 
-**20 builtin tools** across filesystem, shell, desktop, tasks, calendar, document search and the open web — plus every tool any connected MCP server exposes, in the same flat namespace. The model cannot tell them apart; you can.
+**25 builtin tools** across filesystem, shell, desktop, tasks, calendar, file conversion, document search, the library and the open web — plus every tool any connected MCP server exposes, in the same flat namespace. The model cannot tell them apart; you can.
 
 **A permission gate with real sandboxing.** Every tool declares a static risk floor the model can raise but never lower. Shell commands run under Bubblewrap on Linux and Seatbelt on macOS. Paths under `~/.ssh`, `~/.aws` and similar always confirm, and no stored preference can silence them.
 
@@ -83,6 +83,14 @@ Each of these was exercised end to end, not just wired up.
 ![Connectors](docs/images/connectors.png)
 
 **Hybrid retrieval** over a notes vault: semantic search fused with a real BM25 index (SQLite FTS5 + sqlite-vec), content-hash incremental indexing, so re-syncing an unchanged folder costs nothing.
+
+**A day you can open.** Today pulls your calendar, task buckets, unread mail and connected tools onto one page, under a briefing written each morning from those same figures. In the evening a check-in is filed with the day's real numbers and no prose — the review is written from *your* answers, when you give them, and rolls up on the day your week ends. Every figure comes from a query; the model only writes the sentences around them. A section that could not be read says so instead of showing a zero. See [journal.md](docs/architecture/journal.md).
+
+**Reels, saved by sending them.** Comment `@your.account` on an Instagram post, or send it to the account as a message, and it lands in the library — the savetolist.com mechanic, on Meta's own API. A mention carries the permalink and the full caption; a direct message carries neither, so PSOK transcribes the audio through a provider you already have a key for, and the item says plainly which of the two it was. What it will not do is describe a video it has no words for: a reel with no caption and no speech gets a sentence saying so where the summary would be, never a paragraph nobody could have written. See [instagram.md](docs/architecture/instagram.md).
+
+**A library of what you have read.** Paste a link and PSOK fetches it, extracts the text to a real file under `~/.psok/library`, and hands it to the same indexer that reads your vault — so `search_documents` answers from a saved article without knowing the library exists. Books and talks with no URL are logged by hand, and your notes are what search reads. Anything with real text gets a summary, tags and the things it named — a restaurant, a grinder, a book — all of it indexed, so the list answers "where was that place" rather than "here are forty links". A paywall, a video with no transcript, or an embedding server that is not running each cost part of the capture and none of the record: the item says which. See [library.md](docs/architecture/library.md).
+
+**A brand kit that changes the output.** Voice, values, palette and fonts, injected as a `<brand>` block into the system prompt when PSOK writes *for* you rather than *to* you. The Settings panel shows the literal text the model is handed, so a stored voice and an applied one cannot silently differ.
 
 **Long-term memory.** Standing facts extracted by a second model call after a turn and recalled in later conversations, updated by a create/supersede diff rather than an ever-growing transcript. Switchable off, globally or per conversation.
 
@@ -96,7 +104,7 @@ Everything the agent can be given for the next message hangs off one button besi
 
 **A web interface** over the same API: streamed answers rendered as markdown, inline permission prompts, a command palette, file attachments, connector setup — catalogue, OAuth, credentials — and a keyboard layer where `?` lists every binding.
 
-**A CLI** that does all of it: `chat`, `serve`, `skills`, `mcp`, `memory`, `permissions`, `index`, `search`, `logs`, `capabilities`, `doctor`.
+**A CLI** that does all of it: `chat`, `serve`, `skills`, `mcp`, `memory`, `permissions`, `index`, `search`, `logs`, `capabilities`, `share-token`, `instagram`, `doctor`.
 
 ---
 
@@ -125,11 +133,35 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
         SQLite (+vec, +FTS5) · filesystem for documents · OS keychain for secrets
 ```
 
+Two directories carry it, named for which side of the wire they are on:
+
+```
+backend/          the Python package — API, agent loop, runtime, tools, MCP, retrieval
+  agent/          the loop, the prompt, planning and escalation
+  api/main.py     every HTTP and SSE endpoint
+  runtime/        provider adapters behind one contract, plus the fallback chain
+  tools/builtin/  filesystem, shell, desktop, tasks, calendar, convert, documents, web
+  mcp/            transports, OAuth, catalogue, lifecycle, risk
+  retrieval/      chunking, embeddings, the hybrid index
+  journal/        the briefing and the reviews: signals, prompts, the clock
+  instagram/      the webhook, the queue and what each route actually carries
+  library/        what you have read, the capture that files it, and enrichment
+  media/          downloading a file and pulling its audio out, through ffmpeg
+  mail/           Gmail, read directly rather than through the connector
+  web/            fetching a page and reducing it to text, shared by tool and capture
+  db/             schema, connection, repositories
+frontend/         the React app — built by Vite, served by the same process
+docs/             architecture, ADRs, deployment, handover
+```
+
+`backend` is the import name (`from backend.tasks.service import TaskService`); `psok` stays the command you type, the keychain service, and the name of `~/.psok`.
+
 - [Architecture overview](docs/architecture/overview.md) — the layer model and a worked request
 - [The web interface](docs/interface.md) — how the React app is built, and every keyboard binding
-- [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
+- [Journal](docs/architecture/journal.md) · [Library](docs/architecture/library.md) · [Instagram](docs/architecture/instagram.md) · [AI runtime](docs/architecture/ai-runtime.md) · [Providers](docs/architecture/providers.md) · [Modes](docs/architecture/modes.md) · [Tasks](docs/architecture/tasks.md) · [Turns](docs/architecture/turns.md) · [Connectors](docs/architecture/connectors.md) · [Data model](docs/architecture/data-model.md) · [Security](docs/architecture/security.md) · [MCP](docs/architecture/mcp.md) · [MCP OAuth](docs/architecture/mcp-oauth.md) · [Skills](docs/architecture/skills.md)
 - [Decision records](docs/architecture/decisions/) — ADRs with the alternatives and what they cost
-- [API contract](docs/NEXT-SESSION.md) — the 36 endpoints the interface is built against
+- [Handover](docs/handover.md) — the current state of the system and the API contract it is built against
+- [Ideas](docs/roadmap/ideas.md) — what is wanted next, and what each would actually cost
 
 ---
 
@@ -137,11 +169,11 @@ Interface (CLI · HTTP/SSE API · React app served by the same process)
 
 Stated plainly, because half-built features are worse than absent ones and this repository deliberately contains none:
 
-- **First-party service integrations.** Gmail, Calendar and GitHub are reachable as MCP connectors instead.
-- **Recurring tasks and background jobs.** Scheduling resolves and stores; nothing wakes up on its own.
-- **Deleting a conversation.** No endpoint — nothing in the architecture called for one.
+- **A daemon.** Automations, reminders and the journal wake up on their own, but only while `psok serve` is running. Nothing outlives the interface — an unattended turn that needs a permission answer at 3am has nobody to ask, so the gate denies anything outside a standing approval and records what it wanted.
+- **Anything multi-user, and anything safe to publish.** There is no authentication and there is not meant to be: bind it to loopback. Exactly two endpoints are built to be reached from outside — `POST /api/share/capture`, which is token-gated, and `POST /api/instagram/webhook`, whose only authentication is Meta's signature because Meta will not send a token. Both can do one thing: log something into the library. Reaching PSOK from anywhere still means a proxy in front that publishes those two paths and identity on everything else; [deployment.md](docs/deployment.md) has the Cloudflare setup.
+- **A calendar that syncs.** `calendar_events` is a local table the agent writes; Google Calendar is reachable as MCP tools and is not mirrored into it. Today shows what is in that table, which on a fresh machine is nothing.
+- **First-party service integrations, except mail.** Calendar and GitHub are reachable as MCP connectors. Gmail is the one exception: it is read directly, using the refresh token the connector already stored, because fifteen tools written to be read by a model are the wrong shape for a screen.
 - **Projects, artifacts, plugins, voice input.** No backing anywhere in the system.
-- **Anything multi-user.** Out of scope by design ([ADR-0001](docs/architecture/decisions/)).
 
 Provider adapters for Anthropic and OpenAI were only ever run against mocks — no key was available on the development machine — so their wire-format translation is unverified against the real APIs. NVIDIA NIM and the OpenAI-compatible path were exercised for real.
 
@@ -150,13 +182,13 @@ Provider adapters for Anthropic and OpenAI were only ever run against mocks — 
 ## Verifying it yourself
 
 ```bash
-pytest                    # 259 unit tests
+pytest                    # 736 unit tests
 pytest -m live            # 5 more against real MCP servers (spawns processes, uses network)
-ruff check psok tests
+ruff check backend tests
 
 cd frontend
 npm run lint && npm run build
-npm run smoke             # 34 checks in a real browser against a running `psok serve`
+npm run smoke             # 62 checks in a real browser against a running `psok serve`
 ```
 
 The smoke suite is the one that matters: it drives Chromium against a live model and asserts what a person would see — a turn streaming, markdown rendering once and not twice, a shell call suspending the turn and the prompt answering to the keyboard, a skill installing from the directory and uninstalling again, the audit trail carrying the call.

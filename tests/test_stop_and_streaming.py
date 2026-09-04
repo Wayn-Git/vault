@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from psok.agent.director import Stopped, _race_cancel, _stream_until_cancelled
+from backend.agent.director import Stopped, _race_cancel, _stream_until_cancelled
 
 
 async def _slow(seconds: float = 30.0):
@@ -112,8 +112,8 @@ async def test_a_cancelled_tool_call_does_not_block_the_next_one():
 
     Mutation check: drop the `waiter` race in `MCPConnection._serve`.
     """
-    from psok.mcp.client import MCPConnection
-    from psok.mcp.config import ServerConfig, Transport
+    from backend.mcp.client import MCPConnection
+    from backend.mcp.config import ServerConfig, Transport
 
     config = ServerConfig(name="slow", transport=Transport.STDIO, command="true")
     config.timeout_seconds = 30
@@ -165,8 +165,8 @@ async def test_a_reasoning_only_stream_is_not_an_answer(monkeypatch):
 
     Mutation check: put `not reasoning_parts` back into that condition.
     """
-    from psok.runtime.providers import openai_compat
-    from psok.runtime.types import ModelResponse
+    from backend.runtime.providers import openai_compat
+    from backend.runtime.types import ModelResponse
 
     client = openai_compat.OpenAICompatClient(
         base_url="https://example.invalid/v1", api_key="k", model="thinky"
@@ -191,7 +191,7 @@ async def test_a_reasoning_only_stream_is_not_an_answer(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_an_error_frame_inside_a_200_is_raised_not_dropped(monkeypatch):
-    from psok.runtime.providers import openai_compat
+    from backend.runtime.providers import openai_compat
 
     client = openai_compat.OpenAICompatClient(
         base_url="https://example.invalid/v1", api_key="k", model="m"
@@ -211,8 +211,8 @@ async def test_anthropic_raises_on_an_in_stream_error(monkeypatch):
 
     Mutation check: delete the `kind == "error"` branch in `anthropic.stream`.
     """
-    from psok.runtime.providers import anthropic
-    from psok.runtime.providers.openai_compat import ProviderStreamError
+    from backend.runtime.providers import anthropic
+    from backend.runtime.providers.openai_compat import ProviderStreamError
 
     client = anthropic.AnthropicClient(
         base_url="https://example.invalid", api_key="k", model="claude-x"
@@ -225,3 +225,84 @@ async def test_anthropic_raises_on_an_in_stream_error(monkeypatch):
     with pytest.raises(ProviderStreamError, match="Overloaded"):
         async for _ in client.stream([{"role": "user", "content": "hi"}]):
             pass
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_content_token_does_not_kill_the_stream(monkeypatch):
+    """Cloudflare Workers AI serialises a purely numeric content token -- the
+    "3" in a reply that counts -- as a JSON *number*, so `delta.content` arrives
+    as an int. `"".join(text_parts)` then raised `expected str instance, int
+    found` and the whole stream died over one token. The spec says content is a
+    string; this is the shim for providers that treat that as advisory.
+
+    Mutation check: drop the `_as_text` coercion in `stream` (append
+    `delta["content"]` raw).
+    """
+    from backend.runtime.providers import openai_compat
+
+    client = openai_compat.OpenAICompatClient(
+        base_url="https://example.invalid/v1", api_key="k", model="m"
+    )
+    monkeypatch.setattr(
+        openai_compat,
+        "stream_sse",
+        _sse(
+            '{"choices":[{"delta":{"content":"count: "}}]}',
+            '{"choices":[{"delta":{"content":3}}]}',
+            '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        ),
+    )
+
+    events = [e async for e in client.stream([{"role": "user", "content": "count"}])]
+    text = "".join(e.text for e in events if e.type == "text")
+    assert text == "count: 3", "the numeric token is coerced, not dropped and not fatal"
+    assert events[-1].response.text == "count: 3"
+
+
+def test_numeric_content_is_coerced_in_the_non_streaming_path():
+    """The same provider can send a numeric `message.content` on a plain call.
+
+    Mutation check: revert `_as_text(message.get("content"))` to
+    `message.get("content")` in `_parse`.
+    """
+    from backend.runtime.providers.openai_compat import OpenAICompatClient
+
+    client = OpenAICompatClient(base_url="https://x/v1", api_key="k", model="m")
+    parsed = client._parse({"choices": [{"message": {"content": 7}, "finish_reason": "stop"}]})
+    assert parsed.text == "7"
+
+
+@pytest.mark.asyncio
+async def test_heartbeats_fill_a_silent_gap():
+    """A long tool call puts no frames on the stream between `tool_call` and
+    `tool_result`; a silent SSE stream is one a proxy drops and the client's
+    watchdog gives up on. The wrapper must emit keepalives through the gap.
+
+    Mutation check: `yield item` without the `timeout=` branch in
+    `_with_heartbeats`.
+    """
+    from backend.api.main import _HEARTBEAT, _with_heartbeats
+
+    async def slow():
+        yield "start"
+        await asyncio.sleep(0.3)  # a "long tool call" -- silent for the interval
+        yield "end"
+
+    got = [x async for x in _with_heartbeats(slow(), interval=0.05)]
+
+    assert got[0] == "start" and got[-1] == "end", "real events still arrive, in order"
+    assert got.count(_HEARTBEAT) >= 1, "the silent gap must be filled with keepalives"
+
+
+@pytest.mark.asyncio
+async def test_heartbeats_stop_when_the_source_ends():
+    """No trailing keepalives after the last real event -- the wrapper returns
+    on StopAsyncIteration rather than beating forever."""
+    from backend.api.main import _HEARTBEAT, _with_heartbeats
+
+    async def quick():
+        yield "only"
+
+    got = [x async for x in _with_heartbeats(quick(), interval=0.05)]
+    assert got == ["only"], "a source that ends promptly emits no keepalives"
+    assert _HEARTBEAT not in got

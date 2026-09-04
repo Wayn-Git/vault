@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from psok.db import connection
+from backend.db import connection
 
 
 class _MemoryKeyring:
@@ -36,7 +36,7 @@ def psok_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("PSOK_HOME", str(home))
 
-    from psok import secrets
+    from backend import secrets
 
     # One backend for the whole test: a fresh instance per call would lose
     # every secret between the set and the get.

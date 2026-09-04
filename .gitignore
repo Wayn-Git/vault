@@ -190,3 +190,6 @@ sketch
 .claude/
 .skills/
 .playwright-mcp/
+
+# An empty directory another tool left behind, owned by root. Not part of PSOK.
+LibreChat/

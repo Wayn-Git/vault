@@ -24,7 +24,7 @@ Stack: Python 3.11+ with FastAPI on the backend, React with Vite on the frontend
 
 **Goal.** Every later phase has somewhere to persist state.
 
-**Components.** `psok/db/schema.sql` (all tables from [data-model.md](../architecture/data-model.md)), `psok/db/connection.py` (WAL, foreign keys, busy timeout, short-transaction helper), `psok/db/repositories.py` split by domain, `psok/secrets.py` (keychain wrapper plus audit redaction), `psok/config.py` (paths, `providers.yaml`).
+**Components.** `backend/db/schema.sql` (all tables from [data-model.md](../architecture/data-model.md)), `backend/db/connection.py` (WAL, foreign keys, busy timeout, short-transaction helper), `backend/db/repositories.py` split by domain, `backend/secrets.py` (keychain wrapper plus audit redaction), `backend/config.py` (paths, `providers.yaml`).
 
 **Dependencies.** Phase 0.
 
@@ -124,7 +124,7 @@ Stack: Python 3.11+ with FastAPI on the backend, React with Vite on the frontend
 
 **Goal.** Something to drive PSOK with.
 
-**Components.** `psok/cli.py` (`init`, `doctor`, `chat`, `logs`), `psok/api/main.py` (conversations, streaming turns, pending confirmations, audit log, skills).
+**Components.** `backend/cli.py` (`init`, `doctor`, `chat`, `logs`), `backend/api/main.py` (conversations, streaming turns, pending confirmations, audit log, skills).
 
 **Dependencies.** Phases 3–6.
 

@@ -6,11 +6,16 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from psok.db.repositories import CalendarRepository, TaskRepository
-from psok.scheduling.engine import AmbiguousDate, find_conflicts, find_free_slot, resolve_date_hint
-from psok.security.confirmation import ConfirmationService, auto_approve
-from psok.tools.base import ToolContext
-from psok.tools.builtin import tasks as task_tools
+from backend.db.repositories import CalendarRepository, TaskRepository
+from backend.scheduling.engine import (
+    AmbiguousDate,
+    find_conflicts,
+    find_free_slot,
+    resolve_date_hint,
+)
+from backend.security.confirmation import ConfirmationService, auto_approve
+from backend.tools.base import ToolContext
+from backend.tools.builtin import tasks as task_tools
 
 NOW = datetime(2026, 3, 10, 11, 0)  # a Tuesday
 
@@ -106,7 +111,7 @@ async def test_ambiguous_date_asks_rather_than_inventing(db):
 
 async def test_task_tools_go_through_the_permission_gate(db):
     """Scheduling is not special-cased: create_task confirms like any medium-risk write."""
-    from psok.tools.registry import build_default_registry
+    from backend.tools.registry import build_default_registry
 
     denied = []
 

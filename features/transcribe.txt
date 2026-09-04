@@ -1,0 +1,21 @@
+Five things I would build in Claude if I had a free weekend.
+These projects will teach you more than any course or certification
+and you'll come out of it knowing more about Claude than 95% of people.
+First, a life dashboard.
+One page that pulls your calendar, emails, tasks and connected tools all onto one page.
+Set it up so that it automatically updates every morning
+and provides you with a daily briefing about the day ahead.
+Number two is a second brain.
+Drop all your life admin into one folder.
+I'm talking contracts, lease agreements.
+insurance, notes, PDFs, absolutely everything. Now you can query any question at any time,
+like when's my insurance due? I built my second brain in Notion and then I connected it to Claude,
+but you can just build it all in one local file if you'd prefer. Third, a daily and weekly review
+agent. It checks in every night to review what did and didn't go well every single day. And then at
+the end of every week, it rolls up analysis on what to improve for the new week. Fourth is a
+Give Claude your voice and values and it can build out a brand kit of colors, fonts, and components that it can use to create websites, social media posts, or even email newsletters for you and your business.
+And fifth is the craziest one.
+It's a life library.
+Every book, article, newsletter, and YouTube video that you've ever consumed gets logged right here.
+You can now query anything about topics that you've learned and it will come back with answers straight away.
+then comment weekend below and I'll send it to you.

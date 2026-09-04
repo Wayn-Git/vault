@@ -3,6 +3,7 @@ import Icon from '../components/Icon.jsx'
 import { useApp } from '../store.jsx'
 import { useViewEntrance } from '../motion.js'
 import { api } from '../api.js'
+import { SkeletonRows } from '../components/Skeleton.jsx'
 
 /* The task list, in the shape people already keep tasks in.
 
@@ -11,12 +12,16 @@ import { api } from '../api.js'
    come from the same predicate, so a rail saying 5 over a list of 4 is not a
    state this can reach.
 
-   My Day is PSOK's own. Graph exposes My Day membership through fields this
-   connector's scopes do not reach, so the page says so rather than implying a
-   list that silently differs from the phone. */
+   My Day is a list. To Do's own My Day is not in its API at all -- verified
+   live, not assumed: showInMyDay and isInMyDay both 400 as unknown properties
+   on todoTask, and the live beta schema has no field containing "day" -- and a
+   "My Day" category, which was the previous answer, is invisible to a task
+   added through To Do's own My Day on the phone. An ordinary list called My Day
+   is the one thing both ends can see and edit. So the sun *moves* a task into
+   that list, and the list is this bucket. */
 
 const BUCKETS = [
-  { id: 'my_day', label: 'My Day', icon: 'sun', blurb: 'What you mean to do today.' },
+  { id: 'my_day', label: 'My Day', icon: 'sun', blurb: 'Your To Do list called My Day.' },
   { id: 'missed', label: 'Missed', icon: 'clock', blurb: 'Past its deadline and still open.' },
   { id: 'important', label: 'Important', icon: 'star', blurb: 'Flagged, whatever the date.' },
   { id: 'general', label: 'General', icon: 'list', blurb: 'No date attached.' },
@@ -164,25 +169,53 @@ export default function Tasks() {
   // has nothing in it -- an empty default view reads as a broken page.
   const landed = useRef(false)
   const [tasks, setTasks] = useState([])
-  const [counts, setCounts] = useState({ buckets: {}, lists: [], connected: false })
+  const [counts, setCounts] = useState({
+    buckets: {}, lists: [], connected: false, my_day_list_id: null,
+  })
   const [events, setEvents] = useState([])
+  const [error, setError] = useState(null)
   const [syncing, setSyncing] = useState(false)
   const [adding, setAdding] = useState(false)
   const [busyTask, setBusyTask] = useState(null)
+  // Whether the first response has landed. Without it the empty states render
+  // against an empty array — so the page opened on "Nothing picked for today
+  // yet", complete with its explanation, and then replaced it with the day's
+  // tasks. A page that says the wrong thing first is worse than one that says
+  // nothing yet.
+  const [loaded, setLoaded] = useState(false)
   useViewEntrance(rootRef)
 
+  // Which request is the current one. Switching buckets quickly fires a new
+  // `load()` before the previous one's response has landed, and an older
+  // response arriving after a newer one used to overwrite the rows for the
+  // bucket now showing in the rail with the bucket it left — a stale answer
+  // is discarded here rather than applied.
+  const loadToken = useRef(0)
+
   const load = useCallback(async () => {
+    const token = ++loadToken.current
     try {
       const [rows, summary, cal] = await Promise.all([
         api.tasks(view.listId ? { listId: view.listId } : { bucket: view.bucket }),
         api.taskBuckets(),
         api.calendar(21),
       ])
+      if (loadToken.current !== token) return
       setTasks(rows)
       setCounts(summary)
       setEvents(cal)
+      setError(null)
     } catch (err) {
+      if (loadToken.current !== token) return
+      // `loaded` still flips true below, so without this a failed fetch
+      // rendered the same empty-state copy an actually-empty bucket shows.
+      // Rows cleared too, matching Mail's pattern -- a stale list under an
+      // error card reads as "it half-loaded", not as "this request failed".
+      setError(err.message)
+      setTasks([])
       toast(err.message, 'bad')
+    } finally {
+      if (loadToken.current === token) setLoaded(true)
     }
   }, [view, toast])
 
@@ -243,12 +276,37 @@ export default function Tasks() {
     }
   }, [load, toast])
 
-  const newList = useCallback(async () => {
-    const name = window.prompt('Name the list')
-    if (!name?.trim()) return
+  /* Opening the page is a request for current tasks, so it asks for one --
+     quietly, once per mount, behind whatever is already on screen. The timer
+     behind this runs every ninety seconds, which is close enough for a list
+     left open and too far away for a list you have just walked back to.
+     Failures are silent on purpose: the rows already rendered are still true,
+     and the "Sync To Do" button is there for anyone who wants to be told. */
+  const synced = useRef(false)
+  useEffect(() => {
+    if (synced.current) return
+    synced.current = true
+    let cancelled = false
+    api.syncTasks().then(() => { if (!cancelled) load() }).catch(() => {})
+    return () => { cancelled = true }
+  }, [load])
+
+  /* Naming a list used to go through `window.prompt`, which is the one piece
+     of browser chrome nobody in this application chose: it cannot be styled,
+     it blocks the whole tab, Firefox lets a page suppress it after the second
+     use, and it looks like a phishing attempt. An inline field in the rail it
+     is adding to is both prettier and closer to the thing it makes. */
+  const [namingList, setNamingList] = useState(false)
+  const [listName, setListName] = useState('')
+
+  const newList = useCallback(async (name) => {
+    const clean = name.trim()
+    if (!clean) return
     try {
-      const made = await api.createTaskList(name.trim())
+      const made = await api.createTaskList(clean)
       toast(made.note ? `List created — ${made.note}` : 'List created', 'ok')
+      setNamingList(false)
+      setListName('')
       await load()
     } catch (err) {
       toast(err.message, 'bad')
@@ -271,7 +329,7 @@ export default function Tasks() {
             <h1>Tasks</h1>
             <div className="vheader-sub">
               {counts.connected
-                ? 'Tasks, lists, dates and importance sync both ways with Microsoft To Do. My Day is PSOK\u2019s own \u2014 Microsoft does not share it.'
+                ? 'Tasks, lists, dates and importance sync both ways with Microsoft To Do. My Day is your To Do list called My Day — the sun moves a task into it.'
                 : 'Kept in PSOK. Sign in to Microsoft To Do from Connectors and these follow you.'}
             </div>
           </div>
@@ -301,20 +359,52 @@ export default function Tasks() {
               >
                 <Icon name={bucket.icon} size={15} />
                 <span className="task-rail-label">{bucket.label}</span>
-                <span className="task-rail-count">{counts.buckets?.[bucket.id] ?? 0}</span>
+                <span className="task-rail-count">{loaded ? (counts.buckets?.[bucket.id] ?? 0) : ''}</span>
               </button>
             ))}
 
             <div className="task-rail-head">
               <span>Lists</span>
-              <button type="button" className="icon-btn" title="New list" onClick={newList}>
-                <Icon name="plus" size={13} />
+              <button
+                type="button"
+                className="icon-btn"
+                title="New list"
+                aria-label="New list"
+                aria-expanded={namingList}
+                onClick={() => setNamingList((n) => !n)}
+              >
+                <Icon name={namingList ? 'x' : 'plus'} size={13} />
               </button>
             </div>
-            {counts.lists.length === 0 && (
-              <div className="task-rail-empty">No lists yet.</div>
+            {namingList && (
+              <form
+                className="task-rail-new"
+                onSubmit={(e) => { e.preventDefault(); newList(listName) }}
+              >
+                <input
+                  autoFocus
+                  value={listName}
+                  placeholder="List name"
+                  aria-label="New list name"
+                  onChange={(e) => setListName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.stopPropagation()
+                      setNamingList(false)
+                      setListName('')
+                    }
+                  }}
+                />
+                <button type="submit" className="btn btn--primary btn--small" disabled={!listName.trim()}>
+                  Add
+                </button>
+              </form>
             )}
-            {counts.lists.map((l) => (
+            {loaded
+              && counts.lists.filter((l) => l.id !== counts.my_day_list_id).length === 0 && (
+              <div className="task-rail-empty">No other lists yet.</div>
+            )}
+            {counts.lists.filter((l) => l.id !== counts.my_day_list_id).map((l) => (
               <button
                 key={l.id}
                 type="button"
@@ -332,14 +422,15 @@ export default function Tasks() {
           <section className="task-pane">
             <div className="card card-pad">
               <div className="card-title">
-                {active.label} · {tasks.length}
+                {active.label} · {loaded ? tasks.length : '—'}
               </div>
               {active.blurb && <div className="task-pane-blurb">{active.blurb}</div>}
               {view.bucket === 'my_day' && !view.listId && (
                 <div className="task-pane-blurb">
-                  My Day is PSOK&rsquo;s own. Microsoft&rsquo;s Graph API returns no My Day
-                  field at all, so what you put here stays on this machine and what is in To
-                  Do&rsquo;s My Day cannot be read.
+                  This is your Microsoft To Do list called <strong>My Day</strong> &mdash; the
+                  same one on your phone, under Lists. Press the sun to move a task in or out.
+                  It is <em>not</em> To Do&rsquo;s own My Day at the top of its sidebar: that
+                  one is not in the API, so nothing added there can be seen from here.
                 </div>
               )}
 
@@ -352,14 +443,38 @@ export default function Tasks() {
                 />
               )}
 
-              {tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
+              {!loaded && <SkeletonRows rows={5} controls={3} />}
+
+              {loaded && error && (
+                <div className="empty-state" style={{ padding: 18 }}>
+                  <Icon name="alert" size={20} />
+                  <div>
+                    <div>{error}</div>
+                    <div className="empty-actions">
+                      <button type="button" className="btn btn--small" onClick={load}>
+                        <Icon name="refresh" size={13} /> Retry
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {loaded && !error && tasks.length === 0 && view.bucket === 'my_day' && !view.listId && (
                 <div className="empty-state empty-state--do" style={{ padding: 18 }}>
                   <Icon name="sun" size={20} />
                   <div>
-                    <div>Nothing picked for today yet.</div>
+                    <div>
+                      {counts.my_day_list_id == null
+                        ? 'No My Day list yet.'
+                        : 'Nothing in My Day yet.'}
+                    </div>
                     <div className="empty-note">
-                      A task lands here when it is due today, or when you put it here with
-                      the sun. Nothing fills it on its own — that is what makes it a choice.
+                      {counts.my_day_list_id == null
+                        ? 'Make a list called My Day — here or in Microsoft To Do — and it '
+                          + 'becomes this page. The sun on any task makes it for you.'
+                        : 'Put something here with the sun, or add it to the My Day list in '
+                          + 'To Do on your phone. Nothing fills it on its own; that is what '
+                          + 'makes it a choice.'}
                     </div>
                     <div className="empty-actions">
                       {counts.buckets?.missed > 0 && (
@@ -383,7 +498,7 @@ export default function Tasks() {
                 </div>
               )}
 
-              {tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
+              {loaded && !error && tasks.length === 0 && !(view.bucket === 'my_day' && !view.listId) && (
                 <div className="empty-state" style={{ padding: 18 }}>
                   <Icon name="check" size={20} />
                   {view.bucket === 'missed'
@@ -396,6 +511,8 @@ export default function Tasks() {
                 const done = task.status === 'done'
                 const late = isOverdue(task)
                 const listName = counts.lists.find((l) => l.id === task.list_id)?.name
+                const inMyDay = counts.my_day_list_id != null
+                  && task.list_id === counts.my_day_list_id
                 return (
                   <div
                     className={`server-row task-row${done ? ' task-row--done' : ''}${late ? ' task-row--late' : ''}`}
@@ -425,7 +542,7 @@ export default function Tasks() {
                         )}
                         {task.scheduled_at && <span>scheduled {when(task.scheduled_at)}</span>}
                         {reminder(task) && <span>{reminder(task)}</span>}
-                        {task.my_day_on && <span>my day</span>}
+                        {inMyDay && <span>my day</span>}
                       </div>
                       {task.notes && <div className="server-target">{task.notes}</div>}
                     </div>
@@ -446,22 +563,22 @@ export default function Tasks() {
                       </div>
                     )}
 
-                    {/* My Day is the one bucket nothing fills on its own, so
-                        every row offers it. Putting it only on overdue rows
-                        meant a machine with nothing overdue and nothing due
-                        today had an empty My Day and no way to change that --
-                        which reads as the page being broken, not empty. */}
+                    {/* The sun moves the task between its list and My Day,
+                        because that is what My Day is. To Do has no move, so the
+                        server recreates the task there and deletes the original
+                        -- the toast says "moved", not "tagged", since the task
+                        really does leave the list it was in. */}
                     <button
                       type="button"
-                      className={`icon-btn task-sun${task.my_day_on ? ' is-on' : ''}`}
+                      className={`icon-btn task-sun${inMyDay ? ' is-on' : ''}`}
                       disabled={busyTask === task.id}
-                      title={task.my_day_on ? 'Take out of My Day' : 'Add to My Day'}
-                      aria-pressed={Boolean(task.my_day_on)}
-                      aria-label={`Add ${task.title} to My Day`}
+                      title={inMyDay ? 'Move out of My Day' : 'Move into My Day'}
+                      aria-pressed={inMyDay}
+                      aria-label={`Move ${task.title} into My Day`}
                       onClick={() => patch(
                         task,
-                        { add_to_my_day: !task.my_day_on },
-                        task.my_day_on ? 'Taken out of My Day' : 'Added to My Day',
+                        { add_to_my_day: !inMyDay },
+                        inMyDay ? 'Moved out of My Day' : 'Moved into My Day',
                       )}
                     >
                       <Icon name="sun" size={14} />
@@ -494,8 +611,9 @@ export default function Tasks() {
             </div>
 
             <div className="card card-pad" style={{ marginTop: 18 }}>
-              <div className="card-title">next three weeks · {events.length}</div>
-              {events.length === 0 && (
+              <div className="card-title">next three weeks · {loaded ? events.length : '—'}</div>
+              {!loaded && <SkeletonRows rows={3} controls={0} />}
+              {loaded && events.length === 0 && (
                 <div className="empty-state" style={{ padding: 18 }}>
                   <Icon name="clock" size={20} />
                   No events. Scheduling one asks first, and checks for conflicts before it writes.

@@ -1,5 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from './api.js'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { api, onServerState, serverState, wakeBackend } from './api.js'
+import { byId, pathFor } from './nav.js'
+import { useCompact } from './hooks/useMediaQuery.js'
+
+function pathToId(pathname) {
+  if (pathname === '/' || pathname === '/chat') return 'chat'
+  const hit = pathname.split('/').filter(Boolean)[0]
+  return byId(hit) ? hit : 'chat'
+}
 
 /* One store for everything that is not the transcript.
 
@@ -30,12 +39,59 @@ function savePrefs(patch) {
   }
 }
 
-const HEALTH_INTERVAL = 20000
+// How often the header re-asks whether connectors and providers are alive. Was
+// 20s, which meant a connector could be dead for most of a minute with the
+// screen still saying it was fine. The call is 17ms and answers from state the
+// process already holds.
+const HEALTH_INTERVAL = 8000
+
+/* Which palette to paint. 'system' follows the machine, and is the default:
+   an application that ignores a laptop set to light at 9am is one more thing to
+   go and configure. The chosen value is written to the document element so the
+   stylesheet -- not JavaScript -- owns every colour. */
+const THEMES = ['system', 'dark', 'light']
+
+function applyTheme(theme) {
+  const root = document.documentElement
+  if (theme === 'system') root.removeAttribute('data-theme')
+  else root.setAttribute('data-theme', theme)
+  // The browser's own surfaces -- form controls, scrollbars, the address bar --
+  // read this, and a light page inside dark chrome is the tell that a theme was
+  // bolted on rather than designed.
+  root.style.colorScheme = theme === 'system' ? 'light dark' : theme
+  /* `theme-color` was a fixed `#0b0b0c` in the markup, which paints the address
+     bar of a phone in light mode black above a paper-coloured page. Read from
+     the stylesheet after the switch, so it is whatever `--canvas` actually
+     resolved to rather than a second copy of the palette kept in sync by hand. */
+  const tag = document.querySelector('meta[name="theme-color"]')
+  if (tag) {
+    const canvas = getComputedStyle(root).getPropertyValue('--canvas').trim()
+    if (canvas) tag.setAttribute('content', canvas)
+  }
+}
+
+// Applied before React mounts, so the first paint is already the right colour.
+applyTheme(THEMES.includes(loadPrefs().theme) ? loadPrefs().theme : 'system')
 
 export function AppProvider({ children }) {
   const prefs = useRef(loadPrefs()).current
+  const location = useLocation()
+  const navigate = useNavigate()
+  /* Below this width the rail is a drawer over the page rather than a column
+     beside it, so "is the rail showing" stops being one persisted preference
+     and becomes two different questions. See `railOpen` below. */
+  const compact = useCompact()
 
-  const [view, setViewRaw] = useState(prefs.view || 'chat')
+  // The URL is the source of truth now. `view` is derived from it every
+  // render rather than tracked as its own state, so a browser back/forward
+  // or a typed-in address bar is never out of step with what's on screen.
+  const view = pathToId(location.pathname)
+  // Whether the backend is answering at all. Distinct from `health`, which is
+  // what a *reachable* backend says about itself: on a deployment where the
+  // API is a container that stops when idle, "still booting" and "up but
+  // degraded" want different frames, and conflating them showed a page full of
+  // failed-to-load errors during an ordinary cold start.
+  const [server, setServer] = useState(serverState)
   const [health, setHealth] = useState(null)
   const [healthError, setHealthError] = useState(null)
   const [toasts, setToasts] = useState([])
@@ -50,6 +106,18 @@ export function AppProvider({ children }) {
   // the row and the keyboard layer starts the edit.
   const [renaming, setRenaming] = useState(null)
   const [sidebar, setSidebarRaw] = useState(prefs.sidebar !== false)
+  /* The drawer's own state, separate from the desktop preference and never
+     persisted. A phone that reopened with the rail across the whole screen --
+     which is what sharing one boolean did -- looks like an application that
+     failed to load its page. */
+  const [drawer, setDrawer] = useState(false)
+  /* The context panel on the right of the workbench: where a turn's machinery
+     goes so the transcript can be prose. Persisted, because whether you want
+     to watch the steps is a standing preference rather than a per-page one. */
+  const [panel, setPanelRaw] = useState(prefs.panel !== false)
+  const [theme, setThemeRaw] = useState(
+    () => (THEMES.includes(prefs.theme) ? prefs.theme : 'system'),
+  )
   // Which half of Skills & connectors is open. In the store because the + menu
   // and the palette both send you to one side or the other.
   const [capabilitiesTab, setCapabilitiesTabRaw] = useState(prefs.capabilitiesTab || 'skills')
@@ -59,8 +127,18 @@ export function AppProvider({ children }) {
   const chatRef = useRef({})
 
   const setView = useCallback((next) => {
-    setViewRaw(next)
+    navigate(pathFor(next))
     savePrefs({ view: next })
+  }, [navigate])
+
+  // Reopen where you left off, but only from the bare root: a direct visit or
+  // bookmark to e.g. /mail is a real URL and must never be overridden by
+  // whatever the last session happened to have open.
+  useEffect(() => {
+    if (location.pathname === '/' && prefs.view && prefs.view !== 'chat') {
+      navigate(pathFor(prefs.view), { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const setActiveId = useCallback((next) => {
@@ -85,6 +163,83 @@ export function AppProvider({ children }) {
       return value
     })
   }, [])
+
+  const setTheme = useCallback((next) => {
+    const value = THEMES.includes(next) ? next : 'system'
+    setThemeRaw(value)
+    applyTheme(value)
+    savePrefs({ theme: value })
+  }, [])
+
+  /* Desktop notification when a turn finishes, so a long turn does not need
+     watching. Off by default and per-browser: the OS permission is per-browser
+     and cannot be granted from the server, so it lives in prefs, not the
+     backend settings. Turning it on asks for permission there and then, while
+     the click is fresh -- browsers reject a permission prompt that is not tied
+     to a user gesture. */
+  const [notifyOnDone, setNotifyOnDoneRaw] = useState(prefs.notifyOnDone === true)
+  const setNotifyOnDone = useCallback(async (next) => {
+    if (next && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try { await Notification.requestPermission() } catch { /* denied or unsupported */ }
+    }
+    const granted = typeof Notification !== 'undefined' && Notification.permission === 'granted'
+    // Only stays "on" if permission actually landed -- a toggle that says on
+    // while the browser will show nothing is the kind of lie this codebase
+    // keeps chasing out of its status rows.
+    const value = Boolean(next) && granted
+    setNotifyOnDoneRaw(value)
+    savePrefs({ notifyOnDone: value })
+    return { value, blocked: Boolean(next) && !granted }
+  }, [])
+
+  /* Fire one, if the user asked for them and is not already looking. The
+     visibility gate is the whole point: notifying someone about the answer
+     filling the screen in front of them is noise, so it fires only when the
+     tab is backgrounded. */
+  const notify = useCallback((title, body, onClick) => {
+    if (!notifyOnDone) return
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') return
+    try {
+      const n = new Notification(title, { body: (body || '').slice(0, 180), tag: 'psok-turn' })
+      n.onclick = () => { try { window.focus() } catch { /* no-op */ } ; onClick?.() ; n.close() }
+    } catch { /* some contexts throw on construction */ }
+  }, [notifyOnDone])
+
+  /* One question -- "is the rail showing" -- with two answers depending on the
+     width, so every caller (the ⌘B binding, the rail's own hide button, the
+     header's menu button) can stay one line. */
+  const railOpen = compact ? drawer : sidebar
+  const toggleRail = useCallback(() => {
+    if (compact) setDrawer((o) => !o)
+    else setSidebar((s) => !s)
+  }, [compact, setSidebar])
+  const closeRail = useCallback(() => setDrawer(false), [])
+
+  const setPanel = useCallback((value) => {
+    setPanelRaw(value)
+    savePrefs({ panel: value })
+  }, [])
+  const togglePanel = useCallback(() => setPanelRaw((open) => {
+    savePrefs({ panel: !open })
+    return !open
+  }), [])
+
+  // Picking a place is the end of the drawer's job. Leaving it open over the
+  // page someone just asked for is the classic mobile-nav bug.
+  useEffect(() => { setDrawer(false) }, [location.pathname])
+  useEffect(() => { if (!compact) setDrawer(false) }, [compact])
+
+  /* On `system`, the stylesheet follows the machine on its own — but the
+     address-bar colour is read out of the stylesheet once, so it has to be
+     read again when the machine changes its mind at sunset. */
+  useEffect(() => {
+    if (theme !== 'system') return undefined
+    const watch = window.matchMedia('(prefers-color-scheme: light)')
+    const relay = () => applyTheme('system')
+    watch.addEventListener('change', relay)
+    return () => watch.removeEventListener('change', relay)
+  }, [theme])
 
   const toast = useCallback((message, tone = 'info') => {
     const id = Math.random().toString(36).slice(2)
@@ -203,13 +358,21 @@ export function AppProvider({ children }) {
     }
   }, [activeId, refreshCaps, refreshHealth, toast])
 
-  useEffect(() => { refreshHealth() }, [refreshHealth])
-  useEffect(() => { refreshConvs() }, [refreshConvs])
-  useEffect(() => { refreshCaps() }, [refreshCaps])
+  useEffect(() => onServerState(setServer), [])
+
+  // Nothing is fetched until the backend answers. Firing the first load against
+  // a container that is still booting spends the whole cold start on requests
+  // that time out, and then the interface has to be told to try again -- so the
+  // three opening calls wait on the wake instead, and every one of them lands.
+  const ready = server.phase === 'ready'
+  useEffect(() => { if (ready) refreshHealth() }, [ready, refreshHealth])
+  useEffect(() => { if (ready) refreshConvs() }, [ready, refreshConvs])
+  useEffect(() => { if (ready) refreshCaps() }, [ready, refreshCaps])
 
   // A connector can die between messages and the API only notices at the start
   // of a turn, so the header has to keep asking.
   useEffect(() => {
+    if (!ready) return undefined
     const tick = setInterval(refreshHealth, HEALTH_INTERVAL)
     const onFocus = () => refreshHealth()
     window.addEventListener('focus', onFocus)
@@ -217,10 +380,11 @@ export function AppProvider({ children }) {
       clearInterval(tick)
       window.removeEventListener('focus', onFocus)
     }
-  }, [refreshHealth])
+  }, [ready, refreshHealth])
 
   const value = useMemo(() => ({
     view, setView,
+    server, retryServer: wakeBackend,
     health, healthError, refreshHealth,
     toasts, toast,
     overlay, setOverlay,
@@ -230,13 +394,19 @@ export function AppProvider({ children }) {
     caps, refreshCaps, setCapEnabled, busyCap,
     workspace, setWorkspace,
     sidebar, setSidebar,
+    compact, railOpen, toggleRail, closeRail,
+    panel, setPanel, togglePanel,
+    theme, setTheme,
+    notifyOnDone, setNotifyOnDone, notify,
     capabilitiesTab, setCapabilitiesTab,
     chat: chatRef.current,
     registerChat: (actions) => Object.assign(chatRef.current, actions),
   }), [
-    view, setView, health, healthError, refreshHealth, toasts, toast, overlay,
+    view, setView, server, health, healthError, refreshHealth, toasts, toast, overlay,
     conversations, refreshConvs, activeId, setActiveId, caps, refreshCaps,
     setCapEnabled, busyCap, workspace, setWorkspace, sidebar, setSidebar,
+    compact, railOpen, toggleRail, closeRail, panel, setPanel, togglePanel, theme, setTheme,
+    notifyOnDone, setNotifyOnDone, notify,
     capabilitiesTab, setCapabilitiesTab,
     renaming, renameConversation, deleteConversation, deleteAllConversations,
   ])

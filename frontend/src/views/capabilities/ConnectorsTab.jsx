@@ -3,6 +3,8 @@ import Icon from '../../components/Icon.jsx'
 import ServiceIcon from '../../components/ServiceIcon.jsx'
 import { useApp } from '../../store.jsx'
 import { api, copyText } from '../../api.js'
+import Skeleton, { SkeletonRows } from '../../components/Skeleton.jsx'
+import { useConfirm } from '../../components/ui/ConfirmDialog.jsx'
 
 /* Connectors: what is added, what is running, and whose account it is using.
 
@@ -358,6 +360,7 @@ function ActionList({ tools }) {
    questions "whose account is this" and "what can it do" had no answer
    anywhere in the interface. */
 function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChanged }) {
+  const ready = Boolean(live?.ready || (live?.tools ?? 0) > 0)
   const information = [
     ['Category', server.category],
     ['Transport', server.transport],
@@ -390,10 +393,13 @@ function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChan
       </header>
 
       <div className="conn-detail-status">
-        <span className={`conn-status conn-status--${live?.error ? 'error' : live?.connected ? 'live' : 'off'}`}>
-          {live?.connected ? `${live.tools} tools live` : live?.error ? 'Failed to start' : 'Not running'}
+        {/* Tools reaching the agent is the ground truth, and it outranks an
+            error string: a connector serving 122 tools must never headline
+            "Failed to start" over them. */}
+        <span className={`conn-status conn-status--${ready ? 'live' : live?.error ? 'error' : 'off'}`}>
+          {ready ? `Ready (${live.tools} tools)` : live?.error ? 'Failed to start' : 'Not running'}
         </span>
-        {live?.error && <span className="conn-error">{String(live.error).slice(0, 200)}</span>}
+        {!ready && live?.error && <span className="conn-error">{String(live.error).slice(0, 200)}</span>}
       </div>
 
       <section className="conn-detail-section">
@@ -447,17 +453,64 @@ function ConnectorDetail({ server, cap, live, busy, tools, onBack, onAct, onChan
   )
 }
 
+/* The one button a row offers, per the action its state names.
+
+   `null` means the state has no button — either nothing is wrong, or the only
+   correct thing to do is wait for the provider. `credentials` deliberately has
+   none either: the fields live in the card you open, and a button here would
+   only take you there. */
+const ROW_ACTIONS = {
+  sign_in: { act: 'connect', label: 'Connect' },
+  connect: { act: 'connect', label: 'Start' },
+  retry: { act: 'connect', label: 'Retry' },
+  sync: { act: 'sync', label: 'Sync now' },
+  credentials: null,
+}
+
+/* The button a row offers, from the state the server computed.
+
+   `sign_in` means two different things depending on whether the connector is
+   working: on a connector with no account it is "Connect", and on a working one
+   whose grant is about to lapse -- a Google sign-in is good for seven days
+   while its OAuth app is in Testing -- it is "Sign in again", which starts a
+   fresh flow rather than reconnecting a process that is already up. */
+function rowAction(lifecycle) {
+  if (!lifecycle) return undefined
+  if (lifecycle.ready && lifecycle.action === 'sign_in') {
+    return { act: 'login', label: 'Sign in again' }
+  }
+  return ROW_ACTIONS[lifecycle.action]
+}
+
 /* A configured connector in the list: what it is, and how it is doing. */
 function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
   const blocked = (server.missing_credentials || []).length > 0
   // `reason` is only passed for a connector that is not usable, and it outranks
   // the tool count: a running process whose account is missing was reporting
   // "122 tools live" for tools that would every one of them have failed.
-  const state = reason ?? `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`
-  const tone = reason ? (live?.error ? 'error' : 'off') : 'live'
+  // Ready is read off the registry, not off the absence of an error -- see
+  // `backend/mcp/lifecycle.py`. `reason` still outranks it: a running connector
+  // nobody has signed in to has tools that would every one of them fail.
+  const ready = Boolean(server.lifecycle?.ready || live?.ready || (live?.tools ?? 0) > 0)
+  const state = reason ?? (ready
+    ? `Ready (${live?.tools ?? 0} tools)`
+    : `${live?.tools ?? 0} tool${live?.tools === 1 ? '' : 's'} live`)
+  // A working connector can still have something to say -- a sign-in a day from
+  // lapsing, two accounts in a single-user store -- and it is not "off" for it.
+  // Colouring the row by the sentence rather than by the state made a warning
+  // read as a failure.
+  const tone = server.lifecycle?.ready
+    ? 'live'
+    : reason
+      ? (live?.error ? 'error' : 'off')
+      : 'live'
+  // The server's own sentence for this state. Shown on hover rather than in the
+  // row, which has no width for it — the row says *that* something is needed,
+  // and the card you open says what and offers the button.
+  const detail = server.lifecycle?.detail
 
   return (
-    <button type="button" className="conn-row" onClick={onOpen}>
+    <button type="button" className="conn-row" onClick={onOpen} title={detail || undefined}>
       <ServiceIcon name={server.name} size={30} />
       <span className="conn-row-text">
         <span className="conn-row-name">{server.title}</span>
@@ -466,17 +519,31 @@ function ConnectorRow({ server, live, busy, onOpen, onAct, reason }) {
         </span>
       </span>
       <span className={`conn-status conn-status--${tone}`}>{state}</span>
-      {server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
-        <span
-          role="button"
-          tabIndex={0}
-          className="btn btn--small btn--primary"
-          onClick={(e) => { e.stopPropagation(); onAct('connect') }}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('connect') } }}
-        >
-          {busy === 'connect' ? 'Opening…' : 'Connect'}
-        </span>
-      )}
+      {rowAction(server.lifecycle) !== undefined
+        ? rowAction(server.lifecycle) && (
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn btn--small btn--primary"
+            onClick={(e) => { e.stopPropagation(); onAct(rowAction(server.lifecycle).act) }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.stopPropagation(); onAct(rowAction(server.lifecycle).act) }
+            }}
+          >
+            {busy ? 'Working…' : rowAction(server.lifecycle).label}
+          </span>
+        )
+        : server.auth_kind !== 'none' && !blocked && server.signed_in === false && (
+          <span
+            role="button"
+            tabIndex={0}
+            className="btn btn--small btn--primary"
+            onClick={(e) => { e.stopPropagation(); onAct('connect') }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); onAct('connect') } }}
+          >
+            {busy === 'connect' ? 'Opening…' : 'Connect'}
+          </span>
+        )}
       <Icon name="chevron" size={15} className="conn-row-chevron" />
     </button>
   )
@@ -495,6 +562,20 @@ function CatalogueRow({ entry, busy, onAdd }) {
       <Icon name={busy ? 'refresh' : 'plus'} size={15} className="cat-row-add" />
     </button>
   )
+}
+
+/* The short label per lifecycle state. The sentence lives on the server (as
+   `lifecycle.detail`) so it stays the same wherever it is read; this is only
+   the two or three words that fit in a row. */
+const LIFECYCLE_LABELS = {
+  off: 'off',
+  starting: 'not started yet',
+  setup: 'needs credentials',
+  authenticating: 'signing in…',
+  sign_in: 'needs sign-in',
+  syncing: 'first sync pending',
+  failed: 'failed to start',
+  ready: 'ready',
 }
 
 const FEATURED = 8
@@ -647,8 +728,195 @@ function AuthCard({ auth, title, onRetry, onCancel, onDismiss, onCopy, onCopyCod
   )
 }
 
+/* A named, reusable set of connectors, applied to the active conversation in
+   one step instead of toggling each connector by hand -- see the schema
+   comment on `capability_profiles` for why this exists: a provider's
+   tool-schema budget (Groq's is 128 tools) is exceeded by everything switched
+   on at once far sooner than any one conversation actually needs it all. */
+function ProfileBar({ activeId, onApplied }) {
+  const { toast } = useApp()
+  const confirm = useConfirm()
+  const [profiles, setProfiles] = useState([])
+  const [selected, setSelected] = useState('')
+  const [newName, setNewName] = useState('')
+  const [busy, setBusy] = useState('')
+  /* Folded away until asked for. This is the most advanced control on the page
+     and it was the first thing on it: three fields and two buttons about a
+     feature nobody has used yet, above the connectors the page is actually
+     for. Someone who has saved a profile gets it open, because for them it is
+     the fastest control here. */
+  const [open, setOpen] = useState(false)
+
+  const refresh = useCallback(async () => {
+    try {
+      setProfiles(await api.capabilityProfiles())
+    } catch {
+      /* Quiet: the page still works with no profiles listed. */
+    }
+  }, [])
+  useEffect(() => { refresh() }, [refresh])
+
+  // Not reachable today -- every path that changes `activeId` also unmounts
+  // this component -- but `apply()` below trusts `selected` to still mean
+  // what it meant when it was picked, and nothing else here defends that.
+  useEffect(() => { setSelected('') }, [activeId])
+
+  const apply = async () => {
+    if (!selected || !activeId) return
+    setBusy('apply')
+    try {
+      const result = await api.applyCapabilityProfile(selected, activeId)
+      toast(`Applied '${selected}' — ${result.on} connector${result.on === 1 ? '' : 's'} on`, 'ok')
+      onApplied?.()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const save = async () => {
+    const name = newName.trim()
+    if (!name || !activeId) return
+    setBusy('save')
+    try {
+      await api.saveCapabilityProfile(name, activeId)
+      toast(`Saved '${name}' from this conversation's connectors`, 'ok')
+      setNewName('')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const remove = async () => {
+    if (!selected) return
+    // Deleting a saved profile is not undoable and the control is an unlabelled
+    // bin next to a dropdown, which is the shape of an accidental click.
+    const ok = await confirm({
+      title: `Delete the "${selected}" profile?`,
+      description: 'The connectors themselves are untouched — only the saved set goes.',
+      confirmLabel: 'Delete',
+      tone: 'danger',
+    })
+    if (!ok) return
+    setBusy('delete')
+    try {
+      await api.deleteCapabilityProfile(selected)
+      toast(`Deleted '${selected}'`, 'ok')
+      setSelected('')
+      refresh()
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const expanded = open || profiles.length > 0
+
+  return (
+    <section data-enter className="cap-cat conn-profiles">
+      <button
+        type="button"
+        className="cap-section-head cap-section-head--toggle"
+        aria-expanded={expanded}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Icon name="chevron" size={12} className={`disclosure${expanded ? ' is-open' : ''}`} />
+        <span>Profiles</span>
+        <span className="cap-section-tail">
+          {profiles.length ? `${profiles.length} saved` : 'none saved'}
+        </span>
+      </button>
+
+      {expanded && (
+        <>
+          <p className="cap-note">
+            A named set of connectors. Applying one switches this conversation to exactly those,
+            off for the rest — the fix for a provider&rsquo;s tool budget disappearing under
+            everything switched on at once.
+          </p>
+
+          {!activeId && (
+            <p className="conn-setup-note">
+              Open or start a conversation to save or apply a profile — a profile is applied
+              to one conversation, not to the machine.
+            </p>
+          )}
+
+          {/* Its own row rather than `.field-row`, which is a two-column grid:
+              the Apply button landed in the second column stretched to half the
+              page, and the delete button wrapped onto a line of its own between
+              the two forms. */}
+          <div className="conn-profile-row">
+            <div className="field">
+              <label htmlFor="profile-apply">apply to this conversation</label>
+              <select
+                id="profile-apply"
+                value={selected}
+                disabled={!profiles.length}
+                onChange={(e) => setSelected(e.target.value)}
+              >
+                <option value="">{profiles.length ? 'Choose a profile…' : 'No profiles saved yet'}</option>
+                {profiles.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name} ({p.on_count}/{p.total_count})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              className="btn btn--small btn--primary"
+              disabled={!selected || !activeId || Boolean(busy)}
+              onClick={apply}
+            >
+              {busy === 'apply' ? 'Applying…' : 'Apply'}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--small btn--danger"
+              disabled={!selected || Boolean(busy)}
+              title="Delete this profile"
+              aria-label="Delete this profile"
+              onClick={remove}
+            >
+              <Icon name="trash" size={13} />
+            </button>
+          </div>
+
+          <div className="conn-profile-row">
+            <div className="field">
+              <label htmlFor="profile-save">save this conversation&rsquo;s connectors as</label>
+              <input
+                id="profile-save"
+                value={newName}
+                placeholder="e.g. Search-only"
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && newName.trim()) save() }}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn--small"
+              disabled={!newName.trim() || !activeId || Boolean(busy)}
+              onClick={save}
+            >
+              {busy === 'save' ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
-  const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health } = useApp()
+  const { toast, caps, refreshCaps, setCapEnabled, refreshHealth, health, activeId } = useApp()
+  const confirm = useConfirm()
   const [servers, setServers] = useState([])
   const [catalogue, setCatalogue] = useState([])
   const [live, setLive] = useState({})
@@ -657,6 +925,10 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const [busy, setBusy] = useState({})
   const [open, setOpen] = useState(null)
   const [starting, setStarting] = useState(false)
+  // The first fetch. Five calls go out together and none of them is instant on
+  // a cold backend, so without this the page rendered its "no connector
+  // matches that" empty state over a list that was on its way.
+  const [loaded, setLoaded] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
@@ -669,15 +941,35 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       setAuths(auth)
       setTools(allTools)
       setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
-        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null }) },
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null, ready: false }) },
       ])))
       refreshCaps()
     } catch (err) {
       toast(err.message, 'bad')
+    } finally {
+      setLoaded(true)
     }
   }, [refreshCaps, toast])
 
   useEffect(() => { refresh() }, [refresh])
+
+  /* The cheap half of `refresh`, for the ticker below to call twice a minute
+     without re-fetching the catalogue and all 178 tool schemas -- 47KB of JSON
+     that changes when a connector is added, not while one is running. These two
+     are 116ms and 27ms, and they carry everything that moves: `lifecycle`, the
+     tool count, whether the process is up and who is signed in. */
+  const refreshServers = useCallback(async () => {
+    try {
+      const [srv, capabilities] = await Promise.all([api.mcpServers(true), api.capabilities()])
+      setServers(srv)
+      setLive(Object.fromEntries((capabilities.connectors ?? []).map((c) => [
+        c.name, { enabled: c.enabled, ...(c.live || { connected: false, tools: 0, error: null, ready: false }) },
+      ])))
+    } catch {
+      /* A failed poll is not worth a toast: the next one is three seconds away,
+         and a backend that is down already says so in the header. */
+    }
+  }, [])
 
   /* `login` returns as soon as the flow starts, because a sign-in takes as long
      as the person takes. This poll is how the outcome arrives: an entry stays
@@ -686,24 +978,58 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
      toasted here -- a toast that disappears is the wrong place for a state the
      user has to act on. */
   const settled = useRef(new Set())
+  // Servers whose "waiting" we have already pulled a fresh row for. The row's
+  // `lifecycle` is computed on the server from the same pending state, so one
+  // refetch at the start of a sign-in is what makes the row say
+  // "authenticating" for its duration -- refetching every tick would ask every
+  // connector who it is signed in as, three seconds apart, for the whole wait.
+  const announced = useRef(new Set())
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
+      // A connector can die, finish starting, or lose its account between
+      // renders, and until 2026-08-29 nothing asked -- the page only refetched
+      // when a sign-in changed state, so a row could say "ready" over a dead
+      // process until someone reloaded. This is what makes the screen current.
+      if (!cancelled) refreshServers()
       let rows
       try { rows = await api.mcpAuthorizations() } catch { return }
       if (cancelled) return
       setAuths(rows)
       for (const row of rows) {
         const key = `${row.server}:${row.finished_at}`
-        if (row.status === 'waiting' || settled.current.has(key)) continue
+        if (row.status === 'waiting') {
+          if (!announced.current.has(row.server)) {
+            announced.current.add(row.server)
+            refresh()
+          }
+          continue
+        }
+        announced.current.delete(row.server)
+        if (settled.current.has(key)) continue
         settled.current.add(key)
         refresh()
         refreshHealth()
       }
     }
-    const timer = setInterval(tick, 3000)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [refresh, refreshHealth])
+    // Only while the page is actually being looked at. A hidden tab polling an
+    // API that can run shell commands, every three seconds, for as long as the
+    // browser is open, is a cost with no reader.
+    let timer = null
+    const start = () => { if (timer === null) timer = setInterval(tick, 3000) }
+    const stop = () => { if (timer !== null) { clearInterval(timer); timer = null } }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stop()
+      else { tick(); start() }
+    }
+    onVisibility()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      cancelled = true
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [refresh, refreshHealth, refreshServers])
 
   /* Start a sign-in again after one failed, expired, or was cancelled. The
      backend supersedes the dead attempt rather than refusing as "already in
@@ -737,7 +1063,13 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     setBusy((b) => ({ ...b, [server.name]: action }))
     try {
       if (action === 'remove') {
-        if (!window.confirm(`Remove ${server.title}? Its stored credentials and signed-in account are forgotten too.`)) return
+        const ok = await confirm({
+          title: `Remove ${server.title}?`,
+          description: 'Its stored credentials and signed-in account are forgotten too.',
+          confirmLabel: 'Remove',
+          tone: 'danger',
+        })
+        if (!ok) return
         await api.mcpRemove(server.name)
         toast(`Removed ${server.title}`, 'ok')
         setOpen(null)
@@ -766,6 +1098,12 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
       } else if (action === 'login') {
         await api.mcpLogin(server.name, options)
         toast(`Opening ${server.title}'s sign-in — finish in the browser`, 'info')
+      } else if (action === 'sync') {
+        /* The last step of setting up Microsoft To Do, which used to be
+           invisible: signed in, tools live, and the Tasks page still empty
+           until some background tick fifteen minutes later happened to run. */
+        const result = await api.syncTasks()
+        toast(result.summary || `Synced ${server.title}`, 'ok')
       }
       await refresh()
       refreshHealth()
@@ -774,7 +1112,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
     } finally {
       setBusy((b) => ({ ...b, [server.name]: undefined }))
     }
-  }, [caps, refresh, refreshHealth, setCapEnabled, toast])
+  }, [caps, refresh, refreshHealth, setCapEnabled, toast, confirm])
 
   const addFromCatalogue = useCallback(async (entry) => {
     setBusy((b) => ({ ...b, [entry.id]: 'add' }))
@@ -800,11 +1138,18 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
      reporting 122 tools live, beside a "Sign in" button, while no Google
      account was attached to it — every one of those tools would have failed.
      A connector that still needs an account or its credentials is waiting on
-     you, whatever its process is doing. */
+     you, whatever its process is doing.
+
+     The judgement now comes from the server as `lifecycle` — the same one the
+     agent loop uses to decide whether to offer the connector's tools, so the
+     screen and the model cannot disagree about whether it works. The old
+     derivation stays as the fallback for a payload without it. */
   const usable = (server) =>
-    Boolean(live[server.name]?.connected)
-    && (server.missing_credentials || []).length === 0
-    && server.signed_in !== false
+    server.lifecycle
+      ? server.lifecycle.ready
+      : Boolean(live[server.name]?.connected)
+        && (server.missing_credentials || []).length === 0
+        && server.signed_in !== false
 
   const [running, waiting] = useMemo(() => {
     const on = []
@@ -842,6 +1187,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
   const started = health?.mcp_reconciled !== false
 
   const why = (server) => {
+    if (server.lifecycle) return LIFECYCLE_LABELS[server.lifecycle.state] || server.lifecycle.state
     const state = live[server.name] || {}
     if ((server.missing_credentials || []).length > 0) return 'needs credentials'
     if (server.signed_in === false) return 'needs sign-in'
@@ -922,6 +1268,8 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
         </div>
       )}
 
+      <ProfileBar activeId={activeId} onApplied={refresh} />
+
       {running.length > 0 && (
         <section data-enter>
           <div className="cap-section-head">
@@ -937,6 +1285,7 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
                 busy={busy[server.name]}
                 onOpen={() => setOpen(server.name)}
                 onAct={(action, options) => act(server, action, options)}
+                reason={server.lifecycle?.action ? server.lifecycle.detail : undefined}
               />
             ))}
           </div>
@@ -1011,7 +1360,14 @@ export default function ConnectorsTab({ query, newOpen, setNewOpen }) {
         </section>
       )}
 
-      {servers.length === 0 && available.length === 0 && !newOpen && (
+      {!loaded && (
+        <section data-enter>
+          <div className="cap-section-head"><Skeleton w={92} h={11} /><Skeleton w={54} h={11} /></div>
+          <div className="card conn-list"><SkeletonRows rows={5} controls={2} /></div>
+        </section>
+      )}
+
+      {loaded && servers.length === 0 && available.length === 0 && !newOpen && (
         <div className="dir-empty" data-enter>No connector matches that.</div>
       )}
 

@@ -10,8 +10,8 @@ import asyncio
 
 import pytest
 
-from psok.db.repositories import TaskListRepository, TaskRepository
-from psok.tasks.service import TaskError, TaskService
+from backend.db.repositories import TaskListRepository, TaskRepository
+from backend.tasks.service import TaskError, TaskService
 
 
 def _service() -> TaskService:
@@ -34,7 +34,7 @@ def test_a_task_is_filed_into_the_list_it_came_from(db):
     Mutation check: replace `local_list` with `None` in either the `create(...)`
     call or the `fields` dict in `_apply`, and one of these fails.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     lists = TaskListRepository()
     groceries = lists.create("Groceries", external_source=SOURCE, external_id="list-g")
@@ -59,7 +59,7 @@ def test_lists_are_mirrored_renamed_and_retired(db):
     Mutation check: make `_sync_lists` delete instead of retire and the second
     assertion raises a foreign-key-shaped failure instead.
     """
-    from psok.sync.microsoft_todo import SyncReport, _sync_lists
+    from backend.sync.microsoft_todo import SyncReport, _sync_lists
 
     lists = TaskListRepository()
     report = SyncReport()
@@ -91,7 +91,7 @@ def test_a_local_list_is_adopted_not_duplicated(db):
     Mutation check: drop the orphan-adoption branch in `_sync_lists` and the
     count below becomes 2.
     """
-    from psok.sync.microsoft_todo import SyncReport, _sync_lists
+    from backend.sync.microsoft_todo import SyncReport, _sync_lists
 
     lists = TaskListRepository()
     local = lists.create("Groceries")  # made before anything was signed in
@@ -190,26 +190,43 @@ def test_general_is_only_the_undated(db):
     assert seeded["overdue"] not in general
 
 
-def test_my_day_holds_what_was_put_there_and_what_is_due_today(db):
-    repo = TaskRepository()
-    seeded = _seed(repo)
-    repo.update(seeded["someday"], my_day_on=_today())
+def test_my_day_is_the_list_and_nothing_else(db):
+    """My Day is one To Do list, so membership is `list_id` and only that.
 
-    my_day = [r["id"] for r in repo.bucket("my_day")]
-    assert seeded["someday"] in my_day
-    assert seeded["today"] in my_day
-    assert seeded["overdue"] not in my_day
+    Deliberately narrower than it was: a task due today is *not* in My Day
+    unless it was put there. The wide version could not agree with the phone,
+    because the phone has no idea what PSOK thinks is due today.
 
-
-def test_my_day_empties_itself_overnight(db):
-    """A date, not a flag, so nothing has to run at midnight to clear it.
-
-    Mutation check: store a boolean instead and yesterday's entry never leaves.
+    Mutation check: put the `date(due_at) = :today` clause back in `_MY_DAY`.
     """
     repo = TaskRepository()
-    task_id = repo.create("Yesterday's plan")
-    repo.update(task_id, my_day_on="2020-01-01")
-    assert [r["id"] for r in repo.bucket("my_day")] == []
+    lists = TaskListRepository()
+    my_day = lists.create("My Day")
+    other = lists.create("Tasks")
+
+    picked = repo.create("Revision", list_id=my_day)
+    due_elsewhere = repo.create("Assignment", due_at=f"{_today()} 17:00:00", list_id=other)
+
+    ids = [r["id"] for r in repo.bucket("my_day")]
+    assert ids == [picked]
+    assert due_elsewhere not in ids, "due today is not the same as chosen for today"
+
+
+def test_my_day_does_not_empty_itself_overnight(db):
+    """The opposite of what it used to do, on purpose.
+
+    A date stamp expired at midnight; a list is a place, and a task left in it
+    is still in it tomorrow -- which is also how the list behaves on the phone.
+    Emptying it would mean deleting the user's tasks out of a list they keep.
+
+    Mutation check: give `_MY_DAY` a date clause of any kind.
+    """
+    repo = TaskRepository()
+    my_day = TaskListRepository().create("My Day")
+    task_id = repo.create("Yesterday's plan", list_id=my_day)
+    repo.update(task_id, created_at="2020-01-01 09:00:00")
+
+    assert [r["id"] for r in repo.bucket("my_day")] == [task_id]
 
 
 def test_completed_excludes_cancelled(db):
@@ -252,7 +269,7 @@ def test_a_local_change_is_marked_for_the_next_push(db):
     a task ticked in PSOK never reaches the phone -- which is the bug this
     whole direction exists to fix.
     """
-    from psok.sync.microsoft_todo import SOURCE
+    from backend.sync.microsoft_todo import SOURCE
 
     repo = TaskRepository()
     task_id = repo.create("Mirrored", external_source=SOURCE, external_id="x-1")
@@ -268,7 +285,7 @@ def test_a_purely_local_task_is_not_marked_dirty_but_is_unsynced(db):
     The two halves of the push are different calls, and confusing them sends
     an update for a task To Do has never heard of.
     """
-    from psok.sync.microsoft_todo import SOURCE
+    from backend.sync.microsoft_todo import SOURCE
 
     repo = TaskRepository()
     task_id = repo.create("Local only")
@@ -289,6 +306,24 @@ def test_adopting_an_upstream_identity_clears_the_dirty_flag(db):
     assert row["dirty_at"] is None
 
 
+def test_creating_a_task_already_seen_from_upstream_adopts_it_instead_of_crashing(db):
+    """Graph has no idempotency key, so the same external_id can arrive twice --
+    two calls racing on the same title, or a retry after a request that actually
+    landed. The second `create` must hand back the existing row, the same
+    at-least-once story as the sync push's adopt-by-title, not a raised
+    IntegrityError that surfaces as a failed "add task" to whoever asked.
+    """
+    repo = TaskRepository()
+    first_id = repo.create("Sift project", external_source="microsoft-todo", external_id="dup-1")
+
+    second_id = repo.create(
+        "Sift project", external_source="microsoft-todo", external_id="dup-1"
+    )
+
+    assert second_id == first_id
+    assert len(repo.upcoming()) <= 1  # no phantom second row
+
+
 def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
     """Push-then-pull is what removes the need for a merge algorithm.
 
@@ -298,7 +333,7 @@ def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
 
     Mutation check: drop `changed["dirty_at"] = None` in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
     _apply(repo, SyncReport(), None, {"id": "p-1", "title": "Before", "status": "notStarted"})
@@ -313,7 +348,7 @@ def test_the_pull_supersedes_a_local_edit_because_the_push_ran_first(db):
 
 def test_importance_survives_the_round_trip(db):
     """To Do has one axis where PSOK has two; high importance is the user's flag."""
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply, _task_arguments
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply, _task_arguments
 
     repo = TaskRepository()
     _apply(
@@ -333,7 +368,7 @@ def test_importance_survives_the_round_trip(db):
 
 def test_a_cancelled_task_is_completed_upstream(db):
     """To Do has no cancelled. Leaving it open means it never leaves the phone."""
-    from psok.sync.microsoft_todo import _task_arguments
+    from backend.sync.microsoft_todo import _task_arguments
 
     assert _task_arguments(status="cancelled")["status"] == "completed"
     assert _task_arguments(status="in_progress")["status"] == "inProgress"
@@ -354,7 +389,7 @@ def test_a_t_separated_timestamp_is_normalised(db):
     both forms, so it reproduces a correct value exactly, which the second
     assertion pins.
     """
-    from psok.db.connection import _normalise_task_timestamps
+    from backend.db.connection import _normalise_task_timestamps
 
     repo = TaskRepository()
     task_id = repo.create("Mixed")
@@ -437,7 +472,7 @@ def test_a_task_already_upstream_is_adopted_not_created_twice(db):
     Mutation check: delete the `existing`/`match` adopt branch in `_push` and
     `created` below becomes 1 instead of 0.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _push
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _push
 
     lists = TaskListRepository()
     list_id = lists.create("Tasks", external_source=SOURCE, external_id="l-1", is_default=True)
@@ -461,7 +496,7 @@ def test_a_task_already_upstream_is_adopted_not_created_twice(db):
 
 def test_two_local_rows_with_one_title_do_not_adopt_the_same_task(db):
     """Popping the match is what stops both rows claiming one upstream id."""
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _push
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _push
 
     lists = TaskListRepository()
     list_id = lists.create("Tasks", external_source=SOURCE, external_id="l-1", is_default=True)
@@ -510,15 +545,15 @@ def test_connect_all_refuses_to_start_a_sign_in_nobody_is_watching(db, monkeypat
     Mutation check: default `connect_all`'s `interactive` back to True and the
     unauthorised server is attempted instead of skipped.
     """
-    from psok.mcp.config import ServerConfig, Transport, add_server
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.config import ServerConfig, Transport, add_server
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     add_server(ServerConfig(name="needs-auth", transport=Transport.STREAMABLE_HTTP,
                             url="https://example.invalid/mcp", oauth=True))
     add_server(ServerConfig(name="plain", transport=Transport.STDIO, command="true"))
 
-    from psok.capabilities import CapabilityService, Kind
+    from backend.capabilities import CapabilityService, Kind
     caps = CapabilityService()
     caps.set_enabled(Kind.CONNECTOR, "needs-auth", True)
     caps.set_enabled(Kind.CONNECTOR, "plain", True)
@@ -541,17 +576,17 @@ def test_connect_all_refuses_to_start_a_sign_in_nobody_is_watching(db, monkeypat
 
 def test_a_signed_in_connector_is_not_skipped(db, monkeypatch):
     """The guard is "would this open a browser", not "is this an OAuth server"."""
-    from psok.mcp.config import ServerConfig, Transport
-    from psok.mcp.manager import MCPManager
-    from psok.tools.registry import ToolRegistry
+    from backend.mcp.config import ServerConfig, Transport
+    from backend.mcp.manager import MCPManager
+    from backend.tools.registry import ToolRegistry
 
     config = ServerConfig(name="github", transport=Transport.STREAMABLE_HTTP,
                           url="https://example.invalid/mcp", oauth=True)
     manager = MCPManager(ToolRegistry())
     assert manager.needs_sign_in(config) is True
 
-    from psok.mcp.oauth import token_ref
-    from psok.secrets import set_secret
+    from backend.mcp.oauth import token_ref
+    from backend.secrets import set_secret
     set_secret(token_ref("github"), '{"access_token": "x", "token_type": "bearer"}')
     assert manager.needs_sign_in(config) is False
 
@@ -571,8 +606,8 @@ def test_a_stale_token_does_not_buy_a_five_minute_wait(db):
     Mutation check: drop either `interactive` guard in `build_auth_provider`
     and the corresponding handler waits instead of raising.
     """
-    from psok.mcp.config import ServerConfig, Transport
-    from psok.mcp.oauth import SignInRequired, build_auth_provider
+    from backend.mcp.config import ServerConfig, Transport
+    from backend.mcp.oauth import SignInRequired, build_auth_provider
 
     config = ServerConfig(
         name="vercel", transport=Transport.STREAMABLE_HTTP,
@@ -599,13 +634,13 @@ def test_a_placeholder_model_is_never_stored(db):
     """
     from fastapi import HTTPException
 
-    from psok.api.main import _validate_model
+    from backend.api.main import _validate_model
 
     with pytest.raises(HTTPException):
         _validate_model("nope-not-a-provider", "x")
 
     # With a provider that declares a default, the placeholder is filled in.
-    from psok.config import load_providers
+    from backend.config import load_providers
 
     provider = next(
         (n for n, c in load_providers().items() if c.default_model), None
@@ -619,9 +654,9 @@ def test_a_placeholder_model_is_never_stored(db):
 
 def test_conversations_stored_with_a_placeholder_are_repaired(db):
     """Rows that predate the refusal are pointed at a real model on migrate."""
-    from psok.config import load_providers
-    from psok.db.connection import _repair_placeholder_models
-    from psok.db.repositories import ConversationRepository
+    from backend.config import load_providers
+    from backend.db.connection import _repair_placeholder_models
+    from backend.db.repositories import ConversationRepository
 
     provider = next((n for n, c in load_providers().items() if c.default_model), None)
     if provider is None:
@@ -637,41 +672,511 @@ def test_conversations_stored_with_a_placeholder_are_repaired(db):
     assert repo.get(healthy)["model"] == "a-real-model", "an untouched row stays exact"
 
 
-def test_my_day_is_a_choice_and_can_be_unmade(db):
+def test_the_sun_moves_a_task_into_my_day_and_back(db):
     """Nothing fills My Day on its own, so putting a task in and taking it out
-    has to work from any row -- not only from an overdue one.
+    has to work from any row. Both directions are a move between lists now.
 
-    Mutation check: drop `my_day_on` from `TaskRepository.update`'s allowlist.
+    Mutation check: stop routing `add_to_my_day` through `move` in
+    `TaskService.update`.
     """
     repo = TaskRepository()
-    task_id = repo.create("Read the paper")
+    lists = TaskListRepository()
+    tasks_list = lists.create("Tasks", is_default=True)
+    task_id = repo.create("Read the paper", list_id=tasks_list)
     assert repo.bucket("my_day") == []
 
     asyncio.run(_service().update(task_id, add_to_my_day=True))
     assert [r["id"] for r in repo.bucket("my_day")] == [task_id]
+    assert lists.get(repo.get(task_id)["list_id"])["name"] == "My Day", (
+        "the list is made if the account has not got one"
+    )
 
     asyncio.run(_service().update(task_id, add_to_my_day=False))
     assert repo.bucket("my_day") == []
+    assert repo.get(task_id)["list_id"] == tasks_list, "and back to the default list"
 
 
-def test_my_day_does_not_claim_to_sync(db):
-    """Graph exposes no My Day field -- verified against a real account, whose
-    task keys are id/title/status/importance/isReminderOn/createdDateTime/
-    dueDateTime/body/categories/@odata.etag/hasAttachments/lastModifiedDateTime.
+def test_the_list_a_task_comes_back_in_decides_my_day(db):
+    """The pull files a task into the list it came from, and that is the whole
+    of My Day membership -- so a task moved into the list on the phone is in
+    PSOK's My Day on the next sync, and one moved out leaves it.
 
-    So a pull must never clear or set it, or the bucket would empty itself
-    every fifteen minutes with no explanation.
+    This is the fix for the reported bug. A "My Day" *category* round-tripped
+    fine and still could not see a task added through To Do's own My Day, which
+    carries no tag; a list is the same object at both ends.
 
-    Mutation check: add `"my_day_on": None` to `_apply`'s `fields`.
+    Mutation check: pass `None` instead of `local_list` in `_apply`.
     """
-    from psok.sync.microsoft_todo import SOURCE, SyncReport, _apply
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
 
     repo = TaskRepository()
-    _apply(repo, SyncReport(), None, {"id": "m-1", "title": "Ship", "status": "notStarted"})
-    row = repo.by_external(SOURCE, "m-1")
-    repo.update(row["id"], my_day_on=_today())
+    lists = TaskListRepository()
+    my_day = lists.create("My Day", external_source=SOURCE, external_id="L-day")
+    other = lists.create("Tasks", external_source=SOURCE, external_id="L-tasks")
 
-    _apply(repo, SyncReport(), None, {"id": "m-1", "title": "Ship it", "status": "notStarted"})
-    after = repo.by_external(SOURCE, "m-1")
-    assert after["title"] == "Ship it"
-    assert after["my_day_on"] == _today(), "a pull must not empty My Day"
+    item = {"id": "m-1", "title": "Ship", "status": "notStarted"}
+    _apply(repo, SyncReport(), my_day, item)
+    assert [r["id"] for r in repo.bucket("my_day")] == [repo.by_external(SOURCE, "m-1")["id"]]
+
+    _apply(repo, SyncReport(), other, item)
+    assert repo.bucket("my_day") == [], "moved out of the list on the phone, out of My Day here"
+
+
+@pytest.mark.asyncio
+async def test_the_lists_are_pulled_together_and_one_short_answer_spares_the_rest(db):
+    """Serially this was one round trip per list, every ninety seconds, for
+    lists that have nothing to say to each other. They go out together now.
+
+    The failure mode that has to survive the change: `_paged` raises
+    `TruncatedListing` when a list reports more pages than it returned, and
+    `_retire_missing` cancels every local task the pull did not see. Gathered,
+    that raise arrives as a returned exception -- so it has to still skip
+    retirement, and still let every other list apply.
+
+    Mutation check: drop `return_exceptions=True`, or re-raise `TruncatedListing`
+    from the loop that reads the answers.
+    """
+    import json as _json
+
+    from backend.sync.microsoft_todo import SOURCE, sync
+
+    calls = []
+
+    class Connected:
+        connected = True
+
+        async def call(self, tool_name, arguments):
+            calls.append((tool_name, arguments.get("listId")))
+            if tool_name == "list_task_lists":
+                body = {"value": [
+                    {"id": "L1", "displayName": "Tasks", "wellknownListName": "defaultList"},
+                    {"id": "L2", "displayName": "Groceries"},
+                ]}
+            elif arguments.get("listId") == "L2":
+                # More pages, no cursor: indistinguishable from a complete
+                # answer until `_paged` refuses to guess.
+                body = {"tasks": [], "hasMore": True}
+            else:
+                body = {"tasks": [
+                    {"id": "T1", "title": "Milk", "status": "notStarted"},
+                ]}
+            text = type("T", (), {"type": "text", "text": _json.dumps(body)})()
+            return type("R", (), {"content": [text]})()
+
+    class Manager:
+        connections = {SOURCE: Connected()}
+
+    repo = TaskRepository()
+    stale = repo.create("Written before the sync", external_source=SOURCE, external_id="T-old")
+
+    report = await sync(Manager())
+
+    assert [c for c in calls if c[0] == "list_tasks"] == [
+        ("list_tasks", "L1"), ("list_tasks", "L2"),
+    ], "every list is still asked, once each"
+    assert repo.by_external(SOURCE, "T1") is not None, "the healthy list still applied"
+    assert repo.get(stale)["status"] != "cancelled", (
+        "a short answer must not retire tasks it simply did not return"
+    )
+    assert report.created == 1
+
+
+@pytest.mark.asyncio
+async def test_a_move_is_a_create_then_a_delete_and_the_row_follows(db, monkeypatch):
+    """Graph has no move, so `move_remote_task` recreates the task in the target
+    list and deletes the original -- which changes its id, and the local row has
+    to be repointed at the new one or every later push writes to a task that no
+    longer exists.
+
+    The order is load-bearing. Create first: a failed delete leaves a duplicate
+    the user can see and fix, a failed create after a delete has lost the task.
+
+    Mutation check: delete before creating, or drop the `adopt_external` call in
+    `TaskService.move`.
+    """
+    import json as _json
+
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE
+
+    calls = []
+
+    class Connected:
+        connected = True
+
+        async def call(self, tool_name, arguments):
+            calls.append((tool_name, arguments))
+            body = {"id": "T-new", "lastModifiedDateTime": "2026-08-29T10:00:00Z"}
+            text = type("T", (), {"type": "text", "text": _json.dumps(body)})()
+            return type("R", (), {"content": [text]})()
+
+    monkeypatch.setattr(live, "connection", lambda name: Connected())
+
+    repo = TaskRepository()
+    lists = TaskListRepository()
+    tasks_list = lists.create("Tasks", is_default=True, external_source=SOURCE, external_id="L1")
+    my_day = lists.create("My Day", external_source=SOURCE, external_id="L2")
+    task_id = repo.create(
+        "Ship it", list_id=tasks_list, external_source=SOURCE, external_id="T-old"
+    )
+
+    await _service().update(task_id, add_to_my_day=True)
+
+    names = [name for name, _ in calls]
+    assert names.index("create_task") < names.index("delete_task"), "create first, always"
+    created = dict(calls)["create_task"]
+    deleted = dict(calls)["delete_task"]
+    assert created["listId"] == "L2"
+    assert deleted == {"listId": "L1", "taskId": "T-old"}, "the original is removed by its own id"
+
+    row = repo.get(task_id)
+    assert row["external_id"] == "T-new", "the row follows the task to its new identity"
+    assert row["list_id"] == my_day
+    assert row["dirty_at"] is None, "nothing left for the push: this already reached To Do"
+
+
+@pytest.mark.asyncio
+async def test_a_move_that_fails_upstream_leaves_the_task_where_it_was(db, monkeypatch):
+    """To Do has no move: `move_remote_task` creates the task in the target and
+    deletes the original. If that fails half way, the local row must not be
+    moved anyway -- PSOK and the phone would then disagree about which list
+    holds it, and every later pull would fight the local answer.
+
+    Mutation check: move the row before awaiting `move_remote_task`, or swallow
+    the exception in `TaskService.move`.
+    """
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE
+    from backend.tasks.service import TaskError
+
+    class Refusing:
+        connected = True
+
+        async def call(self, tool_name, arguments):
+            raise RuntimeError("Graph said no")
+
+    monkeypatch.setattr(live, "connection", lambda name: Refusing())
+
+    repo = TaskRepository()
+    lists = TaskListRepository()
+    tasks_list = lists.create("Tasks", is_default=True, external_source=SOURCE, external_id="L1")
+    lists.create("My Day", external_source=SOURCE, external_id="L2")
+    task_id = repo.create("Ship it", list_id=tasks_list, external_source=SOURCE, external_id="T1")
+
+    with pytest.raises(TaskError, match="still where it was"):
+        await _service().update(task_id, add_to_my_day=True)
+    assert repo.get(task_id)["list_id"] == tasks_list
+    assert repo.bucket("my_day") == []
+
+
+def test_the_push_sends_back_every_tag_it_was_given(db):
+    """Graph replaces the categories array rather than merging it, so a push
+    that sent anything less than the whole list would delete the rest of the
+    user's tags. PSOK writes none of its own any more -- My Day is a list -- so
+    this exists purely to hand back what was there.
+
+    Mutation check: return `[]` from `_categories_for`.
+    """
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply, _categories_for
+
+    repo = TaskRepository()
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {"id": "m-3", "title": "Ship", "status": "notStarted", "categories": ["Work", "Urgent"]},
+    )
+    assert _categories_for(repo.by_external(SOURCE, "m-3")) == ["Work", "Urgent"]
+
+
+def test_completion_time_comes_back_from_to_do(db):
+    """To Do knew three tasks were finished today and PSOK had recorded the
+    completion time of one: `_apply` never mapped `completedDateTime`, so
+    "what did I get done today" could not be answered from local data.
+
+    Mutation check: drop `completed_at` from `_apply`'s `fields`.
+    """
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {
+        "id": "c-1",
+        "title": "SIH PPT",
+        "status": "completed",
+        "completedDateTime": {"dateTime": "2026-08-28T00:00:00.0000000", "timeZone": "UTC"},
+    }
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "c-1")
+    assert row["status"] == "done"
+    assert str(row["completed_at"]).startswith("2026-08-28"), row["completed_at"]
+
+    # Un-completing it upstream clears the time rather than stranding it.
+    _apply(repo, SyncReport(), None, {"id": "c-1", "title": "SIH PPT", "status": "notStarted"})
+    assert repo.by_external(SOURCE, "c-1")["completed_at"] is None
+
+
+def test_my_day_keeps_showing_what_was_finished_in_it(db):
+    """My Day showing only what is left makes it empty by the evening of a day
+    you actually got things done, which reads as the page being broken rather
+    than as the work being over. To Do keeps completed tasks in the list too.
+
+    Mutation check: add `AND status != 'done'` to `_MY_DAY`.
+    """
+    repo = TaskRepository()
+    lists = TaskListRepository()
+    my_day = lists.create("My Day")
+    other = lists.create("Tasks")
+
+    done_today = repo.create("Vault project", list_id=my_day)
+    repo.update(done_today, status="done")
+    done_elsewhere = repo.create("Finished, filed away", list_id=other)
+    repo.update(done_elsewhere, status="done")
+    gone = repo.create("Deleted on the phone", list_id=my_day)
+    repo.update(gone, status="cancelled")
+
+    titles = [r["title"] for r in repo.bucket("my_day")]
+    assert "Vault project" in titles
+    assert "Finished, filed away" not in titles
+    assert "Deleted on the phone" not in titles, "a task To Do no longer has is not in the list"
+
+    # The rail count and the rows come from the same predicate, so they agree.
+    assert repo.counts()["my_day"] == len(titles)
+
+
+def test_my_day_puts_what_is_done_at_the_bottom(db):
+    """My Day mixes open work with what was finished, and the two are not
+    peers: the open ones are the list, the done ones are the record. Sorted
+    together, a task still to do sat underneath three already crossed off.
+
+    Mutation check: use `_ORDER` for the my_day bucket.
+    """
+    repo = TaskRepository()
+    my_day = TaskListRepository().create("My Day")
+    finished = repo.create("Vault project", list_id=my_day)
+    repo.update(finished, status="done")
+    repo.create("Assignment 2", list_id=my_day)
+    starred = repo.create("Urgent thing", list_id=my_day)
+    repo.update(starred, important=True)
+
+    rows = repo.bucket("my_day")
+    statuses = [r["status"] == "done" for r in rows]
+    assert statuses == sorted(statuses), "every open task comes before every done one"
+    assert rows[0]["title"] == "Urgent thing", "important still leads the open ones"
+    assert rows[-1]["title"] == "Vault project"
+
+
+def test_a_title_is_stored_exactly_as_to_do_has_it(db):
+    """A `#myday` hashtag used to mean something here, and stripping it from the
+    title was rejected then for the reason that still holds: the push sends the
+    local title back, so editing a title on the way in would rewrite the user's
+    task in To Do. Now that the hashtag means nothing, the title is simply
+    theirs.
+
+    Mutation check: strip anything from `title` in `_apply`.
+    """
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    item = {"id": "h-1", "title": "Revision #myday", "status": "notStarted"}
+    _apply(repo, SyncReport(), None, item)
+    row = repo.by_external(SOURCE, "h-1")
+    assert row["title"] == "Revision #myday"
+    assert repo.bucket("my_day") == [], "a hashtag is not a list"
+
+
+def test_the_my_day_list_is_found_by_name_past_its_decoration(db):
+    """Which list is My Day is decided by its name, folded the same way every
+    other list name is -- so "🌞 My Day" is it, and "Today" is accepted because
+    that is the other name people give the same list.
+
+    Mutation check: compare `row["name"]` verbatim in `my_day_list_id`.
+    """
+    repo = TaskRepository()
+    lists = TaskListRepository()
+    decorated = lists.create("🌞 My Day")
+    assert repo.my_day_list_id() == decorated
+
+    lists.update(decorated, name="Groceries")
+    assert repo.my_day_list_id() is None, "no list of that name, no My Day"
+
+    today = lists.create("Today")
+    assert repo.my_day_list_id() == today
+
+
+# ------------------------------------------------------- the local calendar
+#
+# Every timestamp in this schema is naive *local* time -- `_now()` is
+# `datetime.now()`, `my_day_on` is `datetime.now().date()`. SQLite's `date('now')`
+# is UTC. Comparing one against the other is wrong by the machine's offset for
+# part of every day, and the part it is wrong for is the small hours, which is
+# exactly when someone tidying up tomorrow's list finds the page has stopped
+# working.
+
+
+def _shifted_now(hours: int):
+    """`datetime.now()` moved, so a test can stand in another part of the day."""
+    from datetime import datetime, timedelta
+
+    real = datetime.now
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real(tz) + timedelta(hours=hours)
+
+    return Clock
+
+
+def test_buckets_use_the_local_date_not_utc(db, monkeypatch):
+    """A deadline at half past midnight is still yesterday's deadline.
+
+    `date('now')` is UTC. On a machine east of Greenwich the local date runs
+    ahead of it for the first hours of every day, so a row stamped with the
+    local date matched nothing -- Missed forgot yesterday's deadlines and
+    Completed lost the morning's work. West of Greenwich the same mismatch
+    lands in the evening.
+
+    Mutation check: put `date('now')` back in any of the bucket predicates.
+    """
+    from datetime import datetime, timedelta
+
+    from backend.db import repositories
+
+    # Wherever this actually runs, look at the clock from a point where the
+    # local date and the UTC date disagree.
+    offset = datetime.now().astimezone().utcoffset() or timedelta(0)
+    hours = 23 if offset.total_seconds() >= 0 else -23
+    monkeypatch.setattr(repositories, "datetime", _shifted_now(hours))
+
+    local_today = repositories._today()
+    utc_today = db.execute("select date('now')").fetchone()[0]
+    assert local_today != utc_today, "the shift has to actually straddle midnight"
+
+    repo = TaskRepository()
+    my_day = TaskListRepository().create("My Day")
+    picked = repo.create("Picked for today", list_id=my_day)
+    late = repo.create("Was due yesterday", due_at=f"{utc_today} 09:00:00")
+
+    assert [r["id"] for r in repo.bucket("my_day")] == [picked], (
+        "a list does not care what the clock says"
+    )
+    assert late in [r["id"] for r in repo.bucket("missed")]
+    counts = repo.counts()
+    for name in ("my_day", "missed", "important", "general", "completed", "all"):
+        assert counts[name] == len(repo.bucket(name)), name
+
+
+# ------------------------------------------------- My Day survives the sync
+
+
+@pytest.mark.asyncio
+async def test_a_task_made_for_today_is_created_in_the_my_day_list(db, monkeypatch):
+    """"For today" has to reach To Do as the thing To Do can hold: the list.
+
+    The old answer wrote a local stamp and a "My Day" category, and the first
+    pull of a task added through To Do's own My Day -- which carries neither --
+    disagreed with the phone. Creating it in the list means both ends are
+    looking at the same object, and the pull that follows changes nothing.
+
+    Mutation check: make `create` resolve `list_name` when `add_to_my_day` is
+    true, or stop passing `list_ref.external_id` to `create_remote_task`.
+    """
+    import json as _json
+
+    from backend.mcp import live
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    sent = []
+
+    class Connected:
+        connected = True
+
+        async def call(self, tool_name, arguments):
+            sent.append((tool_name, arguments))
+            body = {
+                "list_task_lists": {"value": [{"id": "L1", "wellknownListName": "defaultList"}]},
+                "create_task_list": {"id": "L-day", "displayName": "My Day"},
+            }.get(tool_name, {"id": "T1", "lastModifiedDateTime": "2026-08-28T10:00:00Z"})
+            text = type("T", (), {"type": "text", "text": _json.dumps(body)})()
+            return type("R", (), {"content": [text]})()
+
+    monkeypatch.setattr(live, "connection", lambda name: Connected())
+
+    written = await _service().create("Finish the report", add_to_my_day=True)
+
+    made = dict(call for call in sent if call[0] == "create_task_list")
+    assert made, "the My Day list is created upstream, not only here"
+    created = dict(sent)["create_task"]
+    assert created["listId"] == "L-day", "the task is created in that list"
+    assert "categories" not in created, "no tag: the list is the whole mechanism"
+
+    repo = TaskRepository()
+    lists = TaskListRepository()
+    row = repo.get(written.task_id)
+    assert lists.get(row["list_id"])["name"] == "My Day"
+    assert [r["id"] for r in repo.bucket("my_day")] == [written.task_id]
+
+    # The pull, filing the same task back out of the same list, changes nothing.
+    _apply(
+        repo,
+        SyncReport(),
+        row["list_id"],
+        {"id": "T1", "title": "Finish the report", "status": "notStarted"},
+    )
+    assert [r["id"] for r in repo.bucket("my_day")] == [written.task_id], "still today"
+    assert repo.by_external(SOURCE, "T1")["id"] == written.task_id, "and still one task"
+
+
+def test_a_completion_time_is_not_dragged_into_the_previous_day(db):
+    """To Do stamps `completedDateTime` as the completion *date* at midnight
+    UTC. Reading it as an instant and converting it to local time moves it
+    backwards by the machine's offset, so anywhere west of Greenwich a task
+    ticked off this morning came back stamped yesterday -- and dropped out of
+    "what I finished today".
+
+    Mutation check: send `completedDateTime` through the ordinary `_timestamp`.
+    """
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {
+            "id": "z-1",
+            "title": "SIH PPT",
+            "status": "completed",
+            "completedDateTime": {"dateTime": f"{_today()}T00:00:00.0000000", "timeZone": "UTC"},
+        },
+    )
+    row = repo.by_external(SOURCE, "z-1")
+    assert str(row["completed_at"]).startswith(_today()), row["completed_at"]
+
+
+def test_a_pull_keeps_the_time_of_day_psok_already_recorded(db):
+    """PSOK knows the minute the box was ticked; To Do only knows the date. The
+    pull used to overwrite the first with the second, so every completion time
+    collapsed to midnight and "what did I do this morning" lost its answer.
+
+    Mutation check: take `completedDateTime` unconditionally in `_apply`.
+    """
+    from backend.sync.microsoft_todo import SOURCE, SyncReport, _apply
+
+    repo = TaskRepository()
+    _apply(repo, SyncReport(), None, {"id": "z-2", "title": "Ship", "status": "notStarted"})
+    row = repo.by_external(SOURCE, "z-2")
+    repo.update(row["id"], status="done", completed_at=f"{_today()} 09:41:00")
+
+    _apply(
+        repo,
+        SyncReport(),
+        None,
+        {
+            "id": "z-2",
+            "title": "Ship",
+            "status": "completed",
+            "completedDateTime": {"dateTime": f"{_today()}T00:00:00.0000000", "timeZone": "UTC"},
+        },
+    )
+    assert repo.by_external(SOURCE, "z-2")["completed_at"] == f"{_today()} 09:41:00"

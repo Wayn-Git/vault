@@ -23,10 +23,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from conftest import GOOGLE_CLIENT_ID, GOOGLE_SECRET, GOOGLE_SECRET_ROTATED
 
-from psok.mcp import catalogue as cat
-from psok.mcp import commands as mcp_commands
-from psok.mcp.config import load_servers
-from psok.mcp.oauth import (
+from backend.mcp import catalogue as cat
+from backend.mcp import commands as mcp_commands
+from backend.mcp.config import load_servers
+from backend.mcp.oauth import (
     AUTHORIZATION_LINK_TTL_SECONDS,
     CALLBACK_HOST,
     CALLBACK_PORT,
@@ -189,7 +189,7 @@ async def test_a_stray_request_does_not_consume_the_callback():
     Mutation check: replace the serve loop with a single `handle_request()` and
     this hangs until the timeout.
     """
-    from psok.mcp.oauth import _wait_for_callback
+    from backend.mcp.oauth import _wait_for_callback
 
     waiter = asyncio.create_task(_wait_for_callback(timeout=15.0))
     await asyncio.sleep(0.4)
@@ -214,7 +214,7 @@ async def test_the_callback_port_is_free_again_immediately_after_a_timeout():
     Mutation check: drop the `stop` event and the join, and the second wait
     raises CallbackPortUnavailable.
     """
-    from psok.mcp.oauth import _wait_for_callback
+    from backend.mcp.oauth import _wait_for_callback
 
     with pytest.raises(TimeoutError):
         await _wait_for_callback(timeout=0.6)
@@ -230,7 +230,7 @@ async def test_the_callback_port_is_free_again_immediately_after_a_timeout():
 @pytest.mark.asyncio
 async def test_a_denied_authorization_is_its_own_outcome():
     """Cancelling at the provider is not a failure to debug."""
-    from psok.mcp.oauth import _wait_for_callback
+    from backend.mcp.oauth import _wait_for_callback
 
     waiter = asyncio.create_task(_wait_for_callback(timeout=10.0))
     await asyncio.sleep(0.4)
@@ -252,7 +252,7 @@ async def test_two_flows_cannot_read_each_others_redirect():
     Mutation check: put `callback_result` back on the class and the second wait
     sees the first's code.
     """
-    from psok.mcp.oauth import _wait_for_callback
+    from backend.mcp.oauth import _wait_for_callback
 
     first = asyncio.create_task(_wait_for_callback(timeout=10.0))
     await asyncio.sleep(0.4)
@@ -270,7 +270,7 @@ async def test_two_flows_cannot_read_each_others_redirect():
 @pytest.mark.asyncio
 async def test_the_callback_page_is_not_cached():
     """The URL that renders it carries an authorization code."""
-    from psok.mcp.oauth import _wait_for_callback
+    from backend.mcp.oauth import _wait_for_callback
 
     waiter = asyncio.create_task(_wait_for_callback(timeout=10.0))
     await asyncio.sleep(0.4)
@@ -309,7 +309,7 @@ def test_psok_never_logs_a_code_or_a_token():
     """The callback URL carries a code; the handler must stay quiet about it."""
     import inspect
 
-    from psok.mcp import oauth
+    from backend.mcp import oauth
 
     source = inspect.getsource(oauth)
     assert "def log_message" in source, "the default handler logs every request line"
@@ -335,7 +335,7 @@ def test_each_server_has_its_own_pending_slot():
 
 
 def test_tokens_are_keyed_per_server():
-    from psok.mcp.oauth import client_ref, token_ref
+    from backend.mcp.oauth import client_ref, token_ref
 
     assert token_ref("github") != token_ref("vercel")
     assert client_ref("github") != client_ref("vercel")
@@ -343,7 +343,7 @@ def test_tokens_are_keyed_per_server():
 
 def test_the_link_ttl_matches_the_flow_that_issues_it(psok_home):
     """A link offered for longer than the flow listens is a link that fails."""
-    from psok.mcp.oauth import CALLBACK_TIMEOUT_SECONDS
+    from backend.mcp.oauth import CALLBACK_TIMEOUT_SECONDS
 
     mcp_commands.add_from_catalogue("github")
     config = load_servers()["github"]
@@ -461,7 +461,7 @@ def test_a_well_formed_secret_is_accepted(psok_home):
 
 
 def test_the_secret_is_never_written_to_the_config_file(psok_home):
-    from psok.mcp.config import config_path
+    from backend.mcp.config import config_path
 
     mcp_commands.add_from_catalogue("google-gmail")
     mcp_commands.set_env(
@@ -555,7 +555,7 @@ def test_a_waiting_card_for_a_signed_in_connector_corrects_itself(psok_home, mon
     """
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     mcp_commands.add_from_catalogue("microsoft-todo")
     cache = psok_home / "todo-cache.json"
@@ -581,7 +581,7 @@ def test_cancelling_a_sign_in_clears_it(psok_home):
     deadline passed."""
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     mcp_commands.add_from_catalogue("github")
     PENDING["github"] = PendingAuthorization(
@@ -599,7 +599,7 @@ def test_a_device_code_reaches_the_interface(psok_home):
     """The code has to survive as far as something that can render it."""
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     mcp_commands.add_from_catalogue("microsoft-todo")
     pending = PendingAuthorization(
@@ -685,7 +685,7 @@ def test_the_api_refuses_and_offers_no_way_round_it(psok_home):
     credential is still manipulable by anything that can reach the API."""
     from fastapi.testclient import TestClient
 
-    from psok.api.main import app
+    from backend.api.main import app
 
     mcp_commands.add_from_catalogue("google-gmail")
     mcp_commands.set_env(
