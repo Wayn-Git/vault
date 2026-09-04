@@ -111,6 +111,10 @@ export function AppProvider({ children }) {
      which is what sharing one boolean did -- looks like an application that
      failed to load its page. */
   const [drawer, setDrawer] = useState(false)
+  /* The context panel on the right of the workbench: where a turn's machinery
+     goes so the transcript can be prose. Persisted, because whether you want
+     to watch the steps is a standing preference rather than a per-page one. */
+  const [panel, setPanelRaw] = useState(prefs.panel !== false)
   const [theme, setThemeRaw] = useState(
     () => (THEMES.includes(prefs.theme) ? prefs.theme : 'system'),
   )
@@ -211,6 +215,15 @@ export function AppProvider({ children }) {
     else setSidebar((s) => !s)
   }, [compact, setSidebar])
   const closeRail = useCallback(() => setDrawer(false), [])
+
+  const setPanel = useCallback((value) => {
+    setPanelRaw(value)
+    savePrefs({ panel: value })
+  }, [])
+  const togglePanel = useCallback(() => setPanelRaw((open) => {
+    savePrefs({ panel: !open })
+    return !open
+  }), [])
 
   // Picking a place is the end of the drawer's job. Leaving it open over the
   // page someone just asked for is the classic mobile-nav bug.
@@ -382,6 +395,7 @@ export function AppProvider({ children }) {
     workspace, setWorkspace,
     sidebar, setSidebar,
     compact, railOpen, toggleRail, closeRail,
+    panel, setPanel, togglePanel,
     theme, setTheme,
     notifyOnDone, setNotifyOnDone, notify,
     capabilitiesTab, setCapabilitiesTab,
@@ -391,7 +405,7 @@ export function AppProvider({ children }) {
     view, setView, server, health, healthError, refreshHealth, toasts, toast, overlay,
     conversations, refreshConvs, activeId, setActiveId, caps, refreshCaps,
     setCapEnabled, busyCap, workspace, setWorkspace, sidebar, setSidebar,
-    compact, railOpen, toggleRail, closeRail, theme, setTheme,
+    compact, railOpen, toggleRail, closeRail, panel, setPanel, togglePanel, theme, setTheme,
     notifyOnDone, setNotifyOnDone, notify,
     capabilitiesTab, setCapabilitiesTab,
     renaming, renameConversation, deleteConversation, deleteAllConversations,

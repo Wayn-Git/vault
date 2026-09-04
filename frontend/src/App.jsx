@@ -6,6 +6,7 @@ import CommandPalette from './components/CommandPalette.jsx'
 import Shortcuts from './components/Shortcuts.jsx'
 import Settings from './components/Settings.jsx'
 import Sidebar from './components/Sidebar.jsx'
+import ConversationList from './components/ConversationList.jsx'
 import ConfirmDialogHost from './components/ui/ConfirmDialog.jsx'
 import { BootScreen, SkeletonView } from './components/Skeleton.jsx'
 import { useApp } from './store.jsx'
@@ -13,6 +14,18 @@ import { chord, isTyping, MOD_LABEL } from './keys.js'
 import { NAV, byDigit, byId } from './nav.js'
 import { COMPONENTS } from './views/registry.js'
 import Chat from './views/Chat.jsx'
+
+/* The workbench.
+
+   Four columns, each with one job, instead of two columns with four jobs
+   between them. The marks on the left are where you can go. The column beside
+   them is what you have said. The middle is the thing you are doing. The panel
+   on the right is the machinery behind it -- every tool call, every step, every
+   number -- which used to be interleaved with the answer in the middle column
+   and made a conversation read like a build log.
+
+   The two outer columns collapse independently, so a narrow window loses the
+   history before it loses the navigation, and a wide one can show all four. */
 
 // Every routed view except chat, which is rendered outside <Routes> below.
 const ROUTED = NAV.filter((v) => v.id !== 'chat')
@@ -95,59 +108,74 @@ function useGlobalKeys() {
   ])
 }
 
-function StageTop() {
+/* The bar over the working column.
+
+   It says where you are, which the rail no longer can now that the rail is
+   marks, and it holds the two switches for the columns either side of it. */
+function WorkbenchBar() {
   const {
     setOverlay, health, healthError, view, setView, compact, railOpen, toggleRail,
+    panel, togglePanel,
   } = useApp()
   const degraded = health?.status === 'degraded'
   const here = byId(view)
+
   return (
-    <div className="stage-top">
-      {/* On a phone the rail is off-canvas, so the header carries the way back
-          into it — and the name of where you are, which the rail was the only
-          thing saying. */}
+    <header className="wb-bar">
       {compact && (
-        <>
-          <button
-            type="button"
-            className="icon-btn stage-menu"
-            onClick={toggleRail}
-            aria-label="Open navigation"
-            aria-expanded={railOpen}
-            aria-controls="rail"
-          >
-            <Icon name="sidebar" size={18} />
-          </button>
-          <span className="stage-where">{here?.label ?? 'Chat'}</span>
-        </>
-      )}
-      {!compact && view !== 'chat' && (
-        <button type="button" className="stage-back" onClick={() => setView('chat')}>
-          <Icon name="chevron" size={13} style={{ transform: 'rotate(180deg)' }} /> Chat
+        <button
+          type="button"
+          className="icon-btn stage-menu"
+          onClick={toggleRail}
+          aria-label="Open navigation"
+          aria-expanded={railOpen}
+          aria-controls="rail"
+        >
+          <Icon name="sidebar" size={18} />
         </button>
       )}
-      <div className="stage-top-actions">
+      {!compact && !railOpen && (
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={toggleRail}
+          title={`Show the sidebar — ${MOD_LABEL}+B`}
+          aria-label="Show the sidebar"
+        >
+          <Icon name="sidebar" size={16} />
+        </button>
+      )}
+
+      <h1 className="wb-where">{here?.label ?? 'Chat'}</h1>
+
+      <div className="wb-bar-actions">
         {(healthError || degraded) && (
           <button
             type="button"
-            className="stage-warn"
+            className="wb-warn"
             onClick={() => setView('dash')}
             title={healthError || 'A connector failed to start'}
           >
-            {healthError ? 'API offline' : 'degraded'}
+            <i aria-hidden="true" />
+            {healthError ? 'API offline' : 'Degraded'}
           </button>
         )}
         <button
           type="button"
-          className={compact ? 'icon-btn' : 'stage-cmd'}
+          className={compact ? 'icon-btn' : 'wb-search'}
           onClick={() => setOverlay('palette')}
           title="Command palette"
           aria-label="Command palette"
         >
-          <Icon name="search" size={compact ? 17 : 13} />
+          <Icon name="search" size={compact ? 17 : 14} />
           {/* The chord is the point of the wide form, and there is no chord on
               a touch device — so the label goes when the keyboard does. */}
-          {!compact && <><kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd></>}
+          {!compact && (
+            <>
+              <span>Search or jump to</span>
+              <kbd className="kbd">{MOD_LABEL}</kbd><kbd className="kbd">K</kbd>
+            </>
+          )}
         </button>
         {!compact && (
           <button
@@ -157,7 +185,19 @@ function StageTop() {
             title="Keyboard shortcuts"
             aria-label="Keyboard shortcuts"
           >
-            <Icon name="keyboard" size={15} />
+            <Icon name="keyboard" size={16} />
+          </button>
+        )}
+        {!compact && (
+          <button
+            type="button"
+            className={`icon-btn${panel ? ' is-on' : ''}`}
+            onClick={togglePanel}
+            title={panel ? 'Hide the steps panel' : 'Show the steps panel'}
+            aria-label={panel ? 'Hide the steps panel' : 'Show the steps panel'}
+            aria-pressed={panel}
+          >
+            <Icon name="layout" size={16} />
           </button>
         )}
         <button
@@ -167,10 +207,10 @@ function StageTop() {
           title={`Settings — ${MOD_LABEL}+,`}
           aria-label="Settings"
         >
-          <Icon name="sliders" size={compact ? 17 : 15} />
+          <Icon name="sliders" size={compact ? 17 : 16} />
         </button>
       </div>
-    </div>
+    </header>
   )
 }
 
@@ -208,7 +248,7 @@ function Toasts() {
 }
 
 export default function App() {
-  const { view, server, retryServer, compact, railOpen, closeRail } = useApp()
+  const { view, server, retryServer, compact, railOpen, closeRail, panel } = useApp()
   useGlobalKeys()
   const stageRef = useRef(null)
 
@@ -235,8 +275,16 @@ export default function App() {
   const drawerOpen = compact && railOpen
 
   return (
-    <div className={`app${compact ? ' app--compact' : ''}${drawerOpen ? ' app--drawer' : ''}`}>
+    <div
+      className={
+        `wb app${compact ? ' app--compact wb--compact' : ''}`
+        + `${drawerOpen ? ' app--drawer wb--drawer' : ''}`
+        + `${railOpen ? '' : ' wb--rail-hidden'}`
+        + `${panel ? '' : ' wb--panel-hidden'}`
+      }
+    >
       <Sidebar />
+      <ConversationList />
       {drawerOpen && <RailScrim onClose={closeRail} />}
       {/* `inert` is what keeps a screen reader and the Tab key out of the page
           the drawer is covering. Without it the drawer looks modal and behaves
@@ -244,8 +292,8 @@ export default function App() {
       {/* A real boolean: React 19 reflects `inert` from one, and an empty
           string is treated as false, which quietly left the page behind the
           drawer fully tabbable. */}
-      <div className="stage" ref={stageRef} inert={drawerOpen}>
-        <StageTop />
+      <div className="wb-main stage" ref={stageRef} inert={drawerOpen}>
+        <WorkbenchBar />
         {/* Chat stays mounted, outside <Routes>: unmounting it mid-turn
             would drop the stream. */}
         <main className={`main${isChat ? '' : ' main--hidden'}`}>
@@ -269,6 +317,10 @@ export default function App() {
           </main>
         )}
       </div>
+      {/* The panel is a slot rather than a component: whichever view is open
+          fills it through a portal, and it collapses on its own when nothing
+          has anything to put there. */}
+      <aside className="wb-panel" id="wb-panel" aria-label="Run detail" inert={drawerOpen} />
       <CommandPalette />
       <Shortcuts />
       <Settings />

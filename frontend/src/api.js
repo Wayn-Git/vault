@@ -376,6 +376,23 @@ export const api = {
   brand: () => j('/brand'),
   saveBrand: (body) => j('/brand', json('PUT', body)),
 
+  // Enrichment is the mirror of reindex: "add a provider and press this".
+  enrichLibraryItem: (id) => j(`/library/${id}/enrich`, json('POST')),
+  // A route rather than a path: the browser is never handed a filesystem
+  // location, and a missing still is a 404 rather than a broken <img>.
+  thumbnailUrl: (id) => `${BASE}/library/${id}/thumbnail`,
+
+  // Instagram capture. Credentials go one way only — set and delete; the status
+  // reports whether each is present, never what it is.
+  instagram: () => j('/instagram'),
+  saveInstagramCredentials: (body) => j('/instagram/credentials', json('PUT', body)),
+  clearInstagramCredentials: () => j('/instagram/credentials', json('DELETE')),
+  updateInstagram: (patch) => j('/instagram/settings', json('PATCH', patch)),
+  allowInstagramSender: (id) => j(`/instagram/senders/${encodeURIComponent(id)}`, json('POST')),
+  denyInstagramSender: (id) => j(`/instagram/senders/${encodeURIComponent(id)}`, json('DELETE')),
+  instagramEvents: () => j('/instagram/events'),
+  retryInstagramEvent: (id) => j(`/instagram/events/${id}/retry`, json('POST')),
+
   // Sharing is off until a token exists. The token comes back exactly once,
   // from `rotateShareToken`, and nothing reads it out of the keychain again.
   shareStatus: () => j('/share'),

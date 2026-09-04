@@ -121,8 +121,8 @@ try {
   await page.evaluate(() => localStorage.clear())
   await page.reload({ waitUntil: 'networkidle' })
 
-  check('the app renders', await page.locator('.rail-brand').isVisible())
-  const status = await page.locator('.rail-foot-sub').innerText()
+  check('the app renders', await page.locator('.wb-brand').isVisible())
+  const status = await page.locator('.wb-foot-sub').innerText()
   check('health reaches the rail', /tools|offline/.test(status), status.trim())
 
   // ------------------------------------------------------------- keyboard
@@ -139,10 +139,10 @@ try {
   check('? lists the shortcuts', (await page.locator('.shortcut-row').count()) > 8)
   await page.keyboard.press('Escape')
 
-  const sideBefore = await page.locator('.rail').count()
+  const sideBefore = await page.locator('.wb-list').isVisible()
   await page.keyboard.press('Control+b')
   await page.waitForTimeout(200)
-  check('the rail toggles', (await page.locator('.rail').count()) !== sideBefore)
+  check('the rail toggles', (await page.locator('.wb-list').isVisible()) !== sideBefore)
   await page.keyboard.press('Control+b')
   await page.waitForTimeout(150)
 
@@ -166,7 +166,7 @@ try {
   await page.waitForSelector('.cap-tabs', { timeout: 6000 })
   check('the settings nav goes to the one capabilities page',
     (await page.locator('.settings').count()) === 0
-      && (await page.locator('.rail-place.active').innerText()).trim() === 'Skills & connectors')
+      && (await page.locator('.wb-place.active').innerText()).trim() === 'Skills & connectors')
 
   // Skills and connectors are one page with two tabs, and each tab carries both
   // what is added and what could be. The directory overlay is gone.
@@ -402,14 +402,14 @@ try {
   }
 
   await page.keyboard.press('F2')
-  const rename = page.locator('.rail-rename')
+  const rename = page.locator('.wb-rename')
   if (await rename.count()) {
     await rename.fill('smoke test')
     await page.keyboard.press('Enter')
     await page.waitForTimeout(400)
     check(
       'F2 renames the conversation',
-      (await page.locator('.rail-conv-title').first().innerText()).includes('smoke test'),
+      (await page.locator('.wb-conv-title').first().innerText()).includes('smoke test'),
     )
   } else {
     check('F2 renames the conversation', false, 'no rename field appeared')
@@ -422,7 +422,7 @@ try {
     await page.keyboard.press(combo)
     await page.waitForTimeout(300)
     // A rail row can carry a badge on a second line ("Automations" / "beta").
-    const active = (await page.locator('.rail-place.active').innerText()).split('\n')[0].trim()
+    const active = (await page.locator('.wb-place.active').innerText()).split('\n')[0].trim()
     check(`${combo} switches view`, active === label, active)
   }
   await page.keyboard.press('Control+1')
@@ -503,7 +503,7 @@ try {
   await page.keyboard.press('Control+5')
   await page.waitForSelector('.cap-head', { timeout: 6000 })
   check('automations are marked beta where they appear',
-    (await page.locator('.rail-place .beta').count()) > 0
+    (await page.locator('.wb-place .wb-place-beta').count()) > 0
       && (await page.locator('.cap-head .beta').count()) > 0)
   // Chat stays mounted behind every view, so `.view` alone matches two.
   const autoText = await page.locator('.view:not(.view--flush)').innerText()
@@ -551,15 +551,15 @@ try {
     () => JSON.parse(localStorage.getItem('psok.ui.v1') || '{}').activeId,
   )
   if (!doomedId) throw new Error('no conversation is open to delete')
-  const doomed = page.locator('.rail-conv.active').first()
-  const doomedTitle = await doomed.locator('.rail-conv-title').innerText()
-  await doomed.locator('.rail-conv-more').click({ force: true })
-  await page.waitForSelector('.rail-conv-menu', { timeout: 3000 })
-  await page.locator('.rail-conv-menu .danger').click()
+  const doomed = page.locator('.wb-conv.active').first()
+  const doomedTitle = await doomed.locator('.wb-conv-title').innerText()
+  await doomed.locator('.wb-conv-more').click({ force: true })
+  await page.waitForSelector('.wb-conv-menu', { timeout: 3000 })
+  await page.locator('.wb-conv-menu .danger').click()
   await page.waitForTimeout(200)
   check('deleting asks for a second click first',
     (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 200)
-  await page.locator('.rail-conv-menu .danger').click()
+  await page.locator('.wb-conv-menu .danger').click()
   await page.waitForTimeout(900)
   check('a conversation can be deleted from the rail',
     (await fetch(`${BASE}/api/conversations/${doomedId}/messages`)).status === 404,

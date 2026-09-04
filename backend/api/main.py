@@ -21,8 +21,8 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from backend.agent.director import Director
 from backend.automation import (
@@ -37,6 +37,7 @@ from backend.db.repositories import (
     ExecutionLogRepository,
     MessageRepository,
 )
+from backend.instagram.runner import InstagramRunner
 from backend.journal.runner import JournalRunner
 from backend.mcp import live
 from backend.mcp.manager import MCPManager
@@ -242,6 +243,11 @@ _reminders = ReminderRunner(_task_sync_manager)
 # a reminder). See backend/journal/runner.py.
 _journal = JournalRunner()
 
+# The Instagram drain. A fourth runner for the reason each of the others is
+# separate: its work is minutes long, and a reminder queued behind a video
+# download is not a reminder.
+_instagram = InstagramRunner()
+
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
@@ -261,7 +267,10 @@ async def _lifespan(_: FastAPI):
     # hours the user set. Sleeps before its first check, so starting the process
     # never files an entry in the same breath.
     _journal.start()
+    # Fourth, and stopped first: it holds the longest-running work.
+    _instagram.start()
     yield
+    await _instagram.stop()
     await _journal.stop()
     await _reminders.stop()
     await _runner.stop()
@@ -2961,6 +2970,10 @@ class LibraryPatch(BaseModel):
     notes: str | None = None
     consumed_on: str | None = None
     rating: int | None = None
+    # Correctable: what a model wrote about your own library is yours to fix.
+    summary: str | None = None
+    tags: list[str] | None = None
+    resources: list[dict] | None = None
 
 
 @app.get("/api/library")
@@ -3029,6 +3042,9 @@ def update_library_item(item_id: int, body: LibraryPatch) -> dict[str, Any]:
     fields = body.model_dump(exclude_none=True)
     if "kind" in fields and fields["kind"] not in KINDS:
         raise HTTPException(400, f"unknown kind. One of: {', '.join(KINDS)}")
+    for column in ("tags", "resources"):
+        if column in fields:
+            fields[column] = json.dumps(fields[column])
     store.update(item_id, **fields)
     return as_dict(store.get(item_id))
 
@@ -3040,6 +3056,31 @@ def delete_library_item(item_id: int) -> dict[str, Any]:
     if not LibraryService().remove(item_id):
         raise HTTPException(404, f"no library item {item_id}")
     return {"status": "deleted", "id": item_id}
+
+
+@app.post("/api/library/{item_id}/enrich")
+async def enrich_library_item(item_id: int) -> dict[str, Any]:
+    """Say what this item is about, from the text it has. The mirror of reindex."""
+    from backend.library.service import LibraryError, LibraryService
+
+    try:
+        return await LibraryService().enrich(item_id)
+    except LibraryError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/library/{item_id}/thumbnail")
+def library_thumbnail(item_id: int) -> FileResponse:
+    """The still, by id. The browser is never handed a filesystem path."""
+    from backend.library.store import LibraryStore
+
+    row = LibraryStore().get(item_id)
+    if row is None or not row["thumbnail_path"]:
+        raise HTTPException(404, "there is no thumbnail for that item")
+    path = Path(row["thumbnail_path"])
+    if not path.is_file():
+        raise HTTPException(404, "the thumbnail is missing from disk")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.post("/api/library/{item_id}/reindex")
@@ -3128,6 +3169,235 @@ async def share_capture(body: ShareBody, request: Request) -> dict[str, Any]:
         "title": captured.item["title"],
         "already_logged": captured.already_logged,
     }
+
+
+# ------------------------------------------------------------- instagram
+#
+# The second of exactly two paths here meant to be reachable from the internet,
+# and the only one that cannot carry a bearer token -- Meta will not send one.
+# Its authentication IS the HMAC signature on every delivery. See
+# backend/instagram/signature.py, and docs/deployment.md for the one proxy rule
+# that may ever publish it.
+
+
+class InstagramCredentials(BaseModel):
+    app_secret: str | None = None
+    verify_token: str | None = None
+    access_token: str | None = None
+    #: Days until the pasted token lapses. Meta's long-lived tokens last 60.
+    expires_in_days: int | None = None
+
+
+class InstagramPatch(BaseModel):
+    enabled: bool | None = None
+    owner_ig_id: str | None = None
+    mentions_from: str | None = None
+    keep_video: bool | None = None
+    max_video_mb: int | None = None
+    max_duration_seconds: int | None = None
+    enrich: bool | None = None
+    reply_on_save: bool | None = None
+
+
+@app.get("/api/instagram/webhook", response_class=PlainTextResponse)
+def instagram_handshake(request: Request) -> str:
+    """Meta's one-time verification.
+
+    The challenge is echoed as bare text. Returning it as JSON -- `"12345"`, with
+    quotes -- is the single most common reason this step fails, and it fails
+    with a message that does not say so.
+    """
+    from backend.instagram import signature
+
+    params = request.query_params
+    challenge = signature.verify_challenge(
+        params.get("hub.mode"), params.get("hub.verify_token"), params.get("hub.challenge")
+    )
+    if challenge is None:
+        raise HTTPException(403, "that verify token is not the one this instance holds")
+    return challenge
+
+
+@app.post("/api/instagram/webhook")
+async def instagram_webhook(request: Request) -> dict[str, Any]:
+    """Write the delivery down, and answer. Nothing slow happens on this path.
+
+    Meta wants a 200 within seconds and retries anything else for hours, so the
+    work -- a Graph call, a download, ffmpeg, a transcription -- belongs to the
+    runner. The acknowledgement here means "written down", not "done".
+    """
+    from backend.config import load_instagram
+    from backend.instagram import signature
+    from backend.instagram.store import MAX_QUEUED, InstagramEventStore
+    from backend.instagram.webhook import WebhookBody, parse
+
+    if not signature.configured() or not load_instagram().enabled:
+        raise HTTPException(404, "no such endpoint: /api/instagram/webhook")
+
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > signature.MAX_BODY_BYTES:
+        raise HTTPException(413, "that body is larger than this endpoint accepts")
+
+    raw = await request.body()
+    if len(raw) > signature.MAX_BODY_BYTES:
+        raise HTTPException(413, "that body is larger than this endpoint accepts")
+    # Over the bytes that arrived, never over a re-serialised model: key order,
+    # unicode escaping and float formatting all differ, so a signature computed
+    # over anything else is a check that passes when it should fail.
+    if not signature.verify_signature(request.headers.get("x-hub-signature-256"), raw):
+        raise HTTPException(403, "that signature is not one this instance accepts")
+
+    try:
+        body = WebhookBody.model_validate_json(raw)
+    except ValidationError:
+        # 200 on purpose. A body Meta signed and PSOK cannot read is not
+        # something retrying fixes, and a 4xx makes Meta retry it for hours.
+        log.warning("instagram webhook: a signed body did not parse")
+        return {"status": "unreadable"}
+
+    store = InstagramEventStore()
+    if store.queued_count() >= MAX_QUEUED:
+        log.warning("instagram queue is full at %d; dropping a delivery", MAX_QUEUED)
+        return {"status": "backlogged", "events": 0}
+
+    queued = 0
+    for inbound in parse(body):
+        if signature.is_stale(inbound.received_at):
+            log.warning("instagram webhook: ignoring a delivery older than the skew window")
+            continue
+        if store.enqueue(inbound) is not None:
+            queued += 1
+    if queued:
+        _instagram.nudge()
+    return {"status": "queued", "events": queued}
+
+
+@app.get("/api/instagram")
+def instagram_status() -> dict[str, Any]:
+    """What is set up, what is not, and what is waiting. Never a credential."""
+    from backend.config import load_instagram
+    from backend.instagram import signature
+    from backend.instagram.store import InstagramEventStore
+    from backend.media.audio import ffmpeg_missing
+    from backend.runtime.transcribe import resolve_transcriber
+
+    settings = load_instagram()
+    store = InstagramEventStore()
+    transcriber = resolve_transcriber()
+    expires_in = None
+    if settings.token_expires_on:
+        from datetime import date as _date
+
+        try:
+            expires_in = (_date.fromisoformat(settings.token_expires_on) - _date.today()).days
+        except ValueError:
+            expires_in = None
+
+    return {
+        "settings": settings.as_dict(),
+        "credentials": signature.present(),
+        "configured": signature.configured(),
+        "webhook_path": "/api/instagram/webhook",
+        "token_expires_in_days": expires_in,
+        "counts": store.counts(),
+        "unknown_senders": [dict(row) for row in store.unknown_senders()],
+        "transcription": (
+            {"provider": transcriber[0].name, "model": transcriber[1]} if transcriber else None
+        ),
+        "ffmpeg": ffmpeg_missing() is None,
+    }
+
+
+@app.put("/api/instagram/credentials")
+def put_instagram_credentials(body: InstagramCredentials) -> dict[str, Any]:
+    """Store the three secrets. Write-only: nothing reads them back out."""
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    from backend.config import save_instagram
+    from backend.instagram import signature
+    from backend.secrets import CredentialError
+
+    try:
+        signature.set_credentials(
+            app_secret=body.app_secret,
+            verify_token=body.verify_token,
+            access_token=body.access_token,
+        )
+    except CredentialError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+    if body.access_token and body.expires_in_days:
+        save_instagram(
+            {
+                "token_expires_on": (
+                    _date.today() + _timedelta(days=int(body.expires_in_days))
+                ).isoformat()
+            }
+        )
+    return instagram_status()
+
+
+@app.delete("/api/instagram/credentials")
+def delete_instagram_credentials() -> dict[str, Any]:
+    from backend.config import save_instagram
+    from backend.instagram import signature
+
+    signature.revoke()
+    save_instagram({"enabled": False, "token_expires_on": ""})
+    return instagram_status()
+
+
+@app.patch("/api/instagram/settings")
+def patch_instagram_settings(body: InstagramPatch) -> dict[str, Any]:
+    from backend.config import MENTION_SOURCES, save_instagram
+    from backend.instagram import signature
+
+    patch = body.model_dump(exclude_none=True)
+    if "mentions_from" in patch and patch["mentions_from"] not in MENTION_SOURCES:
+        raise HTTPException(400, f"mentions_from must be one of: {', '.join(MENTION_SOURCES)}")
+    if patch.get("enabled") and not signature.configured():
+        raise HTTPException(
+            400, "the app secret, verify token and access token all have to be set first"
+        )
+    save_instagram(patch)
+    return instagram_status()
+
+
+@app.post("/api/instagram/senders/{igsid}")
+def allow_instagram_sender(igsid: str) -> dict[str, Any]:
+    from backend.config import allow_sender
+
+    allow_sender(igsid, allowed=True)
+    return instagram_status()
+
+
+@app.delete("/api/instagram/senders/{igsid}")
+def disallow_instagram_sender(igsid: str) -> dict[str, Any]:
+    from backend.config import allow_sender
+
+    allow_sender(igsid, allowed=False)
+    return instagram_status()
+
+
+@app.get("/api/instagram/events")
+def list_instagram_events(limit: int = 50) -> list[dict[str, Any]]:
+    from backend.instagram.store import InstagramEventStore
+
+    rows = InstagramEventStore().recent(limit=max(1, min(limit, 200)))
+    # The payload is kept for reprocessing and is not something to hand a
+    # browser: it carries whatever Instagram sent, verbatim.
+    return [{k: v for k, v in dict(row).items() if k != "payload"} for row in rows]
+
+
+@app.post("/api/instagram/events/{event_id}/retry")
+def retry_instagram_event(event_id: int) -> dict[str, Any]:
+    from backend.instagram.store import InstagramEventStore
+
+    if not InstagramEventStore().requeue(event_id):
+        raise HTTPException(404, f"no instagram event {event_id}")
+    _instagram.nudge()
+    return {"status": "queued", "id": event_id}
 
 
 # --------------------------------------------------------------- journal

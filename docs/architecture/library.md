@@ -75,6 +75,61 @@ Text is capped at `MAX_TEXT_CHARS` (120,000). A 2 MB page is roughly 1,250
 chunks and 40 embedding batches — minutes inside one POST, which is
 indistinguishable from a hang.
 
+## Saying what a thing is about
+
+`backend/library/enrich.py` turns an item's text into a summary, three to eight
+tags, and the concrete things it names -- a place, a product, a book, a recipe.
+That list is the point: it is what makes a library answer "where was that
+restaurant" rather than "here are forty links".
+
+**It runs on text that exists, or it does not run.** `text_source` records where
+an item's words came from -- `caption`, `transcript`, `page`, `notes`, or `none`
+-- and `none` is a hard structural refusal: `enrich_text` returns before a model
+client is resolved, and a test asserts the model is never called. Summarising a
+reel that arrived with a title and no words would be inventing from a filename,
+and the invention would be indistinguishable from the real thing on the page.
+
+The result is stored **twice**, and neither place alone would do. The columns are
+what the interface renders without parsing markdown. The item's own file gets it
+too, and is re-indexed -- which is what puts the summary and the tags into search,
+so "that video about coffee grind" finds a reel whose transcript never says the
+phrase.
+
+The file keeps the two kinds of words apart on purpose:
+
+```markdown
+# Pour-over ratios that actually matter
+
+A short reel arguing grind size dominates brew ratio below 1:16...
+
+Tags: coffee, pour-over, grind-size
+
+## Mentioned
+- product — Comandante C40: the grinder used
+- place — Small Street Espresso: in Bristol
+
+## Transcript
+so the thing nobody tells you about pour over is ...
+
+---
+_Summary, tags and the list above were written by groq:... from the transcript.
+The transcript is what was said._
+```
+
+The `## Transcript` heading is also what lets the source text be read back out on
+a re-enrich -- without it, enriching twice would summarise the previous summary.
+
+## Media
+
+A captured video is downloaded only to be transcribed, and discarded afterwards
+unless `instagram.keep_video` is on: twenty reels a day at fifteen megabytes is
+nine gigabytes a year, and the words are the part worth keeping. Thumbnails
+(~50 KB) stay. All of it lives under `~/.psok/library/media/` rather than beside
+the markdown, which is a directory a person browses.
+
+`LibraryService.remove` unlinks all three files. Without that, deleting an item
+would leave an orphaned mp4 nothing would ever clean up.
+
 ## Getting a link in from elsewhere
 
 Two mechanisms, and they are not the same thing.

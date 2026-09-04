@@ -39,6 +39,20 @@ _UPDATABLE = frozenset(
         "text_path",
         "capture_note",
         "word_count",
+        # Enrichment and media. Every one of these has to be named here or
+        # `update()` drops it silently -- no error, no write, and a column that
+        # is simply always NULL for reasons nothing reports.
+        "summary",
+        "tags",
+        "resources",
+        "enrichment_note",
+        "enrichment_model",
+        "enriched_at",
+        "text_source",
+        "thumbnail_path",
+        "media_path",
+        "duration_seconds",
+        "source_ref",
     }
 )
 
@@ -73,6 +87,26 @@ def text_path(item_id: int, title: str) -> Path:
     return library_dir() / f"{item_id:06d}-{slugify(title)}.md"
 
 
+def media_dir() -> Path:
+    """Thumbnails and video, kept apart from the text.
+
+    `~/.psok/library/` is a directory a person opens and reads; thirty megabytes
+    of mp4 sitting between the markdown files is noise in the one place the
+    filesystem-is-the-source-of-truth rule was supposed to pay off.
+    """
+    directory = paths().library_media_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def thumbnail_path(item_id: int) -> Path:
+    return media_dir() / f"{item_id:06d}-thumb.jpg"
+
+
+def media_path(item_id: int, suffix: str) -> Path:
+    return media_dir() / f"{item_id:06d}{suffix if suffix.startswith('.') else '.' + suffix}"
+
+
 class LibraryStore:
     def __init__(self, conn: sqlite3.Connection | None = None):
         self.conn = conn or get_connection()
@@ -89,11 +123,12 @@ class LibraryStore:
         consumed_on: str | None = None,
         notes: str | None = None,
         rating: int | None = None,
+        source_ref: str | None = None,
     ) -> int:
         cursor = self.conn.execute(
             "INSERT INTO library_items (kind, title, url, author, site, published_on,"
-            " consumed_on, notes, rating, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " consumed_on, notes, rating, source_ref, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 kind,
                 title,
@@ -104,6 +139,7 @@ class LibraryStore:
                 consumed_on or _today(),
                 notes,
                 rating,
+                source_ref,
                 _now(),
                 _now(),
             ),
@@ -131,6 +167,12 @@ class LibraryStore:
         """The most recent item logged for this URL, if any."""
         return self.conn.execute(
             "SELECT * FROM library_items WHERE url = ? ORDER BY id DESC LIMIT 1", (url,)
+        ).fetchone()
+
+    def by_source_ref(self, ref: str) -> sqlite3.Row | None:
+        """The most recent item logged under this external identity, if any."""
+        return self.conn.execute(
+            "SELECT * FROM library_items WHERE source_ref = ? ORDER BY id DESC LIMIT 1", (ref,)
         ).fetchone()
 
     def by_document(self, document_id: int) -> sqlite3.Row | None:

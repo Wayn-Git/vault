@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Icon from '../components/Icon.jsx'
 import Markdown from '../components/markdown/Markdown.jsx'
 import ToolCallCard from '../components/ToolCallCard.jsx'
@@ -338,6 +339,7 @@ function EscalationCard({ item, onEscalate, onAnyway, disabled }) {
 
 function Msg({
   item, onPin, onApprovePlan, onDiscardPlan, onEditPlanStep, onEscalate, onAnyway, busy,
+  asideTools,
 }) {
   const role = item.kind
 
@@ -408,6 +410,9 @@ function Msg({
     // of those as a reply from PSOK turns three steps of one answer into three
     // answers.
     if (!item.text && item.toolCalls?.length) {
+      // With the panel open the calls are drawn there, and an assistant turn
+      // that only called tools has nothing left to say in the transcript.
+      if (asideTools) return null
       return <>{item.toolCalls.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}</>
     }
     return (
@@ -418,7 +423,7 @@ function Msg({
           <PinButton item={item} onPin={onPin} />
         </div>
         {item.text && <div className="msg-body"><Markdown text={item.text} /></div>}
-        {item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
+        {!asideTools && item.toolCalls?.map((c, i) => <ToolCallCard key={i} call={c} running={false} />)}
       </div>
     )
   }
@@ -434,12 +439,92 @@ function Msg({
   )
 }
 
+/* What the answer cost to produce.
+
+   Every tool call, every stretch of reasoning and the totals at the end. It
+   used to run down the middle of the page between the question and the answer,
+   which meant reading a conversation back meant scrolling past the build log
+   of one. Here it sits beside the answer instead: still complete, still
+   expandable, no longer in the way.
+
+   Rendered through a portal into the shell's slot, so the panel belongs to the
+   workbench while its contents belong to whichever view is open. */
+function RunPanel({ steps, live, liveReasoning, running, onClose, totals }) {
+  const host = typeof document === 'undefined' ? null : document.getElementById('wb-panel')
+  if (!host) return null
+
+  const body = (
+    <>
+      <div className="wb-panel-head">
+        <span className="wb-panel-title">Steps</span>
+        {steps.length > 0 && <span className="wb-panel-count">{steps.length}</span>}
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onClose}
+          title="Hide the steps panel"
+          aria-label="Hide the steps panel"
+        >
+          <Icon name="x" size={14} />
+        </button>
+      </div>
+
+      <div className="wb-panel-body">
+        {steps.length === 0 && !running && (
+          <p className="wb-panel-empty">
+            Nothing has run yet. Tool calls, reasoning and what a turn cost show up here
+            as the agent works.
+          </p>
+        )}
+
+        {steps.map((item) => {
+          if (item.kind === 'reasoning') {
+            return <Reasoning key={item.id} text={item.text} ms={item.ms} />
+          }
+          if (item.kind === 'cost') return null
+          return (
+            <ToolCallCard
+              key={item.id}
+              call={{
+                name: item.name,
+                arguments: item.arguments ?? {},
+                content: item.content,
+                status: item.isError ? 'error' : 'done',
+              }}
+              running={false}
+            />
+          )
+        })}
+
+        {running && liveReasoning && <Reasoning text={liveReasoning} live />}
+        {running && live && <ToolCallCard call={live} running />}
+        {running && !live && !liveReasoning && (
+          <div className="thinking">
+            working
+            <span className="thinking-dots"><i /><i /><i /></span>
+          </div>
+        )}
+      </div>
+
+      {totals && (
+        <div className="wb-panel-foot">
+          <span>{totals.steps} step{totals.steps === 1 ? '' : 's'}</span>
+          <span>{totals.tools} tool{totals.tools === 1 ? '' : 's'}</span>
+          <span className="mono">{formatDuration(totals.durationMs)}</span>
+        </div>
+      )}
+    </>
+  )
+  return createPortal(body, host)
+}
+
 export default function Chat() {
   const {
     health, refreshHealth, setView, toast, registerChat,
     conversations, refreshConvs, activeId, setActiveId, setRenaming,
     refreshCaps, setCapabilitiesTab,
     workspace, setWorkspace, notify,
+    panel, setPanel, compact, view,
   } = useApp()
 
   const [items, setItems] = useState([])
@@ -1095,6 +1180,49 @@ export default function Chat() {
   const onDecide = useCallback((id) => setPending((p) => p.filter((x) => x.id !== id)), [])
 
   const rendered = useMemo(() => buildRendered(items), [items])
+
+  /* Where the machinery goes.
+
+     With the panel open and room to put it, tool calls, reasoning and the cost
+     line move out of the transcript. With it closed -- or on a phone, where
+     there is no fourth column to move them to -- they stay inline exactly as
+     they were, so nothing is ever unreachable. The toggle in the bar is what
+     chooses, and it is the only thing that changes. */
+  const asideTools = panel && !compact
+  const MACHINERY = useMemo(() => new Set(['tool', 'reasoning', 'cost']), [])
+
+  const transcript = useMemo(
+    () => (asideTools ? rendered.filter((i) => !MACHINERY.has(i.kind)) : rendered),
+    [rendered, asideTools, MACHINERY],
+  )
+
+  /* The panel's own list: the same items, plus the tool calls that arrive
+     attached to an assistant turn rather than as steps of their own. */
+  const steps = useMemo(() => {
+    if (!asideTools) return []
+    const out = []
+    for (const item of rendered) {
+      if (item.kind === 'tool' || item.kind === 'reasoning') { out.push(item); continue }
+      if (item.kind === 'assistant' && item.toolCalls?.length) {
+        item.toolCalls.forEach((c, i) => out.push({
+          id: `${item.id}-call-${i}`,
+          kind: 'tool',
+          name: c.name,
+          arguments: c.arguments,
+          content: c.content,
+          isError: c.status === 'error',
+        }))
+      }
+    }
+    return out
+  }, [rendered, asideTools])
+
+  const totals = useMemo(() => {
+    for (let i = rendered.length - 1; i >= 0; i -= 1) {
+      if (rendered[i].kind === 'cost') return rendered[i]
+    }
+    return null
+  }, [rendered])
   const pins = useMemo(() => rendered.filter((i) => i.pinned && i.text), [rendered])
 
   const isEmpty = rendered.length === 0 && turnState === 'idle'
@@ -1451,10 +1579,11 @@ export default function Chat() {
             )}
             <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
               <div className="chat-stream">
-                {rendered.map((item) => (
+                {transcript.map((item) => (
                   <div key={item.id} data-item={item.id} className="stream-item">
                     <Msg
                       item={item}
+                      asideTools={asideTools}
                       onPin={onPin}
                       busy={turnState !== 'idle'}
                       onApprovePlan={approvePlan}
@@ -1468,7 +1597,7 @@ export default function Chat() {
                 {turnState === 'running' && !liveTool && (
                   <div className="msg msg-assistant">
                     <div className="msg-role">psok</div>
-                    {liveReasoning && <Reasoning text={liveReasoning} live={!liveBuffer} />}
+                    {!asideTools && liveReasoning && <Reasoning text={liveReasoning} live={!liveBuffer} />}
                     {liveBuffer ? (
                       <div className="msg-body">
                         <Markdown text={liveBuffer} />
@@ -1486,7 +1615,7 @@ export default function Chat() {
                     )}
                   </div>
                 )}
-                {turnState === 'running' && liveTool && <ToolCallCard call={liveTool} running />}
+                {turnState === 'running' && liveTool && !asideTools && <ToolCallCard call={liveTool} running />}
               </div>
             </div>
             {!atBottom && (
@@ -1502,6 +1631,17 @@ export default function Chat() {
           </>
         )}
       </div>
+
+      {asideTools && view === 'chat' && (
+        <RunPanel
+          steps={steps}
+          live={liveTool}
+          liveReasoning={liveReasoning}
+          running={turnState === 'running'}
+          totals={totals}
+          onClose={() => setPanel(false)}
+        />
+      )}
 
       <ConfirmModal pending={pending} onDecide={onDecide} />
     </div>

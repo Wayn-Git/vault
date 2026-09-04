@@ -179,6 +179,78 @@ On the machine PSOK runs on you need none of this — the Library page's
 bookmarklet opens `/library?url=…` with the link filled in, which is a
 navigation rather than a cross-origin request, so nothing has to be switched on.
 
+## Reaching it from everywhere, with Cloudflare
+
+The Instagram webhook needs a stable public HTTPS address, and the library is
+worth reading from a phone. Both are the same problem: **PSOK has no login and is
+not meant to have one** (ADR-0001), so the identity has to sit in front of it.
+
+Cloudflare Tunnel plus Cloudflare Access does that without changing a line of
+PSOK. The tunnel gives a hostname with no port forwarding and no open inbound
+port; Access puts a Google login in front of the whole thing, free for up to 50
+users. You need a domain on Cloudflare (about £10 a year); a `trycloudflare.com`
+quick tunnel is free but its hostname changes on every restart, which a webhook
+cannot live with.
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create psok
+cloudflared tunnel route dns psok psok.example.com
+```
+
+`~/.cloudflared/config.yml`:
+
+```yaml
+tunnel: psok
+credentials-file: /home/you/.cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: psok.example.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+Point it at the one `psok serve` process, never the Vite dev server. Then in
+Cloudflare Zero Trust:
+
+1. An **Access application** covering `psok.example.com`, policy *Allow* → emails
+   → your address. That is the login for the whole interface.
+2. **One bypass policy**, for the exact path `/api/instagram/webhook`. Meta cannot
+   log in, so that path is protected by its HMAC signature instead.
+
+```bash
+PSOK_CORS_ORIGINS=https://psok.example.com psok serve
+```
+
+### The rule, stated plainly
+
+`/api/share/capture` and `/api/instagram/webhook` are the **only two** paths that
+may ever be bypassed, and each carries its own credential — a bearer token and a
+signature. Every other route runs shell commands, reads your files and reads your
+mail, with no authentication at all.
+
+A bypass on `/api/*`, or on a path *prefix* rather than an exact path, publishes
+all of that to the internet. Widening it by one character is the whole risk.
+
+Keep `psok serve` bound to `127.0.0.1` so the tunnel is the only way in.
+`psok serve --host 0.0.0.0` prints a warning saying exactly this, and
+`psok doctor` reports which of the two endpoints are switched on.
+
+### On a phone
+
+The library is just the site, behind the Access login. To *send* something without
+opening it, an iOS Shortcut or an Android sharing app posting JSON is enough:
+
+```
+URL     https://psok.example.com/api/share/capture
+Method  POST
+Headers Authorization: Bearer <psok share-token --new>
+Body    {"url": "<the shared link>"}
+```
+
+On the machine PSOK runs on you need none of this — the Library page's
+bookmarklet opens it with the link filled in, which is a navigation rather than a
+cross-origin request.
+
 ## What does not survive the split
 
 Honest list, because finding these one at a time is worse.

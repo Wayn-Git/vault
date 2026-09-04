@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -50,6 +51,11 @@ class Paths:
         return self.config_dir / "sandbox.yaml"
 
     @property
+    def library_media_dir(self) -> Path:
+        """Thumbnails and video for library items. See library/store.media_dir."""
+        return self.library_dir / "media"
+
+    @property
     def library_dir(self) -> Path:
         """Where captured text lives, as real files (ADR-0004).
 
@@ -61,7 +67,14 @@ class Paths:
         return self.home / "library"
 
     def ensure(self) -> None:
-        for d in (self.home, self.config_dir, self.skills_dir, self.logs_dir, self.library_dir):
+        for d in (
+            self.home,
+            self.config_dir,
+            self.skills_dir,
+            self.logs_dir,
+            self.library_dir,
+            self.library_media_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -579,3 +592,211 @@ def save_journal_schedule(patch: dict) -> JournalSchedule:
         )
     conn.commit()
     return load_journal_schedule()
+
+
+#: Instagram capture. Off until credentials exist and the user switches it on --
+#: this is the one endpoint here meant to be reachable from the internet, and it
+#: should never become that by default.
+DEFAULT_MAX_VIDEO_MB = 200
+#: Fifteen minutes. A reel is ninety seconds; anything past this is an upload
+#: nobody meant to save, and it is also what keeps extracted audio under the
+#: transcription upload cap (24 kbps mono is roughly 11 MB an hour).
+DEFAULT_MAX_DURATION_SECONDS = 900
+DEFAULT_MEDIA_BUDGET_MB = 2000
+
+_INSTAGRAM_SETTINGS = {
+    "enabled": ("instagram.enabled", False),
+    "owner_ig_id": ("instagram.owner_ig_id", ""),
+    "allow_senders": ("instagram.allow_senders", "[]"),
+    "mentions_from": ("instagram.mentions_from", "allowlist"),
+    "keep_video": ("instagram.keep_video", False),
+    "max_video_mb": ("instagram.max_video_mb", DEFAULT_MAX_VIDEO_MB),
+    "max_duration_seconds": ("instagram.max_duration_seconds", DEFAULT_MAX_DURATION_SECONDS),
+    "media_budget_mb": ("instagram.media_budget_mb", DEFAULT_MEDIA_BUDGET_MB),
+    "enrich": ("instagram.enrich", True),
+    "reply_on_save": ("instagram.reply_on_save", False),
+    "token_expires_on": ("instagram.token_expires_on", ""),
+}
+
+MENTION_SOURCES = ("allowlist", "anyone")
+
+#: Bounds per numeric setting. One shared ceiling would let "megabytes" and
+#: "seconds" be clamped to the same absurd number, which is a setting the
+#: interface offers and the machine cannot honour.
+_INSTAGRAM_BOUNDS = {
+    "max_video_mb": (1, 2000),
+    "max_duration_seconds": (30, 7200),
+    "media_budget_mb": (100, 200_000),
+}
+
+
+@dataclass(frozen=True)
+class InstagramSettings:
+    enabled: bool = False
+    owner_ig_id: str = ""
+    #: IGSIDs allowed to put things in the library. Empty means nothing is
+    #: ingested -- anyone can message a public professional account, and without
+    #: this a stranger fills someone's library.
+    allow_senders: tuple[str, ...] = ()
+    mentions_from: str = "allowlist"
+    keep_video: bool = False
+    max_video_mb: int = DEFAULT_MAX_VIDEO_MB
+    max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS
+    media_budget_mb: int = DEFAULT_MEDIA_BUDGET_MB
+    enrich: bool = True
+    #: Replying is a *write* to a social account, so it is opted into rather than
+    #: assumed -- even though it is what makes the loop feel alive.
+    reply_on_save: bool = False
+    token_expires_on: str = ""
+
+    def allows(self, sender_id: str | None) -> bool:
+        return bool(sender_id) and sender_id in self.allow_senders
+
+    def as_dict(self) -> dict:
+        return {
+            "enabled": self.enabled,
+            "owner_ig_id": self.owner_ig_id,
+            "allow_senders": list(self.allow_senders),
+            "mentions_from": self.mentions_from,
+            "keep_video": self.keep_video,
+            "max_video_mb": self.max_video_mb,
+            "max_duration_seconds": self.max_duration_seconds,
+            "media_budget_mb": self.media_budget_mb,
+            "enrich": self.enrich,
+            "reply_on_save": self.reply_on_save,
+            "token_expires_on": self.token_expires_on,
+        }
+
+
+def _clamp_int(value: object, default: int, low: int, high: int) -> int:
+    try:
+        return min(high, max(low, int(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def load_instagram() -> InstagramSettings:
+    """How Instagram capture is configured. Never raises; a bad row falls back."""
+    try:
+        from backend.db.connection import get_connection
+
+        keys = [key for key, _ in _INSTAGRAM_SETTINGS.values()]
+        placeholders = ",".join("?" * len(keys))
+        rows = get_connection().execute(
+            f"SELECT key, value FROM app_settings WHERE key IN ({placeholders})", keys
+        ).fetchall()
+        stored = {row["key"]: row["value"] for row in rows}
+    except Exception:
+        return InstagramSettings()
+
+    values: dict[str, object] = {}
+    for field_name, (key, default) in _INSTAGRAM_SETTINGS.items():
+        raw = stored.get(key)
+        if raw is None:
+            values[field_name] = () if field_name == "allow_senders" else default
+        elif isinstance(default, bool):
+            values[field_name] = raw == "1"
+        elif field_name == "allow_senders":
+            try:
+                parsed = json.loads(raw)
+                values[field_name] = tuple(str(v) for v in parsed if v)
+            except (ValueError, TypeError):
+                values[field_name] = ()
+        elif field_name == "mentions_from":
+            values[field_name] = raw if raw in MENTION_SOURCES else "allowlist"
+        elif isinstance(default, int):
+            low, high = _INSTAGRAM_BOUNDS.get(field_name, (1, 100_000))
+            values[field_name] = _clamp_int(raw, default, low, high)
+        else:
+            values[field_name] = raw
+    return InstagramSettings(**values)  # type: ignore[arg-type]
+
+
+def save_instagram(patch: dict) -> InstagramSettings:
+    """Persist only the fields given. Returns the whole thing, as stored."""
+    from backend.db.connection import get_connection
+
+    conn = get_connection()
+    for field_name, (key, default) in _INSTAGRAM_SETTINGS.items():
+        if field_name not in patch or patch[field_name] is None:
+            continue
+        raw = patch[field_name]
+        if isinstance(default, bool):
+            value = "1" if raw else "0"
+        elif field_name == "allow_senders":
+            value = json.dumps([str(v).strip() for v in raw if str(v).strip()])
+        elif field_name == "mentions_from":
+            value = raw if raw in MENTION_SOURCES else "allowlist"
+        elif isinstance(default, int):
+            low, high = _INSTAGRAM_BOUNDS.get(field_name, (1, 100_000))
+            value = str(_clamp_int(raw, default, low, high))
+        else:
+            value = str(raw)
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = datetime('now')",
+            (key, value),
+        )
+    conn.commit()
+    return load_instagram()
+
+
+def allow_sender(igsid: str, *, allowed: bool = True) -> InstagramSettings:
+    """Add or drop one sender. The button behind "@someone sent you a reel"."""
+    current = list(load_instagram().allow_senders)
+    igsid = str(igsid).strip()
+    if allowed and igsid and igsid not in current:
+        current.append(igsid)
+    elif not allowed and igsid in current:
+        current.remove(igsid)
+    return save_instagram({"allow_senders": current})
+
+
+#: Which provider turns speech into text. In providers.yaml beside `tiers:`
+#: rather than in app_settings, because it names a provider and a model and that
+#: is what providers.yaml is for.
+def load_transcription(path: Path | None = None) -> Tier | None:
+    """The configured transcription model, or None. Never raises."""
+    p = path or paths().providers_yaml
+    if not p.exists():
+        return None
+    try:
+        raw = yaml.safe_load(p.read_text()) or {}
+    except yaml.YAMLError:
+        return None
+    block = raw.get("transcription")
+    if not isinstance(block, dict):
+        return None
+    provider, model = block.get("provider"), block.get("model")
+    if not provider or not model:
+        return None
+    if provider not in configured_providers(path):
+        log.warning("transcription names %s, which has no key configured", provider)
+        return None
+    return Tier(provider=str(provider), model=str(model))
+
+
+def save_transcription(provider: str, model: str, path: Path | None = None) -> None:
+    p = path or paths().providers_yaml
+    p.parent.mkdir(parents=True, exist_ok=True)
+    document = yaml.safe_load(p.read_text()) if p.exists() else {}
+    document = document or {}
+    document["transcription"] = {"provider": provider, "model": model}
+    p.write_text(
+        _PROVIDERS_HEADER + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    )
+
+
+def clear_transcription(path: Path | None = None) -> bool:
+    p = path or paths().providers_yaml
+    if not p.exists():
+        return False
+    document = yaml.safe_load(p.read_text()) or {}
+    if "transcription" not in document:
+        return False
+    document.pop("transcription")
+    p.write_text(
+        _PROVIDERS_HEADER + yaml.safe_dump(document, sort_keys=False, default_flow_style=False)
+    )
+    return True

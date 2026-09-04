@@ -20,6 +20,7 @@ because an item with no text and no explanation is indistinguishable from a bug.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -71,10 +72,24 @@ def kind_for(url: str | None) -> str:
     return _KIND_BY_HOST.get(host, "article")
 
 
+def _json_list(raw) -> list:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def as_dict(row) -> dict:
     """One item, as the interface and the model both see it."""
     data = dict(row)
     data["indexed"] = data.get("document_id") is not None
+    # Stored as JSON so the columns stay simple; handed out as lists so nothing
+    # above this line has to know that.
+    data["tags"] = _json_list(data.get("tags"))
+    data["resources"] = _json_list(data.get("resources"))
     return data
 
 
@@ -206,13 +221,25 @@ class LibraryService:
         return Captured(as_dict(self.store.get(item_id)))
 
     async def _store_text(
-        self, item_id: int, title: str, text: str, note: str, *, fetched: bool = True
+        self,
+        item_id: int,
+        title: str,
+        text: str,
+        note: str,
+        *,
+        fetched: bool = True,
+        rendered: bool = False,
     ) -> str:
         """Write the text to disk and index it. Returns the note to record.
 
         `fetched` says whether there was a page to read. A book logged with two
         lines of your own notes is complete; a *page* that returned two lines is
         a paywall, and only the second is worth a note.
+
+        `rendered` says `text` is already the whole document, heading and all --
+        which is how `enrich` hands back a file carrying a summary, tags and a
+        transcript under their own headings. Without it the title would be
+        written twice.
         """
         text = (text or "").strip()
         if not text:
@@ -223,8 +250,9 @@ class LibraryService:
             note = "the page gave up very little text"
 
         path = text_path(item_id, title)
+        document_text = text if rendered else f"# {title}\n\n{text}\n"
         try:
-            path.write_text(f"# {title}\n\n{text}\n", encoding="utf-8")
+            path.write_text(document_text, encoding="utf-8")
         except OSError as exc:
             log.warning("could not write library text for %s: %s", item_id, exc)
             return f"the text could not be saved: {exc}"
@@ -244,6 +272,163 @@ class LibraryService:
         if report == 0 and document is None:
             return note or "the text could not be indexed"
         return note
+
+    async def capture_media(
+        self,
+        *,
+        title: str,
+        kind: str = "video",
+        url: str | None = None,
+        author: str | None = None,
+        site: str | None = None,
+        published_on: str | None = None,
+        consumed_on: str | None = None,
+        notes: str | None = None,
+        source_ref: str | None = None,
+        text: str = "",
+        text_source: str = "none",
+        capture_note: str = "",
+        thumbnail_path: str | None = None,
+        media_path: str | None = None,
+        duration_seconds: int | None = None,
+    ) -> Captured:
+        """Log something whose text PSOK fetched itself, not through a page fetch.
+
+        A reel is neither `capture_url` nor `log_manual`: there was something to
+        fetch, but it did not come from `fetch_readable` and there may be no text
+        at all. This is that third case, and it goes through the same
+        `_store_text` so the "the text is a real file" invariant keeps one owner.
+        """
+        title = (title or "").strip()
+        if not title:
+            raise LibraryError("a title is needed")
+        if kind not in KINDS:
+            raise LibraryError(f"unknown kind '{kind}'. One of: {', '.join(KINDS)}")
+
+        if source_ref:
+            existing = self.store.by_source_ref(source_ref)
+            if existing is not None:
+                # The same reel arriving twice -- a Meta retry that slipped past
+                # the delivery key, or the user sending it again.
+                return Captured(as_dict(existing), already_logged=True)
+
+        item_id = self.store.create(
+            kind=kind,
+            title=title[:400],
+            url=url,
+            author=author,
+            site=site,
+            published_on=published_on,
+            consumed_on=consumed_on or date.today().isoformat(),
+            notes=notes,
+            source_ref=source_ref,
+        )
+        note = await self._store_text(item_id, title, text, capture_note, fetched=False)
+        self.store.update(
+            item_id,
+            capture_note=note or None,
+            text_source=text_source,
+            thumbnail_path=thumbnail_path,
+            media_path=media_path,
+            duration_seconds=duration_seconds,
+        )
+        return Captured(as_dict(self.store.get(item_id)))
+
+    async def replace_text(
+        self,
+        item_id: int,
+        text: str,
+        *,
+        note: str = "",
+        text_source: str | None = None,
+        rendered: bool = False,
+    ) -> dict:
+        """Rewrite an item's text and its index entries.
+
+        The transcript arrives minutes after the row does, and the summary later
+        still. Appending to the file without dropping the old chunks first leaves
+        the caption indexed twice, so one reel comes back as two hits.
+        """
+        row = self.store.get(item_id)
+        if row is None:
+            raise LibraryError(f"no library item {item_id}")
+
+        if row["document_id"]:
+            self._drop_chunks(row["document_id"])
+            # Load-bearing, and not obvious. The indexer skips a file whose
+            # content hash is unchanged, so dropping the chunks and then writing
+            # the same bytes back leaves the item with *no* index at all -- worse
+            # than the double-indexing this method exists to prevent. Marking it
+            # stale is what makes the re-index actually happen.
+            self.indexer.mark_stale(text_path(item_id, row["title"]))
+        stored = await self._store_text(
+            item_id, row["title"], text, note, fetched=False, rendered=rendered
+        )
+        fields: dict = {"capture_note": stored or None}
+        if text_source:
+            fields["text_source"] = text_source
+        self.store.update(item_id, **fields)
+        return as_dict(self.store.get(item_id))
+
+    async def enrich(self, item_id: int, *, client=None) -> dict:
+        """Say what this item is about, from the text it actually has.
+
+        Rewrites the item's file so the summary, the tags and the mentioned
+        things are indexed alongside the source text -- which is what lets "that
+        video about coffee grind" find a reel whose transcript never says the
+        phrase. The source text is read back out of the file first, so
+        re-enriching summarises the transcript again and never the last summary.
+        """
+        from backend.library import enrich as enrichment
+
+        row = self.store.get(item_id)
+        if row is None:
+            raise LibraryError(f"no library item {item_id}")
+
+        body, heading = "", "Text"
+        if row["text_path"]:
+            try:
+                body, heading = enrichment.body_of(
+                    Path(row["text_path"]).read_text(encoding="utf-8")
+                )
+            except OSError as exc:
+                log.warning("could not read library text for %s: %s", item_id, exc)
+
+        text_source = row["text_source"] or ("page" if row["url"] else "none")
+        if text_source == "transcript":
+            heading = "Transcript"
+        elif text_source == "caption":
+            heading = "Caption"
+
+        result = await enrichment.enrich_text(
+            body, title=row["title"], kind=row["kind"], text_source=text_source, client=client
+        )
+
+        self.store.update(
+            item_id,
+            summary=result.summary,
+            tags=json.dumps(list(result.tags)) if result.tags else None,
+            resources=json.dumps(list(result.resources)) if result.resources else None,
+            enrichment_note=result.note,
+            enrichment_model=(
+                f"{result.provider}:{result.model}" if result.provider and result.model else None
+            ),
+            enriched_at=enrichment.stamp(),
+        )
+
+        if body.strip():
+            rendered = enrichment.render_markdown(
+                title=row["title"],
+                body=body,
+                body_heading=heading,
+                enrichment=result,
+                capture_note=row["capture_note"],
+            )
+            await self.replace_text(
+                item_id, rendered, note=row["capture_note"] or "", rendered=True
+            )
+
+        return as_dict(self.store.get(item_id))
 
     # -- maintenance -----------------------------------------------------
 
@@ -305,8 +490,12 @@ class LibraryService:
             self._drop_chunks(row["document_id"])
             conn.execute("DELETE FROM documents WHERE id = ?", (row["document_id"],))
             conn.commit()
-        if row["text_path"]:
-            Path(row["text_path"]).unlink(missing_ok=True)
+        # Every file the item owns, not just the text. A thumbnail is small and
+        # a video is not, and an orphaned mp4 under ~/.psok/library/media with
+        # no row pointing at it is one nothing will ever clean up.
+        for field in ("text_path", "thumbnail_path", "media_path"):
+            if row[field]:
+                Path(row[field]).unlink(missing_ok=True)
         return self.store.delete(item_id)
 
     # -- reading ---------------------------------------------------------

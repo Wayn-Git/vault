@@ -143,6 +143,7 @@ export default function Library() {
         </header>
 
         {showShare && <SharePanel toast={toast} />}
+        {showShare && <InstagramPanel toast={toast} />}
 
         <section className="card card-pad lib-capture" data-enter>
           <div className="card-title">log something</div>
@@ -238,6 +239,7 @@ export default function Library() {
                 item={item}
                 busy={busyId === item.id}
                 onReindex={() => act(item, () => api.reindexLibraryItem(item.id), 'Indexed again')}
+                onEnrich={() => act(item, () => api.enrichLibraryItem(item.id), 'Read and summarised')}
                 onDelete={() => act(item, () => api.deleteLibraryItem(item.id), 'Removed')}
               />
             ))}
@@ -248,10 +250,16 @@ export default function Library() {
   )
 }
 
-function Row({ item, busy, onReindex, onDelete }) {
+function Row({ item, busy, onReindex, onEnrich, onDelete }) {
   return (
     <article className="card lib-row" data-enter>
-      <div className="lib-row-icon"><Icon name={KIND_ICON[item.kind] || 'link'} size={18} /></div>
+      <div className="lib-row-icon">
+        {item.thumbnail_path ? (
+          <img className="lib-thumb" src={api.thumbnailUrl(item.id)} alt="" loading="lazy" />
+        ) : (
+          <Icon name={KIND_ICON[item.kind] || 'link'} size={18} />
+        )}
+      </div>
       <div className="lib-row-body">
         <div className="lib-row-title">
           {item.url
@@ -261,8 +269,29 @@ function Row({ item, busy, onReindex, onDelete }) {
         <div className="lib-row-meta mono">
           {[item.kind, item.author, item.site, fmtDate(item.consumed_on)].filter(Boolean).join(' · ')}
         </div>
-        {item.excerpt ? <p className="lib-row-excerpt">{item.excerpt}</p> : null}
-        {item.notes && !item.excerpt ? <p className="lib-row-excerpt">{item.notes}</p> : null}
+        {/* What it is about, before what matched. A summary is the thing worth
+            reading in a list; the excerpt is only interesting while searching. */}
+        {item.summary ? <p className="lib-row-excerpt">{item.summary}</p> : null}
+        {item.excerpt && !item.summary ? <p className="lib-row-excerpt">{item.excerpt}</p> : null}
+        {item.notes && !item.excerpt && !item.summary
+          ? <p className="lib-row-excerpt">{item.notes}</p>
+          : null}
+        {item.tags?.length ? (
+          <div className="lib-tags">
+            {item.tags.map((tag) => <span className="lib-tag" key={tag}>{tag}</span>)}
+          </div>
+        ) : null}
+        {item.resources?.length ? (
+          <ul className="lib-resources">
+            {item.resources.map((r, i) => (
+              <li key={i}>
+                <span className="lib-resource-kind">{r.type}</span>
+                {r.url ? <a href={r.url} target="_blank" rel="noreferrer">{r.name}</a> : r.name}
+                {r.detail ? <span className="lib-resource-detail"> — {r.detail}</span> : null}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {/* Says exactly what was and was not captured. An item with no text and
             no explanation is indistinguishable from a bug. */}
         {item.capture_note
@@ -270,6 +299,18 @@ function Row({ item, busy, onReindex, onDelete }) {
           : null}
       </div>
       <div className="lib-row-actions">
+        {item.indexed && !item.summary ? (
+          <button
+            type="button"
+            className="btn btn--ghost btn--small"
+            disabled={busy}
+            title="Work out what this is about, from the text it has"
+            aria-label={`Summarise ${item.title}`}
+            onClick={onEnrich}
+          >
+            <Icon name="spark" size={13} />
+          </button>
+        ) : null}
         {item.indexed ? (
           <button
             type="button"
@@ -388,6 +429,181 @@ function SharePanel({ toast }) {
         A token does not make this instance safe to publish. Every other endpoint here is
         unauthenticated by design — if PSOK is reachable from the internet, put a proxy in front
         that exposes <code>/api/share/capture</code> and nothing else. See docs/deployment.md.
+      </p>
+    </section>
+  )
+}
+
+/* Instagram capture: send a reel to the account, and it lands here.
+ *
+ * The panel is mostly about telling the truth about two things. The three
+ * credentials are written and never read back — the server reports only whether
+ * each is present. And the two routes are not equally good: a comment mention
+ * carries the caption and the link, a direct message carries neither, so the
+ * copy says which is which rather than letting somebody find out from a thin
+ * item three weeks later. */
+function InstagramPanel({ toast }) {
+  const [state, setState] = useState(null)
+  const [busy, setBusy] = useState('')
+  const [form, setForm] = useState({ app_secret: '', verify_token: '', access_token: '', owner: '' })
+  const origin = typeof window === 'undefined' ? '' : window.location.origin
+
+  const load = useCallback(async () => {
+    try { setState(await api.instagram()) } catch (err) { toast(err.message, 'bad') }
+  }, [toast])
+
+  useEffect(() => { load() }, [load])
+
+  const run = async (key, work, note) => {
+    setBusy(key)
+    try {
+      setState(await work())
+      if (note) toast(note, 'ok')
+    } catch (err) {
+      toast(err.message, 'bad')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  if (!state) return null
+  const { settings, credentials, configured } = state
+  const missing = Object.entries(credentials).filter(([, ok]) => !ok).map(([k]) => k)
+
+  return (
+    <section className="card card-pad lib-share" data-enter>
+      <div className="card-title">save from instagram</div>
+      <p className="set-note">
+        Comment <code>@your.account</code> on a reel and it is saved with its link and its
+        full caption — that is the route worth using. Sending the reel as a direct message
+        also works, but Instagram passes on the video and a title and <em>no</em> caption
+        and <em>no</em> link, so those are only searchable once the audio has been
+        transcribed.
+      </p>
+
+      {!configured ? (
+        <>
+          <p className="set-note">
+            From your Meta app: the app secret, a verify token you invent, and a long-lived
+            Instagram access token. They go straight to the OS keychain — nothing reads them
+            back out. Still missing: <b>{missing.join(', ')}</b>.
+          </p>
+          <div className="lib-manual-grid">
+            <input className="lib-input" placeholder="App secret" type="password"
+              value={form.app_secret} onChange={(e) => setForm({ ...form, app_secret: e.target.value })} />
+            <input className="lib-input" placeholder="Verify token (you choose this)"
+              value={form.verify_token} onChange={(e) => setForm({ ...form, verify_token: e.target.value })} />
+            <input className="lib-input" placeholder="Access token" type="password"
+              value={form.access_token} onChange={(e) => setForm({ ...form, access_token: e.target.value })} />
+            <input className="lib-input" placeholder="Your Instagram account id"
+              value={form.owner} onChange={(e) => setForm({ ...form, owner: e.target.value })} />
+          </div>
+          <div className="set-inline" style={{ marginTop: 12 }}>
+            <button type="button" className="btn btn--primary btn--small" disabled={busy === 'save'}
+              onClick={() => run('save', async () => {
+                const saved = await api.saveInstagramCredentials({
+                  app_secret: form.app_secret || null,
+                  verify_token: form.verify_token || null,
+                  access_token: form.access_token || null,
+                  expires_in_days: form.access_token ? 60 : null,
+                })
+                if (form.owner) await api.updateInstagram({ owner_ig_id: form.owner })
+                setForm({ app_secret: '', verify_token: '', access_token: '', owner: '' })
+                return saved
+              }, 'Stored')}>
+              {busy === 'save' ? 'Saving…' : 'Save credentials'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="set-rows">
+          <div className="set-row">
+            <span>
+              Accepting deliveries
+              <span className="set-sub">
+                Webhook URL: <code>{origin}{state.webhook_path}</code>
+              </span>
+            </span>
+            <span className="set-row-tail">
+              <button type="button" className={`btn btn--small${settings.enabled ? ' btn--primary' : ''}`}
+                aria-pressed={settings.enabled} disabled={busy === 'toggle'}
+                onClick={() => run('toggle',
+                  () => api.updateInstagram({ enabled: !settings.enabled }),
+                  settings.enabled ? 'Capture off' : 'Capture on')}>
+                {settings.enabled ? 'On' : 'Off'}
+              </button>
+            </span>
+          </div>
+
+          <div className="set-row">
+            <span>
+              Who may save things
+              <span className="set-sub">
+                {settings.allow_senders.length
+                  ? `Allowed: ${settings.allow_senders.join(', ')}`
+                  : 'Nobody yet — anyone can message a public account, so nothing is saved until you say who.'}
+              </span>
+            </span>
+          </div>
+
+          {state.unknown_senders.map((sender) => (
+            <div className="set-row" key={sender.sender_id}>
+              <span>
+                {sender.sender_id} sent you something
+                <span className="set-sub">turned away {sender.attempts}× — not on the allowlist</span>
+              </span>
+              <span className="set-row-tail">
+                <button type="button" className="btn btn--small" disabled={busy === sender.sender_id}
+                  onClick={() => run(sender.sender_id,
+                    () => api.allowInstagramSender(sender.sender_id), 'Allowed')}>
+                  Allow
+                </button>
+              </span>
+            </div>
+          ))}
+
+          <div className="set-row">
+            <span>
+              Reply “Saved” on Instagram
+              <span className="set-sub">A write to your account, so it is off unless you ask</span>
+            </span>
+            <span className="set-row-tail">
+              <button type="button" className={`btn btn--small${settings.reply_on_save ? ' btn--primary' : ''}`}
+                aria-pressed={settings.reply_on_save} disabled={busy === 'reply'}
+                onClick={() => run('reply', () => api.updateInstagram({ reply_on_save: !settings.reply_on_save }))}>
+                {settings.reply_on_save ? 'On' : 'Off'}
+              </button>
+            </span>
+          </div>
+
+          <div className="set-row">
+            <span>
+              Transcription
+              <span className="set-sub">
+                {state.transcription
+                  ? `${state.transcription.provider} · ${state.transcription.model}`
+                  : 'None configured — a reel sent as a message will have no text at all'}
+                {state.ffmpeg ? '' : ' · ffmpeg is not installed'}
+              </span>
+            </span>
+          </div>
+        </div>
+      )}
+
+      {state.token_expires_in_days !== null && state.token_expires_in_days < 14 ? (
+        <p className="lib-token">
+          <code>
+            The Instagram token expires in {state.token_expires_in_days} days. Once it lapses it
+            cannot be refreshed — only replaced.
+          </code>
+        </p>
+      ) : null}
+
+      <p className="set-note">
+        This webhook is reachable from the internet by design, and its only authentication is
+        Meta’s signature on each delivery. Every other endpoint here is unauthenticated — put a
+        proxy in front that publishes <code>{state.webhook_path}</code> and nothing else. See
+        docs/deployment.md.
       </p>
     </section>
   )

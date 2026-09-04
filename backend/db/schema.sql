@@ -396,9 +396,32 @@ CREATE TABLE IF NOT EXISTS library_items (
     text_path    TEXT,
     capture_note TEXT,              -- why the text is thin or absent, when it is
     word_count   INTEGER,
+    -- What the model wrote about this item, and only ever from text that
+    -- actually exists. NULL is the ordinary state for a reel with no caption and
+    -- no speech; `enrichment_note` says which, in a sentence.
+    summary          TEXT,
+    tags             TEXT,     -- JSON array of strings
+    resources        TEXT,     -- JSON array of {type, name, detail, url}
+    enrichment_note  TEXT,     -- why there is no summary, when there is none
+    enrichment_model TEXT,     -- "provider:model", so what wrote it stays answerable
+    enriched_at      TEXT,
+    -- Where the indexed text came from. 'caption' and 'transcript' are words
+    -- somebody actually wrote or said; 'none' is the honest empty state, and is
+    -- what forbids enrichment outright rather than by asking a prompt nicely.
+    text_source      TEXT,     -- caption | transcript | page | notes | none
+    thumbnail_path   TEXT,
+    media_path       TEXT,     -- the video, while it is kept; NULL once discarded
+    duration_seconds INTEGER,  -- from ffprobe, never estimated
+    -- External identity for things that arrive rather than being pasted, e.g.
+    -- "instagram:media:17895..." or "instagram:reel:{video_id}". Not unique --
+    -- saving the same reel again a year later is a real event -- but it is what
+    -- lets an ingest offer the existing row instead of making a second one.
+    source_ref       TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_library_source_ref
+    ON library_items(source_ref) WHERE source_ref IS NOT NULL;
 -- Not unique: re-reading something a year later is a real event worth logging
 -- twice. Capture looks here first and offers what it finds rather than refusing.
 CREATE INDEX IF NOT EXISTS idx_library_url ON library_items(url) WHERE url IS NOT NULL;
@@ -428,3 +451,38 @@ CREATE TABLE IF NOT EXISTS brand_profile (
     fonts       TEXT,   -- JSON array of {role, family}
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Inbound Instagram webhooks, written down before they are acted on.
+--
+-- The table exists because Meta wants a 200 within seconds and the work behind
+-- one delivery -- a Graph call, a video download, ffmpeg, a transcription, a
+-- model call -- takes minutes. A FastAPI BackgroundTask dies with the process,
+-- so a crash between the acknowledgement and the capture is a reel the user
+-- watched Instagram accept and then never saw, with no retry because we already
+-- said 200. Here the acknowledgement means "written down", and a runner drains
+-- it -- the same bargain automations and the journal already make.
+--
+-- `payload` is the entry verbatim. Reprocessing after a bug is then setting
+-- status back to 'queued', rather than re-parsing a body nobody kept.
+CREATE TABLE IF NOT EXISTS instagram_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- One webhook *fact*, stable across Meta's retries: "mention:{media}:{comment}"
+    -- or "dm:{mid}", falling back to a hash of the entry when it carries neither.
+    delivery_key    TEXT NOT NULL,
+    route           TEXT NOT NULL,   -- mention|dm_reel|dm_share|dm_link|unsupported
+    sender_id       TEXT,            -- the IGSID of whoever sent it
+    payload         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued', 'working', 'done', 'failed', 'ignored')),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    library_item_id INTEGER REFERENCES library_items(id) ON DELETE SET NULL,
+    note            TEXT,            -- why it failed or was ignored, in a sentence
+    received_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at      TEXT,
+    finished_at     TEXT
+);
+-- The idempotency key, owned by the database rather than by the handler looking
+-- first. Meta re-delivers anything it did not see a 200 for, and two deliveries
+-- of one comment must not become two rows in the library.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ig_delivery ON instagram_events(delivery_key);
+CREATE INDEX IF NOT EXISTS idx_ig_pending ON instagram_events(status, id);

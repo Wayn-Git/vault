@@ -97,9 +97,15 @@ def cmd_doctor(_: argparse.Namespace) -> int:
 
     print(f"sandbox:   {platform_backend() or unavailable_reason()}")
 
+    from datetime import date
+
     from backend import share
-    from backend.config import load_journal_schedule
+    from backend.config import load_instagram, load_journal_schedule
+    from backend.instagram import signature as ig_signature
+    from backend.instagram.store import InstagramEventStore
     from backend.library.store import LibraryStore
+    from backend.media.audio import ffmpeg_missing
+    from backend.runtime.transcribe import resolve_transcriber
 
     schedule = load_journal_schedule()
     print(
@@ -113,6 +119,38 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     # Sharing is the one thing here that can be reached from another machine, so
     # it is reported whether it is on or off -- a token somebody created months
     # ago and forgot is exactly the thing a status command exists to surface.
+    settings = load_instagram()
+    creds = ig_signature.present()
+    if settings.enabled and ig_signature.configured():
+        print("instagram: on -- POST /api/instagram/webhook")
+        allowed = ", ".join(settings.allow_senders) or "nobody yet"
+        print(f"           senders allowed: {allowed}")
+        print(f"           mentions accepted from: {settings.mentions_from}")
+        counts = InstagramEventStore().counts()
+        if counts:
+            print("           queue: " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+        if settings.token_expires_on:
+            try:
+                left = (date.fromisoformat(settings.token_expires_on) - date.today()).days
+                warn = "  <-- reconnect in Settings" if left < 14 else ""
+                print(f"           token expires {settings.token_expires_on} ({left} days){warn}")
+            except ValueError:
+                pass
+        transcriber = resolve_transcriber()
+        print(
+            "           transcription: "
+            + (f"{transcriber[0].name} / {transcriber[1]}" if transcriber else "none configured"
+               " -- reels will be saved with a title only")
+        )
+        print(f"           ffmpeg: {'yes' if ffmpeg_missing() is None else 'MISSING'}")
+        print("           This endpoint is reachable from the internet by design.")
+        print("           Its only authentication is Meta's signature on each delivery.")
+    elif any(creds.values()):
+        missing = ", ".join(name for name, ok in creds.items() if not ok)
+        print(f"instagram: not ready -- still missing: {missing or 'the on switch'}")
+    else:
+        print("instagram: off (no credentials)")
+
     if share.enabled():
         print("share:     a capture token is set -- POST /api/share/capture accepts it")
         print("           revoke it with: psok share-token --revoke")
@@ -845,6 +883,177 @@ def cmd_share_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_instagram(args: argparse.Namespace) -> int:
+    """Set up, inspect and exercise Instagram capture."""
+    import asyncio
+    import json as _json
+    from datetime import date, timedelta
+
+    from backend.config import allow_sender, load_instagram, save_instagram
+    from backend.instagram import signature
+    from backend.instagram.store import InstagramEventStore
+    from backend.secrets import CredentialError
+
+    action = args.action
+    store = InstagramEventStore()
+
+    if action == "status":
+        settings = load_instagram()
+        print(f"enabled:   {settings.enabled}")
+        for name, ok in signature.present().items():
+            print(f"{name + ':':10} {'set' if ok else 'not set'}")
+        print(f"owner id:  {settings.owner_ig_id or 'not set'}")
+        print(f"senders:   {', '.join(settings.allow_senders) or 'nobody yet'}")
+        print(f"mentions:  from {settings.mentions_from}")
+        counts = store.counts()
+        print("queue:     " + (", ".join(f"{n} {k}" for k, n in sorted(counts.items())) or "empty"))
+        for row in store.unknown_senders():
+            print(f"           {row['sender_id']} was turned away {row['attempts']}x"
+                  f" -- allow with: psok instagram senders --allow {row['sender_id']}")
+        return 0
+
+    if action == "credentials":
+        try:
+            signature.set_credentials(
+                app_secret=args.app_secret,
+                verify_token=args.verify_token,
+                access_token=args.access_token,
+            )
+        except CredentialError as exc:
+            print(f"could not store: {exc}")
+            return 1
+        if args.access_token:
+            save_instagram(
+                {"token_expires_on": (date.today() + timedelta(days=60)).isoformat()}
+            )
+        if args.owner_id:
+            save_instagram({"owner_ig_id": args.owner_id})
+        print("stored. Switch capture on with: psok instagram enable")
+        return 0
+
+    if action in ("enable", "disable"):
+        if action == "enable" and not signature.configured():
+            print("the app secret, verify token and access token all have to be set first")
+            return 1
+        save_instagram({"enabled": action == "enable"})
+        print(f"capture {'on' if action == 'enable' else 'off'}")
+        return 0
+
+    if action == "senders":
+        if args.allow:
+            print("allowed:", ", ".join(allow_sender(args.allow).allow_senders))
+        elif args.deny:
+            print("allowed:", ", ".join(allow_sender(args.deny, allowed=False).allow_senders)
+                  or "nobody")
+        else:
+            print(", ".join(load_instagram().allow_senders) or "nobody yet")
+        return 0
+
+    if action == "queue":
+        rows = store.recent(limit=args.limit)
+        if not rows:
+            print("nothing has arrived yet")
+            return 0
+        for row in rows:
+            print(f"#{row['id']:<4} {row['status']:<8} {row['route']:<12}"
+                  f" from {row['sender_id'] or '?':<18} {row['note'] or ''}")
+        return 0
+
+    if action == "retry":
+        if not store.requeue(args.id):
+            print(f"no instagram event {args.id}")
+            return 1
+        print(f"event {args.id} is queued again; it runs on the next tick")
+        return 0
+
+    if action == "send-sample":
+        return _send_sample(args, _json, asyncio)
+
+    print(f"unknown action '{action}'")
+    return 2
+
+
+#: Sample deliveries, in the shapes Meta actually sends. Shared with the tests so
+#: the fixtures and the manual loop cannot drift apart.
+def _sample_body(route: str) -> dict:
+    import time
+
+    now = int(time.time())
+    reel = {
+        "type": "ig_reel",
+        "payload": {
+            "title": "a reel someone sent you",
+            "url": "https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=1",
+            "video_id": "9",
+        },
+    }
+    messaging = {
+        "sender": {"id": "555"},
+        "recipient": {"id": "17841400000000000"},
+        "timestamp": now * 1000,
+        "message": {"mid": f"m_{now}", "attachments": [reel]},
+    }
+    if route == "dm-link":
+        messaging["message"] = {
+            "mid": f"m_{now}",
+            "text": "look at this https://www.instagram.com/reel/ABC123/",
+        }
+    elif route == "unsupported":
+        messaging["message"] = {"mid": f"m_{now}", "is_unsupported": True, "attachments": []}
+
+    entry: dict = {"id": "17841400000000000", "time": now}
+    if route == "mention":
+        entry["changes"] = [
+            {
+                "field": "mentions",
+                "value": {"media_id": "17895000000000", "comment_id": f"c_{now}"},
+            }
+        ]
+    else:
+        entry["messaging"] = [messaging]
+    return {"object": "instagram", "entry": [entry]}
+
+
+def _send_sample(args: argparse.Namespace, _json, asyncio) -> int:
+    """Post a correctly signed sample at a running server.
+
+    The only way to exercise the real path repeatedly without Instagram -- and
+    the signature is computed over the exact bytes sent, which is the part that
+    is easy to get wrong by hand.
+    """
+    import hashlib
+    import hmac
+
+    import httpx
+
+    from backend.instagram import signature
+
+    secret = signature.app_secret()
+    if not secret:
+        print("no app secret is stored. Set one with: psok instagram credentials --app-secret ...")
+        return 1
+
+    raw = _json.dumps(_sample_body(args.route)).encode()
+    digest = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    url = args.url.rstrip("/") + "/api/instagram/webhook"
+    try:
+        response = httpx.post(
+            url,
+            content=raw,
+            headers={
+                "content-type": "application/json",
+                "x-hub-signature-256": f"sha256={digest}",
+            },
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
+        print(f"could not reach {url}: {exc}")
+        return 1
+    print(f"HTTP {response.status_code} {response.text[:200]}")
+    print("watch it with: psok instagram queue")
+    return 0
+
+
 # --- secrets ----------------------------------------------------------------
 #
 # providers.yaml and the docs have told people to run `psok secrets set` since
@@ -985,6 +1194,32 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="report configuration and component status").set_defaults(
         func=cmd_doctor
     )
+
+    instagram = sub.add_parser("instagram", help="capture reels sent to an Instagram account")
+    ig = instagram.add_subparsers(dest="action", required=True)
+    ig.add_parser("status", help="what is set up, and what is waiting")
+    creds = ig.add_parser("credentials", help="store the three Meta secrets")
+    creds.add_argument("--app-secret", help="signs every delivery; from the Meta app dashboard")
+    creds.add_argument("--verify-token", help="any string; paste the same one into Meta")
+    creds.add_argument("--access-token", help="the long-lived Instagram access token")
+    creds.add_argument("--owner-id", help="the Instagram professional account's own id")
+    ig.add_parser("enable", help="start accepting deliveries")
+    ig.add_parser("disable", help="stop accepting deliveries")
+    senders = ig.add_parser("senders", help="who may put things in your library")
+    senders.add_argument("--allow", metavar="IGSID")
+    senders.add_argument("--deny", metavar="IGSID")
+    queue = ig.add_parser("queue", help="what has arrived")
+    queue.add_argument("--limit", type=int, default=20)
+    retry = ig.add_parser("retry", help="run one delivery again")
+    retry.add_argument("id", type=int)
+    sample = ig.add_parser(
+        "send-sample", help="post a correctly signed sample delivery at a running server"
+    )
+    sample.add_argument(
+        "--route", default="dm-reel", choices=["dm-reel", "dm-link", "mention", "unsupported"]
+    )
+    sample.add_argument("--url", default="http://127.0.0.1:8000")
+    instagram.set_defaults(func=cmd_instagram)
 
     token = sub.add_parser(
         "share-token", help="the capture token a phone can post a link with"
